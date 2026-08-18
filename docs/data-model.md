@@ -23,6 +23,14 @@ Every write inserts a `tx(tx_id, tx_time, agent_id, reason)` row; `tx_id` is the
 ## Blobs
 Content-addressed files (`blob`, `blob_ref`, `blob_pin`); attach to any node/edge **version**.
 
+## Mini-skills and traps
+`skill` / `skill_version` — documented procedures, immutable per version exactly like the tool
+registry (yank, never delete; only the newest non-yanked version is indexed in `skill_fts`).
+`trap` — recorded dead-ends: `what_failed` + `symptom` are NOT NULL by design, optional
+`node_id` and `subject_key`/`subject_version` scope it, and `status`
+(`active`/`disputed`/`retired`) makes it falsifiable. Indexed in `trap_fts`; every record and
+status change writes a `tx` row for provenance. Details: [skills-and-traps.md](skills-and-traps.md).
+
 ## Schema, tools, guide
 `node_type`/`edge_type` (versioned, additive-only, proposed→active; operator `apply_pack` is
 idempotent — byte-identical types are skipped, so re-applying a pack causes no version churn);
