@@ -72,3 +72,22 @@ def test_apply_pack_defines_edges_with_traits(fresh):
     assert by["contradicts"]["assertive"] == 1 and by["contradicts"]["symmetric"] == 1
     assert by["calls"]["versioned"] == 0
     assert sch["schema_version"] >= 2
+
+
+def test_apply_pack_idempotent(fresh):
+    pack = {"name": "p",
+            "node_types": {"thing": {"schema": {"type": "object",
+                           "properties": {"x": {"type": "string"}}}}},
+            "edge_types": {"rel": {"schema": {"type": "object"}, "versioned": True,
+                                   "symmetric": True}}}
+    r1 = schemas.apply_pack(fresh, "op", pack)
+    assert r1["created"]["node"] == ["thing@1"] and r1["created"]["edge"] == ["rel@1"]
+    # re-apply the identical pack -> no new versions
+    r2 = schemas.apply_pack(fresh, "op", pack)
+    assert r2["created"] == {"node": [], "edge": []}
+    assert r2["unchanged"] == {"node": ["thing"], "edge": ["rel"]}
+    assert schemas.get_schema(fresh, kind="node", name="thing")["node_types"][0]["version"] == 1
+    # a real change still bumps
+    pack["node_types"]["thing"]["schema"]["properties"]["y"] = {"type": "string"}
+    r3 = schemas.apply_pack(fresh, "op", pack)
+    assert r3["created"]["node"] == ["thing@2"]

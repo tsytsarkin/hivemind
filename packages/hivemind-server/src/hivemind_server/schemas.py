@@ -235,6 +235,36 @@ def promote_type(db: Database, agent_id: str, kind: str, name: str,
         return {"kind": kind, "name": name, "version": version, "status": "active"}
 
 
+def _type_unchanged(cur, kind: str, name: str, json_schema: dict,
+                    traits: Optional[dict]) -> bool:
+    """True if the current usable type already matches (schema + edge traits) — makes re-apply
+    idempotent instead of inflating versions."""
+    cur_t = usable_type(cur, kind, name)
+    if cur_t is None:
+        return False
+    if json.loads(cur_t["json_schema"]) != json_schema:
+        return False
+    if kind == "edge" and traits is not None:
+        want = {
+            "src_types": traits.get("src_types") if traits.get("src_types") is not None else ["*"],
+            "dst_types": traits.get("dst_types") if traits.get("dst_types") is not None else ["*"],
+            "cardinality": traits.get("cardinality") or "N:N",
+            "directed": 1 if traits.get("directed") in (None, True, 1) else 0,
+            "symmetric": 1 if traits.get("symmetric") in (True, 1) else 0,
+            "transitive": 1 if traits.get("transitive") in (True, 1) else 0,
+            "acyclic": 1 if traits.get("acyclic") in (True, 1) else 0,
+            "versioned": 1 if traits.get("versioned") in (None, True, 1) else 0,
+            "assertive": 1 if traits.get("assertive") in (True, 1) else 0,
+        }
+        if json.loads(cur_t["src_types"]) != want["src_types"]: return False
+        if json.loads(cur_t["dst_types"]) != want["dst_types"]: return False
+        for k in ("cardinality", "directed", "symmetric", "transitive", "acyclic",
+                  "versioned", "assertive"):
+            if cur_t[k] != want[k]:
+                return False
+    return True
+
+
 def apply_pack(db: Database, agent_id: str, pack: dict, *, force: bool = True) -> dict:
     """Operator: load a domain pack's schema. Defines node/edge types as ACTIVE directly.
 
@@ -244,24 +274,29 @@ def apply_pack(db: Database, agent_id: str, pack: dict, *, force: bool = True) -
     created = {"node": [], "edge": []}
     with db.write(agent_id, f"apply_pack {pack.get('name','?')}") as tx:
         cur = tx.cur
+        unchanged = {"node": [], "edge": []}
         for name, spec in (pack.get("node_types") or {}).items():
             spec = spec or {}
+            schema = spec.get("schema", {"type": "object"})
+            if _type_unchanged(cur, "node", name, schema, None):
+                unchanged["node"].append(name); continue
             existing = usable_type(cur, "node", name)
             if existing is not None and not force:
-                reason = _additive_ok(json.loads(existing["json_schema"]),
-                                      spec.get("schema", {"type": "object"}))
+                reason = _additive_ok(json.loads(existing["json_schema"]), schema)
                 if reason:
                     raise Invalid(f"pack change to node {name!r} non-additive: {reason}")
-            v = define_type(cur, tx, "node", name, spec.get("schema", {"type": "object"}),
-                            status="active", traits={"parent": spec.get("parent")})
+            v = define_type(cur, tx, "node", name, schema, status="active",
+                            traits={"parent": spec.get("parent")})
             created["node"].append(f"{name}@{v}")
         for name, spec in (pack.get("edge_types") or {}).items():
             spec = spec or {}
             traits = {k: spec.get(k) for k in _EDGE_TRAITS}
-            v = define_type(cur, tx, "edge", name, spec.get("schema", {"type": "object"}),
-                            status="active", traits=traits)
+            schema = spec.get("schema", {"type": "object"})
+            if _type_unchanged(cur, "edge", name, schema, traits):
+                unchanged["edge"].append(name); continue
+            v = define_type(cur, tx, "edge", name, schema, status="active", traits=traits)
             created["edge"].append(f"{name}@{v}")
-        return {"pack": pack.get("name"), "created": created}
+        return {"pack": pack.get("name"), "created": created, "unchanged": unchanged}
 
 
 def get_schema(db: Database, *, kind: Optional[str] = None,
