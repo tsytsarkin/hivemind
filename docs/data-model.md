@@ -24,5 +24,6 @@ Every write inserts a `tx(tx_id, tx_time, agent_id, reason)` row; `tx_id` is the
 Content-addressed files (`blob`, `blob_ref`, `blob_pin`); attach to any node/edge **version**.
 
 ## Schema, tools, guide
-`node_type`/`edge_type` (versioned, additive-only, proposed→active); `tool`/`tool_version`
-(immutable, yankable); `guide_section`/`guide_proposal` (human-gated).
+`node_type`/`edge_type` (versioned, additive-only, proposed→active; operator `apply_pack` is
+idempotent — byte-identical types are skipped, so re-applying a pack causes no version churn);
+`tool`/`tool_version` (immutable, yankable); `guide_section`/`guide_proposal` (human-gated).

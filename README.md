@@ -16,7 +16,7 @@ live guide). Meaning is data — shipped as a swappable **domain pack** (`packs/
 | `packages/hivemind-server/` | The server: MCP (streamable HTTP) + REST, SQLite-backed. Python ≥3.11. |
 | `packages/hivemind-client/` | The client library + `hivemind` CLI. Python ≥3.9, only dep is `httpx`. |
 | `plugin/` | The Claude Code plugin (MCP config + self-updating bootstrap skill). |
-| `packs/security-research/` | Example domain pack (iOS/macOS RE vocabulary) — optional, swappable. |
+| `packs/` | Optional, swappable, **layerable** domain packs (schema + guide). Ships `security-research` and `ios-macos-attack-surface`. See [docs/packs.md](docs/packs.md). |
 | `deploy/` | Deploy docs, systemd unit, Litestream backup, bootstrap + relock scripts. |
 | `docs/` | Data model, API, guide authoring, security notes. |
 
@@ -37,6 +37,18 @@ Client anywhere (incl. stock Python 3.9):
 ```sh
 pip install -r deploy/requirements-client.txt && pip install --no-deps ./packages/hivemind-client
 ```
+
+## Domain packs
+
+A *pack* = `schema.json` (node/edge types with generic traits) + optional `guide/*.md`. Packs are
+**additive and layerable** — apply several to one project and they compose (a later pack may widen
+an earlier type's enum or add fields, and add new types/edges). Re-applying a pack is **idempotent**
+(byte-identical types are skipped, no version churn). Apply one:
+```sh
+hivemind-admin --project default apply-pack packs/security-research/schema.json   # operator, on host
+hivemind schema apply packs/ios-macos-attack-surface/schema.json                  # or remote (client)
+```
+See [docs/packs.md](docs/packs.md) and the [full docs](docs/) (data model, API, security, guides).
 
 ## Reproducible dependencies
 
