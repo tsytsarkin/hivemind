@@ -44,6 +44,60 @@ hivemind schema apply packs/<name>/schema.json
 ```
 `apply_pack` returns `{created, unchanged}`. It defines types as **active**.
 
+## Schema mechanics (how it actually works)
+
+**Types are data, not DDL.** Node and edge *types* live as rows in `node_type` / `edge_type`
+inside each project's database. Hivemind never runs `ALTER TABLE` at runtime — adding a type is an
+INSERT, so the engine itself stays domain-free and a project can grow new vocabulary while it runs.
+
+**Every type is versioned; nothing is mutated in place.** Changing a type mints `name@N+1` and
+leaves `name@N` intact. Writes validate against the newest *usable* version (active preferred, else
+proposed).
+
+**Old data is never retro-validated.** Each `node_version` / `edge_version` records the
+`schema_ver` that validated it. A node written under `finding@1` stays valid forever, even after
+`finding@4` exists. This is what makes schema evolution safe on a live graph.
+
+**Two ways a type enters a project:**
+
+| | `schema_propose` (agents) | `apply_pack` (operators) |
+|---|---|---|
+| Status created | `proposed` (usable, flagged) | `active` |
+| Additive-only guard | **always enforced** — cannot be bypassed | enforced; `--force` to override |
+| Near-duplicate check | yes (blocks `Kext` vs `KernelExtension` sprawl) | no |
+| Promotion | a human runs `schema_promote` | already active |
+
+**Additive means:** add a type, add an *optional* property, widen an enum, add an edge type.
+**Non-additive** (new required field, removed property, narrowed enum) is refused, because it would
+invalidate data already in the graph. Agents can never force it; an operator must pass `--force`.
+
+**Changes take effect immediately** — the server resolves types from the database per write, so no
+restart is needed after a propose/promote/apply.
+
+**Knowing something changed.** `schema_get` returns a monotonic `schema_version` plus a `cursor`.
+Pass that cursor to **`schema_changes(since_cursor=…)`** to get exactly which types appeared or were
+re-versioned, *by whom, when, and why* (it reads the same `tx` provenance every write records), plus
+any guide edits. Write results (`graph_upsert`, `graph_link`) echo the current `schema_version`, so
+an agent notices drift mid-session without polling. There is no server push: Claude Code agents are
+turn-based, so a staleness signal on the next call is the mechanism that actually works.
+
+## Applying packs: order matters
+
+Apply a base pack before packs that extend it. A later pack may **widen** a type the base defined
+(the iOS pack widens `finding` with campaign fields) — that is the intended layering.
+
+The consequence: **re-applying the *base* pack afterwards is refused**, because relative to the
+widened type it would *remove* properties. That is the guard protecting your data, not a bug:
+
+```
+apply security-research → ios-macos-attack-surface → research-workflow   # ok, in order
+re-apply ios-macos-attack-surface   → no-op (idempotent)
+re-apply security-research          → REFUSED: non-additive (would drop finding's added fields)
+```
+Each pack is idempotent **on its own**. If you re-apply packs on every deploy, apply the whole stack
+in order, or re-apply only the outermost pack. Never `--force` a base pack over a widened type
+unless you intend to drop those fields.
+
 ## Packs are COPIED, not linked
 
 `apply_pack` **copies** the pack's types into that project's database as rows. There is no live
@@ -85,6 +139,27 @@ makes "apply the pack on every deploy" safe.
 | `security-research` | iOS/macOS vuln-research vocabulary: `component`, `function`, `artifact`, `finding`, `poc`, `report`, `host`; edges `contradicts` (assertive), `refines`, `derived_from`, `evidence_for`, `confirms`/`refutes`, `depends_on` (acyclic), `calls`/`reachable_from` (bulk). |
 | `research-workflow` | Workstream vocabulary captured from a live project: `claim`, `lead`, `measurement`, `verdict`, `note`, `lane`, `instrument`; edge `documented_by`. |
 | `ios-macos-attack-surface` | Layers attacker-reachability on top: `principal`, `entry_point`, `gate`, `format`, `build` (+ widens `finding`); edges `attacker_reaches`, `attacker_blocked`, `exposes`, `gated_by`, `satisfies`, `parses`, `runs_as`, `affects`, `present_on`. Apply **after** `security-research`. |
+
+## Contributing a pack — please do!
+
+Packs are the intended way to make Hivemind fit a domain, and **new packs are very welcome**. A pack
+is just a `schema.json` (plus optional `guide/*.md` and a `README.md`) — no engine code, no Python,
+nothing to compile. If you have modelled a domain that others might reuse — literature review,
+incident response, codebase mapping, lab/experiment tracking, procurement, anything — please open a
+PR adding it under `packs/<your-pack>/`, or fork and publish your own.
+
+Good packs tend to:
+- **model nouns as node types and verbs as edge types**, leaning on the generic traits
+  (`versioned`, `symmetric`, `acyclic`, `assertive`, `src_types`/`dst_types`) instead of inventing
+  engine features;
+- keep `required` minimal — agents record partial knowledge, and a strict schema pushes them to
+  invent placeholder values;
+- ship a short `guide/` section explaining the workflow, since that is what agents actually read;
+- say in the README which pack (if any) it layers on top of.
+
+You can also **capture a pack from a running project** — if your agents grew useful types at
+runtime, export them into a `schema.json` and commit it so the vocabulary is version-controlled and
+shareable (`packs/research-workflow/` was produced exactly this way).
 
 ## Writing your own
 Copy a bundled pack, edit `schema.json` (keep changes additive if others depend on the types),

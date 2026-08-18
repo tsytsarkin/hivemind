@@ -314,8 +314,8 @@ def apply_pack(db: Database, agent_id: str, pack: dict, *, force: bool = False) 
 def get_schema(db: Database, *, kind: Optional[str] = None,
                name: Optional[str] = None) -> dict:
     """Dump the usable node/edge types (+ traits + status) and the schema_version counter."""
-    out = {"schema_version": int(db.meta_get("schema_version", "0")), "node_types": [],
-           "edge_types": []}
+    out = {"schema_version": int(db.meta_get("schema_version", "0")),
+           "cursor": _schema_cursor(db), "node_types": [], "edge_types": []}
     with db.read() as cur:
         kinds = [kind] if kind else ["node", "edge"]
         for k in kinds:
@@ -335,3 +335,48 @@ def get_schema(db: Database, *, kind: Optional[str] = None,
                     entry["dst_types"] = json.loads(t["dst_types"])
                 out[f"{k}_types"].append(entry)
     return out
+
+
+# ── change feed: "what changed since I last looked?" ────────────────────────────────
+def _schema_cursor(db: Database) -> int:
+    """Monotonic cursor over schema changes = the highest tx that defined a type."""
+    with db.read() as cur:
+        r = cur.execute(
+            "SELECT MAX(m) AS c FROM (SELECT MAX(created_tx) m FROM node_type "
+            "UNION ALL SELECT MAX(created_tx) FROM edge_type)").fetchone()
+    return int(r["c"] or 0)
+
+
+def changes_since(db: Database, since_cursor: int = 0, *, include_guide: bool = True,
+                  limit: int = 200) -> dict:
+    """Schema (and optionally guide) changes newer than `since_cursor`, with provenance.
+
+    Agents: pass the `cursor` you got from a previous schema_get/schema_changes. The reply tells
+    you exactly which types appeared or were re-versioned, by whom, when, and why — so you can
+    re-read only what moved instead of re-fetching the whole schema.
+    """
+    changes = []
+    with db.read() as cur:
+        for kind, tbl in (("node", "node_type"), ("edge", "edge_type")):
+            rows = cur.execute(
+                f"SELECT x.name, x.version, x.status, t.tx_id, t.tx_time, t.agent_id, t.reason "
+                f"FROM {tbl} x JOIN tx t ON t.tx_id = x.created_tx "
+                f"WHERE x.created_tx > ? ORDER BY x.created_tx DESC LIMIT ?",
+                (since_cursor, limit)).fetchall()
+            for r in rows:
+                changes.append({"kind": kind, "name": r["name"], "version": r["version"],
+                                "status": r["status"], "tx": r["tx_id"], "at": r["tx_time"],
+                                "by": r["agent_id"], "why": r["reason"]})
+        guide_changes = []
+        if include_guide:
+            grows = cur.execute(
+                "SELECT g.name, g.guide_version, t.tx_id, t.tx_time, t.agent_id "
+                "FROM guide_section g JOIN tx t ON t.tx_id = g.updated_tx "
+                "WHERE g.updated_tx > ? ORDER BY g.updated_tx DESC", (since_cursor,)).fetchall()
+            guide_changes = [{"section": r["name"], "guide_version": r["guide_version"],
+                              "at": r["tx_time"], "by": r["agent_id"]} for r in grows]
+    changes.sort(key=lambda c: c["tx"], reverse=True)
+    return {"schema_version": int(db.meta_get("schema_version", "0")),
+            "cursor": _schema_cursor(db), "since_cursor": since_cursor,
+            "schema_changes": changes, "guide_changes": guide_changes,
+            "changed": bool(changes or guide_changes)}

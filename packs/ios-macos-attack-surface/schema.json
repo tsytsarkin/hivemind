@@ -1,151 +1,819 @@
 {
   "name": "ios-macos-attack-surface",
-  "description": "Layers attacker-position / entry-point / gate reachability modelling on top of the security-research pack. Additive: it redefines only `finding` (wider enums + campaign fields) and adds new types.",
-
+  "description": "Attacker-position / entry-point / gate reachability modelling for iOS+macOS research, plus research-lane indexing and duplicate reconciliation. Additive over the security-research pack.",
   "node_types": {
-    "principal": {"schema": {"type": "object", "properties": {
-      "name": {"type": "string"},
-      "kind": {"enum": ["browser-renderer","sandboxed-app","unsandboxed-app","app-extension",
-                        "daemon","unauth-network","local-user","admin","root","kernel",
-                        "parser-context","second-stage","physical","attacker-media"]},
-      "platform": {"enum": ["ios","macos","both"]},
-      "sandbox_profile": {"type": "string"},
-      "entitlements": {"type": "array", "items": {"type": "string"}},
-      "privilege_tier": {"type": "integer"},
-      "interaction": {"enum": ["none","one-click","multi-step","user-driven","physical"]},
-      "notes": {"type": "string"}},
-      "required": ["name"], "additionalProperties": true}},
-
-    "entry_point": {"schema": {"type": "object", "properties": {
-      "name": {"type": "string"},
-      "kind": {"enum": ["mach-service","xpc-service","xpc-selector","iokit-userclient",
-                        "iokit-selector","mig-routine","driverkit","url-scheme","file-format",
-                        "socket","syscall","sysctl","notification","app-extension",
-                        "sharing-extension","mount","ipc-other"]},
-      "identifier": {"type": "string"},
-      "selector": {"type": "string"},
-      "component": {"type": "string"},
-      "gated": {"type": "boolean"},
-      "notes": {"type": "string"}},
-      "required": ["name"], "additionalProperties": true}},
-
-    "gate": {"schema": {"type": "object", "properties": {
-      "name": {"type": "string"},
-      "kind": {"enum": ["entitlement","sandbox-rule","tcc","authorization-check","code-signing",
-                        "platform-binary","hardware","user-consent","allowlist","none"]},
-      "identifier": {"type": "string"},
-      "self_assignable": {"type": "boolean"},
-      "enforcement": {"type": "string"},
-      "notes": {"type": "string"}},
-      "required": ["name"], "additionalProperties": true}},
-
-    "format": {"schema": {"type": "object", "properties": {
-      "name": {"type": "string"},
-      "uti": {"type": "string"},
-      "extensions": {"type": "array", "items": {"type": "string"}},
-      "magic": {"type": "string"},
-      "notes": {"type": "string"}},
-      "required": ["name"], "additionalProperties": true}},
-
-    "build": {"schema": {"type": "object", "properties": {
-      "name": {"type": "string"},
-      "os": {"enum": ["ios","macos","both","other"]},
-      "marketing": {"type": "string"},
-      "role": {"enum": ["target","reference","shipping","prior"]},
-      "device": {"type": "string"},
-      "notes": {"type": "string"}},
-      "required": ["name"], "additionalProperties": true}},
-
-    "finding": {"schema": {"type": "object", "properties": {
-      "title": {"type": "string"},
-      "severity": {"enum": ["info","low","medium","high","critical"]},
-      "status": {"enum": ["candidate","confirmed","reported","submitted","shelved",
-                          "duplicate","fixed","dead"]},
-      "class": {"type": "string"},
-      "cwe": {"type": "string"},
-      "summary": {"type": "string"},
-      "attacker_position": {"type": "string"},
-      "interaction": {"enum": ["none","one-click","multi-step","user-driven","physical"]},
-      "measured_on": {"type": "string"},
-      "shipping_presence": {"type": "string"},
-      "target_flag": {"type": "string"},
-      "case_id": {"type": "string"},
-      "package": {"type": "string"},
-      "ledger_row": {"type": "string"},
-      "submitted_on": {"type": "string"}},
-      "required": ["title"], "additionalProperties": true}}
+    "principal": {
+      "schema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "browser-renderer",
+              "sandboxed-app",
+              "unsandboxed-app",
+              "app-extension",
+              "daemon",
+              "unauth-network",
+              "local-user",
+              "admin",
+              "root",
+              "kernel",
+              "parser-context",
+              "second-stage",
+              "physical",
+              "attacker-media"
+            ]
+          },
+          "platform": {
+            "enum": [
+              "ios",
+              "macos",
+              "both"
+            ]
+          },
+          "sandbox_profile": {
+            "type": "string"
+          },
+          "entitlements": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "privilege_tier": {
+            "type": "integer"
+          },
+          "interaction": {
+            "enum": [
+              "none",
+              "one-click",
+              "multi-step",
+              "user-driven",
+              "physical"
+            ]
+          },
+          "notes": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": true
+      }
+    },
+    "entry_point": {
+      "schema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "mach-service",
+              "xpc-service",
+              "xpc-selector",
+              "iokit-userclient",
+              "iokit-selector",
+              "mig-routine",
+              "driverkit",
+              "url-scheme",
+              "file-format",
+              "socket",
+              "syscall",
+              "sysctl",
+              "notification",
+              "app-extension",
+              "sharing-extension",
+              "mount",
+              "ipc-other"
+            ]
+          },
+          "identifier": {
+            "type": "string"
+          },
+          "selector": {
+            "type": "string"
+          },
+          "component": {
+            "type": "string"
+          },
+          "gated": {
+            "type": "boolean"
+          },
+          "notes": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": true
+      }
+    },
+    "gate": {
+      "schema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "entitlement",
+              "sandbox-rule",
+              "tcc",
+              "authorization-check",
+              "code-signing",
+              "platform-binary",
+              "hardware",
+              "user-consent",
+              "allowlist",
+              "none"
+            ]
+          },
+          "identifier": {
+            "type": "string"
+          },
+          "self_assignable": {
+            "type": "boolean"
+          },
+          "enforcement": {
+            "type": "string"
+          },
+          "notes": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": true
+      }
+    },
+    "format": {
+      "schema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "uti": {
+            "type": "string"
+          },
+          "extensions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "magic": {
+            "type": "string"
+          },
+          "notes": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": true
+      }
+    },
+    "build": {
+      "schema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "os": {
+            "enum": [
+              "ios",
+              "macos",
+              "both",
+              "other"
+            ]
+          },
+          "marketing": {
+            "type": "string"
+          },
+          "role": {
+            "enum": [
+              "target",
+              "reference",
+              "shipping",
+              "prior"
+            ]
+          },
+          "device": {
+            "type": "string"
+          },
+          "notes": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": true
+      }
+    },
+    "finding": {
+      "schema": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "severity": {
+            "enum": [
+              "info",
+              "low",
+              "medium",
+              "high",
+              "critical"
+            ]
+          },
+          "status": {
+            "enum": [
+              "candidate",
+              "confirmed",
+              "reported",
+              "submitted",
+              "shelved",
+              "duplicate",
+              "fixed",
+              "dead"
+            ]
+          },
+          "class": {
+            "type": "string"
+          },
+          "cwe": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "attacker_position": {
+            "type": "string"
+          },
+          "interaction": {
+            "enum": [
+              "none",
+              "one-click",
+              "multi-step",
+              "user-driven",
+              "physical"
+            ]
+          },
+          "measured_on": {
+            "type": "string"
+          },
+          "shipping_presence": {
+            "type": "string"
+          },
+          "target_flag": {
+            "type": "string"
+          },
+          "case_id": {
+            "type": "string"
+          },
+          "package": {
+            "type": "string"
+          },
+          "ledger_row": {
+            "type": "string"
+          },
+          "submitted_on": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "title"
+        ],
+        "additionalProperties": true
+      }
+    },
+    "lane": {
+      "schema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "verdict": {
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "open",
+              "closed-negative",
+              "closed-positive",
+              "partial",
+              "retired",
+              "unknown"
+            ]
+          },
+          "topic": {
+            "type": "string"
+          },
+          "note_count": {
+            "type": "integer"
+          },
+          "bytes": {
+            "type": "integer"
+          },
+          "key_docs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "notes": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": true
+      }
+    }
   },
-
   "edge_types": {
     "attacker_reaches": {
-      "schema": {"type": "object", "properties": {
-        "verification": {"enum": ["device-measured","vm-measured","profile-read",
-                                  "static-callgraph","doc-inferred","inferred"]},
-        "method": {"enum": ["no-gate","sandbox-allow","entitlement-held","default-profile",
-                            "via-broker","via-deputy","user-interaction","attacker-media",
-                            "network","unknown"]},
-        "interaction": {"enum": ["none","one-click","multi-step","user-driven","physical"]},
-        "control_test": {"type": "string"},
-        "evidence": {"type": "string"},
-        "measured_on": {"type": "string"},
-        "confidence": {"enum": ["low","medium","high"]},
-        "notes": {"type": "string"}},
-        "required": ["verification"], "additionalProperties": true},
-      "versioned": true, "src_types": ["principal"],
-      "dst_types": ["entry_point","component","function","format","principal"]},
-
+      "schema": {
+        "type": "object",
+        "properties": {
+          "verification": {
+            "enum": [
+              "device-measured",
+              "vm-measured",
+              "profile-read",
+              "static-callgraph",
+              "doc-inferred",
+              "inferred"
+            ]
+          },
+          "method": {
+            "enum": [
+              "no-gate",
+              "sandbox-allow",
+              "entitlement-held",
+              "default-profile",
+              "via-broker",
+              "via-deputy",
+              "user-interaction",
+              "attacker-media",
+              "network",
+              "unknown"
+            ]
+          },
+          "interaction": {
+            "enum": [
+              "none",
+              "one-click",
+              "multi-step",
+              "user-driven",
+              "physical"
+            ]
+          },
+          "control_test": {
+            "type": "string"
+          },
+          "evidence": {
+            "type": "string"
+          },
+          "measured_on": {
+            "type": "string"
+          },
+          "confidence": {
+            "enum": [
+              "low",
+              "medium",
+              "high",
+              "certain",
+              "probable",
+              "speculative"
+            ]
+          },
+          "basis": {
+            "type": "string"
+          },
+          "justification": {
+            "type": "string"
+          },
+          "build": {
+            "type": "string"
+          },
+          "notes": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "verification"
+        ],
+        "additionalProperties": true
+      },
+      "src_types": [
+        "principal"
+      ],
+      "dst_types": [
+        "entry_point",
+        "component",
+        "function",
+        "format",
+        "principal",
+        "finding"
+      ],
+      "cardinality": "N:N",
+      "directed": true,
+      "symmetric": false,
+      "transitive": false,
+      "acyclic": false,
+      "versioned": true,
+      "assertive": false
+    },
     "attacker_blocked": {
-      "schema": {"type": "object", "properties": {
-        "verification": {"enum": ["device-measured","vm-measured","profile-read",
-                                  "static-callgraph","doc-inferred","inferred"]},
-        "control_test": {"type": "string"},
-        "blocked_by": {"type": "string"},
-        "evidence": {"type": "string"},
-        "measured_on": {"type": "string"},
-        "notes": {"type": "string"}},
-        "required": ["verification","control_test"], "additionalProperties": true},
-      "versioned": true, "src_types": ["principal"],
-      "dst_types": ["entry_point","component","function","format","principal"]},
-
-    "exposes": {"schema": {"type": "object", "properties": {
-      "notes": {"type": "string"}}, "additionalProperties": true},
-      "versioned": true, "src_types": ["component"], "dst_types": ["entry_point"]},
-
-    "gated_by": {"schema": {"type": "object", "properties": {
-      "enforced": {"type": "boolean"},
-      "verification": {"enum": ["device-measured","vm-measured","profile-read",
-                                "static-callgraph","doc-inferred","inferred"]},
-      "notes": {"type": "string"}}, "additionalProperties": true},
-      "versioned": true, "src_types": ["entry_point","component","function"],
-      "dst_types": ["gate"]},
-
-    "satisfies": {"schema": {"type": "object", "properties": {
-      "how": {"type": "string"},
-      "verification": {"enum": ["device-measured","vm-measured","profile-read",
-                                "static-callgraph","doc-inferred","inferred"]},
-      "notes": {"type": "string"}}, "additionalProperties": true},
-      "versioned": true, "src_types": ["principal"], "dst_types": ["gate"]},
-
-    "parses": {"schema": {"type": "object", "properties": {
-      "notes": {"type": "string"}}, "additionalProperties": true},
-      "versioned": true, "src_types": ["component","function"], "dst_types": ["format"]},
-
-    "runs_as": {"schema": {"type": "object", "properties": {
-      "notes": {"type": "string"}}, "additionalProperties": true},
-      "versioned": true, "src_types": ["component"], "dst_types": ["principal"]},
-
-    "affects": {"schema": {"type": "object", "properties": {
-      "notes": {"type": "string"}}, "additionalProperties": true},
-      "versioned": true, "src_types": ["finding"],
-      "dst_types": ["component","function","entry_point","format","gate"]},
-
-    "present_on": {"schema": {"type": "object", "properties": {
-      "evidence": {"enum": ["device-measured","vm-measured","translation-table",
-                            "byte-identical","normalised-diff","inferred","absent"]},
-      "accepted": {"type": "string"},
-      "notes": {"type": "string"}},
-      "required": ["evidence"], "additionalProperties": true},
-      "versioned": true, "src_types": ["finding","function","component","entry_point"],
-      "dst_types": ["build"]}
+      "schema": {
+        "type": "object",
+        "properties": {
+          "verification": {
+            "enum": [
+              "device-measured",
+              "vm-measured",
+              "profile-read",
+              "static-callgraph",
+              "doc-inferred",
+              "inferred"
+            ]
+          },
+          "control_test": {
+            "type": "string"
+          },
+          "blocked_by": {
+            "type": "string"
+          },
+          "evidence": {
+            "type": "string"
+          },
+          "measured_on": {
+            "type": "string"
+          },
+          "basis": {
+            "type": "string"
+          },
+          "justification": {
+            "type": "string"
+          },
+          "confidence": {
+            "enum": [
+              "low",
+              "medium",
+              "high",
+              "certain",
+              "probable",
+              "speculative"
+            ]
+          },
+          "build": {
+            "type": "string"
+          },
+          "notes": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "verification",
+          "control_test"
+        ],
+        "additionalProperties": true
+      },
+      "src_types": [
+        "principal"
+      ],
+      "dst_types": [
+        "entry_point",
+        "component",
+        "function",
+        "format",
+        "principal",
+        "finding"
+      ],
+      "cardinality": "N:N",
+      "directed": true,
+      "symmetric": false,
+      "transitive": false,
+      "acyclic": false,
+      "versioned": true,
+      "assertive": false
+    },
+    "exposes": {
+      "schema": {
+        "type": "object",
+        "properties": {
+          "notes": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "src_types": [
+        "component"
+      ],
+      "dst_types": [
+        "entry_point"
+      ],
+      "cardinality": "N:N",
+      "directed": true,
+      "symmetric": false,
+      "transitive": false,
+      "acyclic": false,
+      "versioned": true,
+      "assertive": false
+    },
+    "gated_by": {
+      "schema": {
+        "type": "object",
+        "properties": {
+          "enforced": {
+            "type": "boolean"
+          },
+          "verification": {
+            "enum": [
+              "device-measured",
+              "vm-measured",
+              "profile-read",
+              "static-callgraph",
+              "doc-inferred",
+              "inferred"
+            ]
+          },
+          "notes": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "src_types": [
+        "entry_point",
+        "component",
+        "function"
+      ],
+      "dst_types": [
+        "gate"
+      ],
+      "cardinality": "N:N",
+      "directed": true,
+      "symmetric": false,
+      "transitive": false,
+      "acyclic": false,
+      "versioned": true,
+      "assertive": false
+    },
+    "satisfies": {
+      "schema": {
+        "type": "object",
+        "properties": {
+          "how": {
+            "type": "string"
+          },
+          "verification": {
+            "enum": [
+              "device-measured",
+              "vm-measured",
+              "profile-read",
+              "static-callgraph",
+              "doc-inferred",
+              "inferred"
+            ]
+          },
+          "notes": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "src_types": [
+        "principal"
+      ],
+      "dst_types": [
+        "gate"
+      ],
+      "cardinality": "N:N",
+      "directed": true,
+      "symmetric": false,
+      "transitive": false,
+      "acyclic": false,
+      "versioned": true,
+      "assertive": false
+    },
+    "parses": {
+      "schema": {
+        "type": "object",
+        "properties": {
+          "notes": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "src_types": [
+        "component",
+        "function"
+      ],
+      "dst_types": [
+        "format"
+      ],
+      "cardinality": "N:N",
+      "directed": true,
+      "symmetric": false,
+      "transitive": false,
+      "acyclic": false,
+      "versioned": true,
+      "assertive": false
+    },
+    "runs_as": {
+      "schema": {
+        "type": "object",
+        "properties": {
+          "notes": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "src_types": [
+        "component"
+      ],
+      "dst_types": [
+        "principal"
+      ],
+      "cardinality": "N:N",
+      "directed": true,
+      "symmetric": false,
+      "transitive": false,
+      "acyclic": false,
+      "versioned": true,
+      "assertive": false
+    },
+    "affects": {
+      "schema": {
+        "type": "object",
+        "properties": {
+          "notes": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "src_types": [
+        "finding"
+      ],
+      "dst_types": [
+        "component",
+        "function",
+        "entry_point",
+        "format",
+        "gate"
+      ],
+      "cardinality": "N:N",
+      "directed": true,
+      "symmetric": false,
+      "transitive": false,
+      "acyclic": false,
+      "versioned": true,
+      "assertive": false
+    },
+    "present_on": {
+      "schema": {
+        "type": "object",
+        "properties": {
+          "evidence": {
+            "enum": [
+              "device-measured",
+              "vm-measured",
+              "translation-table",
+              "byte-identical",
+              "normalised-diff",
+              "inferred",
+              "absent"
+            ]
+          },
+          "accepted": {
+            "type": "string"
+          },
+          "notes": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "evidence"
+        ],
+        "additionalProperties": true
+      },
+      "src_types": [
+        "finding",
+        "function",
+        "component",
+        "entry_point"
+      ],
+      "dst_types": [
+        "build"
+      ],
+      "cardinality": "N:N",
+      "directed": true,
+      "symmetric": false,
+      "transitive": false,
+      "acyclic": false,
+      "versioned": true,
+      "assertive": false
+    },
+    "documented_by": {
+      "schema": {
+        "type": "object",
+        "properties": {
+          "notes": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "versioned": true,
+      "src_types": [
+        "finding",
+        "component",
+        "entry_point",
+        "function"
+      ],
+      "dst_types": [
+        "lane"
+      ]
+    },
+    "same_as": {
+      "schema": {
+        "type": "object",
+        "properties": {
+          "confidence": {
+            "enum": [
+              "exact",
+              "semantic",
+              "partial"
+            ]
+          },
+          "canonical": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "notes": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "confidence"
+        ],
+        "additionalProperties": true
+      },
+      "versioned": true,
+      "symmetric": true,
+      "assertive": false,
+      "src_types": [
+        "*"
+      ],
+      "dst_types": [
+        "*"
+      ]
+    },
+    "evidence_for": {
+      "schema": {
+        "type": "object",
+        "properties": {
+          "notes": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "versioned": true,
+      "src_types": [
+        "artifact",
+        "poc"
+      ],
+      "dst_types": [
+        "finding",
+        "lane"
+      ]
+    }
   }
 }

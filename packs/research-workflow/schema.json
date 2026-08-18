@@ -310,6 +310,47 @@
       "acyclic": false,
       "versioned": true,
       "assertive": false
+    },
+    "same_as": {
+      "schema": {
+        "type": "object",
+        "properties": {
+          "confidence": {
+            "enum": [
+              "exact",
+              "semantic",
+              "partial"
+            ]
+          },
+          "canonical": {
+            "type": "string",
+            "description": "node_id of the node that should be treated as canonical, if decided"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "notes": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "confidence"
+        ],
+        "additionalProperties": true
+      },
+      "src_types": [
+        "*"
+      ],
+      "dst_types": [
+        "*"
+      ],
+      "cardinality": "N:N",
+      "directed": true,
+      "symmetric": true,
+      "transitive": false,
+      "acyclic": false,
+      "versioned": true,
+      "assertive": false
     }
   }
 }

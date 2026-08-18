@@ -145,3 +145,34 @@ def test_apply_pack_refuses_non_additive_by_default(fresh):
     assert r["created"]["node"] == ["thing@2"]
     # the pre-existing node still reads fine (it validated under its own schema_ver)
     assert graph.search_nodes(fresh, "x")["count"] >= 0
+
+
+def test_schema_changes_feed(fresh):
+    """Agents can ask 'what changed since I last looked?' and get provenance."""
+    schemas.apply_pack(fresh, "op", {"name": "p", "node_types": {
+        "alpha": {"schema": {"type": "object"}}}})
+    base = schemas.get_schema(fresh)
+    cur0, ver0 = base["cursor"], base["schema_version"]
+    assert cur0 > 0
+
+    # nothing new yet
+    assert schemas.changes_since(fresh, cur0)["changed"] is False
+
+    # another agent adds a type
+    schemas.propose_type(fresh, "other-agent", "node", "beta", {"type": "object"},
+                         why="need it")
+    out = schemas.changes_since(fresh, cur0)
+    assert out["changed"] is True
+    assert out["schema_version"] > ver0
+    names = {c["name"]: c for c in out["schema_changes"]}
+    assert "beta" in names
+    assert names["beta"]["by"] == "other-agent"          # who
+    assert names["beta"]["status"] == "proposed"          # and its state
+    assert "schema_propose" in (names["beta"]["why"] or "")
+    assert out["cursor"] > cur0                           # cursor advances
+
+    # guide edits surface on the same feed
+    from hivemind_server import guide
+    guide.set_section(fresh, "human", "core", "hello")
+    g = schemas.changes_since(fresh, cur0)
+    assert any(x["section"] == "core" for x in g["guide_changes"])

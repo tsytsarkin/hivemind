@@ -2,46 +2,353 @@
   "name": "security-research",
   "description": "Example domain pack: iOS/macOS vulnerability-research vocabulary. Loaded as data; the engine references none of it.",
   "node_types": {
-    "component": {"schema": {"type": "object", "properties": {
-      "name": {"type": "string"}, "kind": {"type": "string"}, "path": {"type": "string"},
-      "notes": {"type": "string"}}, "required": ["name"], "additionalProperties": true}},
-    "function": {"schema": {"type": "object", "properties": {
-      "symbol": {"type": "string"}, "address": {"type": "string"}, "notes": {"type": "string"}},
-      "required": ["symbol"], "additionalProperties": true}},
-    "artifact": {"schema": {"type": "object", "properties": {
-      "name": {"type": "string"}, "kind": {"type": "string"},
-      "digest": {"type": "string"}, "notes": {"type": "string"}},
-      "required": ["name"], "additionalProperties": true}},
-    "finding": {"schema": {"type": "object", "properties": {
-      "title": {"type": "string"},
-      "severity": {"enum": ["info", "low", "medium", "high", "critical"]},
-      "status": {"enum": ["candidate", "confirmed", "reported", "fixed", "dead"]},
-      "class": {"type": "string"}, "summary": {"type": "string"}},
-      "required": ["title"], "additionalProperties": true}},
-    "poc": {"schema": {"type": "object", "properties": {
-      "name": {"type": "string"}, "works_on": {"type": "string"}, "notes": {"type": "string"}},
-      "required": ["name"], "additionalProperties": true}},
-    "report": {"schema": {"type": "object", "properties": {
-      "title": {"type": "string"}, "venue": {"type": "string"}, "status": {"type": "string"}},
-      "required": ["title"], "additionalProperties": true}},
-    "host": {"schema": {"type": "object", "properties": {
-      "name": {"type": "string"}, "role": {"type": "string"}},
-      "required": ["name"], "additionalProperties": true}}
+    "component": {
+      "schema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "notes": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": true
+      }
+    },
+    "function": {
+      "schema": {
+        "type": "object",
+        "properties": {
+          "symbol": {
+            "type": "string"
+          },
+          "address": {
+            "type": "string"
+          },
+          "notes": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "symbol"
+        ],
+        "additionalProperties": true
+      }
+    },
+    "artifact": {
+      "schema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "digest": {
+            "type": "string"
+          },
+          "notes": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": true
+      }
+    },
+    "finding": {
+      "schema": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "severity": {
+            "enum": [
+              "info",
+              "low",
+              "medium",
+              "high",
+              "critical"
+            ]
+          },
+          "status": {
+            "enum": [
+              "candidate",
+              "confirmed",
+              "reported",
+              "fixed",
+              "dead"
+            ]
+          },
+          "class": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "title"
+        ],
+        "additionalProperties": true
+      }
+    },
+    "poc": {
+      "schema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "works_on": {
+            "type": "string"
+          },
+          "notes": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": true
+      }
+    },
+    "report": {
+      "schema": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "venue": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "title"
+        ],
+        "additionalProperties": true
+      }
+    },
+    "host": {
+      "schema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": true
+      }
+    }
   },
   "edge_types": {
-    "contradicts": {"schema": {"type": "object", "properties": {
-      "status": {"enum": ["open", "resolved"]}, "resolution": {"type": "string"},
-      "scope": {"type": "string"}}, "additionalProperties": true},
-      "assertive": true, "symmetric": true, "versioned": true},
-    "refines": {"schema": {"type": "object"}, "versioned": true},
-    "derived_from": {"schema": {"type": "object"}, "versioned": true},
-    "evidence_for": {"schema": {"type": "object"}, "versioned": true,
-      "src_types": ["artifact", "poc"], "dst_types": ["finding"]},
-    "confirms": {"schema": {"type": "object"}, "versioned": true},
-    "refutes": {"schema": {"type": "object"}, "versioned": true},
-    "depends_on": {"schema": {"type": "object"}, "versioned": true, "acyclic": true},
-    "calls": {"schema": {"type": "object"}, "versioned": false,
-      "src_types": ["function"], "dst_types": ["function"]},
-    "reachable_from": {"schema": {"type": "object"}, "versioned": false}
+    "contradicts": {
+      "schema": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "enum": [
+              "open",
+              "resolved"
+            ]
+          },
+          "resolution": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "src_types": [
+        "*"
+      ],
+      "dst_types": [
+        "*"
+      ],
+      "cardinality": "N:N",
+      "directed": true,
+      "symmetric": true,
+      "transitive": false,
+      "acyclic": false,
+      "versioned": true,
+      "assertive": true
+    },
+    "refines": {
+      "schema": {
+        "type": "object"
+      },
+      "src_types": [
+        "*"
+      ],
+      "dst_types": [
+        "*"
+      ],
+      "cardinality": "N:N",
+      "directed": true,
+      "symmetric": false,
+      "transitive": false,
+      "acyclic": false,
+      "versioned": true,
+      "assertive": false
+    },
+    "derived_from": {
+      "schema": {
+        "type": "object"
+      },
+      "src_types": [
+        "*"
+      ],
+      "dst_types": [
+        "*"
+      ],
+      "cardinality": "N:N",
+      "directed": true,
+      "symmetric": false,
+      "transitive": false,
+      "acyclic": false,
+      "versioned": true,
+      "assertive": false
+    },
+    "evidence_for": {
+      "schema": {
+        "type": "object",
+        "properties": {
+          "notes": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "src_types": [
+        "artifact",
+        "poc"
+      ],
+      "dst_types": [
+        "finding",
+        "lane"
+      ],
+      "cardinality": "N:N",
+      "directed": true,
+      "symmetric": false,
+      "transitive": false,
+      "acyclic": false,
+      "versioned": true,
+      "assertive": false
+    },
+    "confirms": {
+      "schema": {
+        "type": "object"
+      },
+      "src_types": [
+        "*"
+      ],
+      "dst_types": [
+        "*"
+      ],
+      "cardinality": "N:N",
+      "directed": true,
+      "symmetric": false,
+      "transitive": false,
+      "acyclic": false,
+      "versioned": true,
+      "assertive": false
+    },
+    "refutes": {
+      "schema": {
+        "type": "object"
+      },
+      "src_types": [
+        "*"
+      ],
+      "dst_types": [
+        "*"
+      ],
+      "cardinality": "N:N",
+      "directed": true,
+      "symmetric": false,
+      "transitive": false,
+      "acyclic": false,
+      "versioned": true,
+      "assertive": false
+    },
+    "depends_on": {
+      "schema": {
+        "type": "object"
+      },
+      "src_types": [
+        "*"
+      ],
+      "dst_types": [
+        "*"
+      ],
+      "cardinality": "N:N",
+      "directed": true,
+      "symmetric": false,
+      "transitive": false,
+      "acyclic": true,
+      "versioned": true,
+      "assertive": false
+    },
+    "calls": {
+      "schema": {
+        "type": "object"
+      },
+      "src_types": [
+        "function"
+      ],
+      "dst_types": [
+        "function"
+      ],
+      "cardinality": "N:N",
+      "directed": true,
+      "symmetric": false,
+      "transitive": false,
+      "acyclic": false,
+      "versioned": false,
+      "assertive": false
+    },
+    "reachable_from": {
+      "schema": {
+        "type": "object"
+      },
+      "src_types": [
+        "*"
+      ],
+      "dst_types": [
+        "*"
+      ],
+      "cardinality": "N:N",
+      "directed": true,
+      "symmetric": false,
+      "transitive": false,
+      "acyclic": false,
+      "versioned": false,
+      "assertive": false
+    }
   }
 }

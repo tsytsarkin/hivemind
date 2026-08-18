@@ -56,6 +56,9 @@ an earlier type's enum or add fields, and add new types/edges). Re-applying a pa
 hivemind-admin --project default apply-pack packs/security-research/schema.json   # operator, on host
 hivemind schema apply packs/ios-macos-attack-surface/schema.json                  # or remote (client)
 ```
+**New packs are very welcome** — a pack is just a `schema.json` (+ optional guide), no engine
+code required; open a PR under `packs/`, or fork and publish your own.
+
 See [docs/packs.md](docs/packs.md) and the [full docs](docs/) (data model, API, security, guides).
 
 ## Adding machines

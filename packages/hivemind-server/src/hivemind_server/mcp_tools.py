@@ -97,9 +97,11 @@ def build_mcp(project: Project, *, instructions: str = INSTRUCTIONS) -> MCPServe
                      subject_key: Optional[str] = None, subject_version: Optional[str] = None,
                      subject_order: Optional[str] = None, node_id: Optional[str] = None,
                      expected_head: Optional[str] = None, reason: Optional[str] = None) -> dict:
-        return graph.upsert_node(db, agent, type, props, subject_key=subject_key,
-                                 subject_version=subject_version, subject_order=subject_order,
-                                 node_id=node_id, expected_head=expected_head, reason=reason)
+        out = graph.upsert_node(db, agent, type, props, subject_key=subject_key,
+                                subject_version=subject_version, subject_order=subject_order,
+                                node_id=node_id, expected_head=expected_head, reason=reason)
+        out["schema_version"] = int(db.meta_get("schema_version", "0"))
+        return out
 
     @mcp.tool(annotations=WRITE,
               description="Add or supersede a typed edge (any schema-defined edge type). Bulk "
@@ -109,8 +111,10 @@ def build_mcp(project: Project, *, instructions: str = INSTRUCTIONS) -> MCPServe
     def graph_link(edge_type: str, src: str, dst: str, props: Optional[dict] = None,
                    agent: str = "agent", expected_head: Optional[str] = None,
                    source_tag: Optional[str] = None, reason: Optional[str] = None) -> dict:
-        return graph.upsert_edge(db, agent, edge_type, src, dst, props or {},
-                                 expected_head=expected_head, source_tag=source_tag, reason=reason)
+        out = graph.upsert_edge(db, agent, edge_type, src, dst, props or {},
+                                expected_head=expected_head, source_tag=source_tag, reason=reason)
+        out["schema_version"] = int(db.meta_get("schema_version", "0"))
+        return out
 
     @mcp.tool(annotations=WRITE,
               description="Wholesale (re)load a bulk edge set under a source_tag (e.g. an imported "
@@ -141,6 +145,15 @@ def build_mcp(project: Project, *, instructions: str = INSTRUCTIONS) -> MCPServe
                        traits: Optional[dict] = None, why: str = "", force: bool = False) -> dict:
         return schemas.propose_type(db, agent, kind, name, json_schema, traits=traits,
                                     why=why, force=force)
+
+    @mcp.tool(annotations=RO,
+              description="What changed in the schema (and guide) since you last looked. Pass the "
+                          "`cursor` from a previous schema_get/schema_changes; returns each type "
+                          "that appeared or was re-versioned with who/when/why, so you can re-read "
+                          "only what moved. Call this when schema_version differs from your last one.")
+    @_envelope
+    def schema_changes(since_cursor: int = 0, include_guide: bool = True) -> dict:
+        return schemas.changes_since(db, since_cursor, include_guide=include_guide)
 
     @mcp.tool(annotations=WRITE,
               description="Promote a proposed type version to active (reviewer/human action).")

@@ -9,7 +9,7 @@ with priority/state/next_action), `measurement` (value + denominator + unit + sc
 `verdict` (subject + grade + venue + rationale), `note`, `lane` (a workstream), `instrument`
 (a scorer/tool with recall/defect stats).
 
-**Edge type:** `documented_by` (finding/component/entry_point/function → lane).
+**Edge types:** `documented_by` (finding/component/entry_point/function → lane) and `same_as` (symmetric, `*`→`*`) for aliasing/deduplicating nodes that denote the same thing, carrying a `confidence` (exact/semantic/partial) and an optional `canonical` node_id.
 
 Layers on top of `security-research` (its `documented_by` range references `finding` etc.), so
 apply that first:
