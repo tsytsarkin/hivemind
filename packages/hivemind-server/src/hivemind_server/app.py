@@ -81,6 +81,8 @@ def build_app(cfg: Optional[Config] = None) -> Starlette:
     mcps = []
     for project in registry.all():
         project.tokens.ensure_first_token(client_id=f"{project.name}-bootstrap")
+        from . import guide as _guide
+        _guide.ensure_core_guide(project.db)
         mcp = build_mcp(project)
         mcps.append(mcp)
         asgi = mcp.streamable_http_app(streamable_http_path="/mcp",

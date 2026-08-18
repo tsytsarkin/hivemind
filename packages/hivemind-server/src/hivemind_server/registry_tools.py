@@ -12,6 +12,7 @@ from mcp.types import ToolAnnotations
 from . import registry as reg
 from .db import Conflict, Invalid, NotFound
 from .rest_blobs import register_blob_routes
+from .rest_guide import register_guide_routes
 
 RO = ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True)
 WRITE = ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=False)
@@ -36,6 +37,7 @@ def _envelope(fn):
 
 def attach(mcp, project) -> None:
     register_blob_routes(mcp, project)
+    register_guide_routes(mcp, project)
     store = project.blobs
     db = project.db
     base = f"/p/{project.name}"

@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "hivemind": {
+      "type": "http",
+      "url": "${user_config.server_url}/mcp",
+      "headers": { "Authorization": "Bearer ${user_config.api_token}" },
+      "timeout": 600000,
+      "alwaysLoad": true
+    }
+  }
+}
