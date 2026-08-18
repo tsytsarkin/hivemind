@@ -1,0 +1,16 @@
+# uv workspace root — see https://docs.astral.sh/uv/concepts/projects/workspaces/
+[project]
+name = "hivemind-workspace"
+version = "0.1.0"
+description = "Hivemind — shared agent knowledge-graph + artifact store + tool registry"
+requires-python = ">=3.9"
+
+[tool.uv.workspace]
+members = ["packages/*"]
+
+[tool.uv.sources]
+hivemind-server = { workspace = true }
+hivemind = { workspace = true }
+
+[dependency-groups]
+dev = ["pytest>=8", "pytest-asyncio>=0.24", "httpx>=0.27"]

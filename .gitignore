@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# uv
+# (uv.lock IS committed; caches are not)
+
+# Runtime data — never commit the live DB, blobs, or tokens
+hivemind-data/
+*.db
+*.db-wal
+*.db-shm
+blobs/
+tokens.json
+*.token
+
+# OS
+.DS_Store
+
+# local dev tooling
+.tooling/
