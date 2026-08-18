@@ -25,3 +25,10 @@ def db(tmp_path):
         schemas.define_type(cur, tx, "edge", "depends_on", obj, status="active",
                             traits={"versioned": True, "acyclic": True})
     return d
+
+
+import pytest as _pytest
+
+@_pytest.fixture
+def anyio_backend():
+    return "asyncio"

@@ -1,0 +1,169 @@
+"""MCP tool surface. `build_mcp(project)` returns an MCPServer whose tools/routes are bound to
+that project's data. Few powerful, namespaced tools; read tools annotated read-only; every tool
+returns a uniform envelope so agents get actionable errors instead of opaque failures.
+"""
+from __future__ import annotations
+
+import functools
+from typing import Any, Callable, Optional
+
+from mcp.server import MCPServer
+from mcp.types import ToolAnnotations
+
+from . import graph, guide, schemas
+from .db import Conflict, Invalid, NotFound
+from .project import Project
+
+INSTRUCTIONS = (
+    "Hivemind is a shared, versioned knowledge graph + artifact store + tool registry for an "
+    "agent fleet. It is domain-agnostic: node and edge TYPES are defined at runtime in the schema. "
+    "Before writing, call schema_get to see the types this project defines, and read the live "
+    "guide via guide_get(section='core'). Two versioning axes: revision (supersession — pass "
+    "expected_head for safe concurrent edits) and subject-version (the version of the described "
+    "thing, e.g. an OS build — pass subject_key/subject_version). Large binaries go through the "
+    "REST /blobs endpoints (hivemind CLI), never inline. Nodes flagged 'disputed' have an open "
+    "assertive edge — resolve before relying on them."
+)
+
+RO = ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True)
+WRITE = ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=False)
+
+
+def _envelope(fn: Callable) -> Callable:
+    """Run a tool body; convert engine exceptions into an actionable, self-correctable result."""
+    @functools.wraps(fn)
+    def wrap(*a, **k):
+        try:
+            out = fn(*a, **k)
+            if isinstance(out, dict) and "ok" not in out:
+                out = {"ok": True, **out}
+            return out
+        except Conflict as e:
+            return {"ok": False, "error_kind": "conflict",
+                    "error": f"{e}. Re-read the node (graph_get) and retry with the current head."}
+        except NotFound as e:
+            return {"ok": False, "error_kind": "not_found", "error": str(e)}
+        except Invalid as e:
+            return {"ok": False, "error_kind": "invalid", "error": str(e)}
+    return wrap
+
+
+def build_mcp(project: Project, *, instructions: str = INSTRUCTIONS) -> MCPServer:
+    db = project.db
+    mcp = MCPServer(name=f"hivemind:{project.name}", instructions=instructions, version="0.1.0")
+
+    # ── graph reads ──────────────────────────────────────────────────────────────
+    @mcp.tool(annotations=RO, description="Search nodes by text; flags disputed nodes. Paginated.")
+    @_envelope
+    def graph_search(query: str = "", types: Optional[list[str]] = None,
+                     limit: int = 25, cursor: int = 0) -> dict:
+        return graph.search_nodes(db, query, types=types, limit=limit, cursor=cursor)
+
+    @mcp.tool(annotations=RO,
+              description="Fetch a node by node_id OR (subject_key+subject_version). "
+                          "history=true returns the full revision chain (newest first); "
+                          "as_of=<tx_id|ISO time> returns the revision current then.")
+    @_envelope
+    def graph_get(node_id: Optional[str] = None, subject_key: Optional[str] = None,
+                  subject_version: Optional[str] = None, as_of: Any = None,
+                  history: bool = False) -> dict:
+        return graph.get_node(db, node_id=node_id, subject_key=subject_key,
+                              subject_version=subject_version, as_of=as_of, history=history)
+
+    @mcp.tool(annotations=RO,
+              description="List all subject-version cells of a thing (ordered), or with "
+                          "as_of_subject resolve the newest cell at/before that version.")
+    @_envelope
+    def graph_subjects(subject_key: str, as_of_subject: Optional[str] = None) -> dict:
+        return graph.list_subjects(db, subject_key, as_of_subject=as_of_subject)
+
+    @mcp.tool(annotations=RO,
+              description="Bounded neighbor traversal (depth 1..4) over named edge types. "
+                          "direction=out|in|both.")
+    @_envelope
+    def graph_neighbors(node_id: str, edge_types: Optional[list[str]] = None,
+                        depth: int = 1, direction: str = "out") -> dict:
+        return graph.neighbors(db, node_id, edge_types=edge_types, depth=depth,
+                               direction=direction)
+
+    # ── graph writes ─────────────────────────────────────────────────────────────
+    @mcp.tool(annotations=WRITE,
+              description="Create a node, or supersede an existing one. Give subject_key+"
+                          "subject_version to target a subject cell (new cell = create, existing "
+                          "= supersede). Pass expected_head for optimistic concurrency (409 on "
+                          "conflict). `agent` labels the writer for provenance.")
+    @_envelope
+    def graph_upsert(type: str, props: dict, agent: str = "agent",
+                     subject_key: Optional[str] = None, subject_version: Optional[str] = None,
+                     subject_order: Optional[str] = None, node_id: Optional[str] = None,
+                     expected_head: Optional[str] = None, reason: Optional[str] = None) -> dict:
+        return graph.upsert_node(db, agent, type, props, subject_key=subject_key,
+                                 subject_version=subject_version, subject_order=subject_order,
+                                 node_id=node_id, expected_head=expected_head, reason=reason)
+
+    @mcp.tool(annotations=WRITE,
+              description="Add or supersede a typed edge (any schema-defined edge type). Bulk "
+                          "(versioned=0) types require source_tag. For assertive edge types, put "
+                          "status:'open'|'resolved' in props.")
+    @_envelope
+    def graph_link(edge_type: str, src: str, dst: str, props: Optional[dict] = None,
+                   agent: str = "agent", expected_head: Optional[str] = None,
+                   source_tag: Optional[str] = None, reason: Optional[str] = None) -> dict:
+        return graph.upsert_edge(db, agent, edge_type, src, dst, props or {},
+                                 expected_head=expected_head, source_tag=source_tag, reason=reason)
+
+    @mcp.tool(annotations=WRITE,
+              description="Wholesale (re)load a bulk edge set under a source_tag (e.g. an imported "
+                          "call graph). edges = [[src,dst,{props}], ...]. Replaces the prior set "
+                          "for that (edge_type, source_tag).")
+    @_envelope
+    def graph_bulk_load(edge_type: str, source_tag: str, edges: list,
+                        agent: str = "agent") -> dict:
+        norm = [(e[0], e[1], e[2] if len(e) > 2 else {}) for e in edges]
+        return graph.bulk_replace(db, agent, edge_type, source_tag, norm)
+
+    # ── schema ───────────────────────────────────────────────────────────────────
+    @mcp.tool(annotations=RO,
+              description="Dump this project's node/edge types (schemas, traits, status) + "
+                          "schema_version. Read this before writing to learn the vocabulary.")
+    @_envelope
+    def schema_get(kind: Optional[str] = None, name: Optional[str] = None) -> dict:
+        return schemas.get_schema(db, kind=kind, name=name)
+
+    @mcp.tool(annotations=WRITE,
+              description="Propose an ADDITIVE schema change (new type, optional prop, wider enum, "
+                          "new edge type). Creates a 'proposed' type for human promotion. "
+                          "traits (edge only): versioned, symmetric, transitive, acyclic, "
+                          "assertive, directed, src_types, dst_types, cardinality. "
+                          "Destructive changes are rejected — they are human-only.")
+    @_envelope
+    def schema_propose(kind: str, name: str, json_schema: dict, agent: str = "agent",
+                       traits: Optional[dict] = None, why: str = "", force: bool = False) -> dict:
+        return schemas.propose_type(db, agent, kind, name, json_schema, traits=traits,
+                                    why=why, force=force)
+
+    @mcp.tool(annotations=WRITE,
+              description="Promote a proposed type version to active (reviewer/human action).")
+    @_envelope
+    def schema_promote(kind: str, name: str, agent: str = "reviewer",
+                       version: Optional[int] = None) -> dict:
+        return schemas.promote_type(db, agent, kind, name, version=version)
+
+    # ── guide ────────────────────────────────────────────────────────────────────
+    @mcp.tool(annotations=RO,
+              description="Read the live guide. No section = the section index (names + token "
+                          "counts). Pass section (e.g. 'core') for its body.")
+    @_envelope
+    def guide_get(section: Optional[str] = None) -> dict:
+        return guide.get_section(db, section) if section else guide.get_index(db)
+
+    @mcp.tool(annotations=WRITE,
+              description="Propose a guide edit for human review (the guide is human-gated; this "
+                          "does NOT change the live guide). Use for domain knowledge worth sharing.")
+    @_envelope
+    def guide_propose(section: str, body: str, agent: str = "agent", why: str = "") -> dict:
+        return guide.propose_section(db, agent, section, body, why=why)
+
+    from . import registry_tools  # attach artifact + tool-registry tools (added incrementally)
+    registry_tools.attach(mcp, project)
+    return mcp

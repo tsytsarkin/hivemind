@@ -128,3 +128,163 @@ def define_type(cur, tx: Tx, kind: str, name: str, json_schema: dict,
         )
     _bump_schema_version(cur, tx)
     return version
+
+
+# ── additive-only guard + near-dup detection + proposal workflow ───────────────────
+import difflib
+
+from .db import Database
+
+_DEPRECATED = "deprecated"
+
+
+def _all_type_names(cur, kind: str) -> list[str]:
+    tbl = _table(kind)
+    return [r["name"] for r in cur.execute(f"SELECT DISTINCT name FROM {tbl}").fetchall()]
+
+
+def _near_duplicates(cur, kind: str, name: str, threshold: float = 0.82) -> list[str]:
+    """Return existing type names confusingly similar to `name` (type-sprawl guard)."""
+    out = []
+    for existing in _all_type_names(cur, kind):
+        if existing == name:
+            continue
+        ratio = difflib.SequenceMatcher(None, name.lower(), existing.lower()).ratio()
+        if ratio >= threshold:
+            out.append(existing)
+    return out
+
+
+def _additive_ok(old: dict, new: dict) -> Optional[str]:
+    """Best-effort backward-compat check. Returns a reason string if NON-additive, else None.
+
+    Allowed (additive): add properties, drop a field from `required`, widen an enum.
+    Rejected (destructive, human-only): add a new required field, tighten additionalProperties,
+    shrink an enum, remove a previously-defined property.
+    """
+    old_req = set(old.get("required", []))
+    new_req = set(new.get("required", []))
+    added_required = new_req - old_req
+    if added_required:
+        return f"adds required field(s) {sorted(added_required)} (breaks existing data)"
+    old_props = old.get("properties", {}) or {}
+    new_props = new.get("properties", {}) or {}
+    removed = set(old_props) - set(new_props)
+    if removed:
+        return f"removes previously-defined propert(y/ies) {sorted(removed)}"
+    if old.get("additionalProperties", True) not in (False,) and \
+            new.get("additionalProperties", True) is False:
+        return "tightens additionalProperties from allowed to false"
+    for key, oldp in old_props.items():
+        newp = new_props.get(key, {})
+        if isinstance(oldp, dict) and "enum" in oldp and isinstance(newp, dict) and "enum" in newp:
+            dropped = set(oldp["enum"]) - set(newp["enum"])
+            if dropped:
+                return f"property {key!r} enum drops value(s) {sorted(map(str, dropped))}"
+    return None
+
+
+def propose_type(db: Database, agent_id: str, kind: str, name: str, json_schema: dict, *,
+                 traits: Optional[dict] = None, why: str = "", force: bool = False) -> dict:
+    """Agent-facing: propose an ADDITIVE type change. Creates a `proposed` version for review."""
+    with db.write(agent_id, f"schema_propose {kind}:{name}") as tx:
+        cur = tx.cur
+        warnings = []
+        existing = usable_type(cur, kind, name)
+        if existing is None:
+            dups = _near_duplicates(cur, kind, name)
+            if dups and not force:
+                raise Invalid(
+                    f"proposed {kind} type {name!r} looks like existing type(s) {dups}. "
+                    f"Reuse one, or re-propose with force=true and explain why it differs in `why`."
+                )
+            if dups:
+                warnings.append(f"near-duplicate of {dups} (forced)")
+        else:
+            reason = _additive_ok(json.loads(existing["json_schema"]), json_schema)
+            if reason is not None:
+                raise Invalid(
+                    f"non-additive schema change to {name!r}: {reason}. "
+                    f"Destructive changes are human-only (apply a pack with an operator)."
+                )
+        version = define_type(cur, tx, kind, name, json_schema, status="proposed",
+                              traits=traits)
+        return {"kind": kind, "name": name, "version": version, "status": "proposed",
+                "why": why, "warnings": warnings}
+
+
+def promote_type(db: Database, agent_id: str, kind: str, name: str,
+                 version: Optional[int] = None) -> dict:
+    """Human/reviewer: promote a proposed type version to active (older active → deprecated)."""
+    tbl = _table(kind)
+    with db.write(agent_id, f"schema_promote {kind}:{name}") as tx:
+        cur = tx.cur
+        if version is None:
+            row = cur.execute(
+                f"SELECT MAX(version) v FROM {tbl} WHERE name=? AND status='proposed'", (name,)
+            ).fetchone()
+            if not row or row["v"] is None:
+                raise Invalid(f"no proposed version of {kind} {name!r} to promote")
+            version = row["v"]
+        cur.execute(f"UPDATE {tbl} SET status='{_DEPRECATED}' WHERE name=? AND status='active'",
+                    (name,))
+        n = cur.execute(f"UPDATE {tbl} SET status='active' WHERE name=? AND version=?",
+                        (name, version)).rowcount
+        if n == 0:
+            raise Invalid(f"{kind} {name!r} v{version} not found")
+        return {"kind": kind, "name": name, "version": version, "status": "active"}
+
+
+def apply_pack(db: Database, agent_id: str, pack: dict, *, force: bool = True) -> dict:
+    """Operator: load a domain pack's schema. Defines node/edge types as ACTIVE directly.
+
+    pack = {"node_types": {name: {"schema": {...}, "parent": ...}},
+            "edge_types": {name: {"schema": {...}, ...traits}}}
+    """
+    created = {"node": [], "edge": []}
+    with db.write(agent_id, f"apply_pack {pack.get('name','?')}") as tx:
+        cur = tx.cur
+        for name, spec in (pack.get("node_types") or {}).items():
+            spec = spec or {}
+            existing = usable_type(cur, "node", name)
+            if existing is not None and not force:
+                reason = _additive_ok(json.loads(existing["json_schema"]),
+                                      spec.get("schema", {"type": "object"}))
+                if reason:
+                    raise Invalid(f"pack change to node {name!r} non-additive: {reason}")
+            v = define_type(cur, tx, "node", name, spec.get("schema", {"type": "object"}),
+                            status="active", traits={"parent": spec.get("parent")})
+            created["node"].append(f"{name}@{v}")
+        for name, spec in (pack.get("edge_types") or {}).items():
+            spec = spec or {}
+            traits = {k: spec.get(k) for k in _EDGE_TRAITS}
+            v = define_type(cur, tx, "edge", name, spec.get("schema", {"type": "object"}),
+                            status="active", traits=traits)
+            created["edge"].append(f"{name}@{v}")
+        return {"pack": pack.get("name"), "created": created}
+
+
+def get_schema(db: Database, *, kind: Optional[str] = None,
+               name: Optional[str] = None) -> dict:
+    """Dump the usable node/edge types (+ traits + status) and the schema_version counter."""
+    out = {"schema_version": int(db.meta_get("schema_version", "0")), "node_types": [],
+           "edge_types": []}
+    with db.read() as cur:
+        kinds = [kind] if kind else ["node", "edge"]
+        for k in kinds:
+            tbl = _table(k)
+            names = [name] if name else _all_type_names(cur, k)
+            for nm in names:
+                t = usable_type(cur, k, nm)
+                if t is None:
+                    continue
+                entry = {"name": nm, "version": t["version"], "status": t["status"],
+                         "schema": json.loads(t["json_schema"])}
+                if k == "edge":
+                    entry.update({kk: t[kk] for kk in
+                                  ("directed", "symmetric", "transitive", "acyclic",
+                                   "versioned", "assertive", "cardinality")})
+                    entry["src_types"] = json.loads(t["src_types"])
+                    entry["dst_types"] = json.loads(t["dst_types"])
+                out[f"{k}_types"].append(entry)
+    return out
