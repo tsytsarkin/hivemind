@@ -58,3 +58,10 @@ hivemind health
 > resolve modern package metadata. The exact-pin `requirements-*.txt` files assume the same
 > package index uv resolved against; if a pin is unavailable on your mirror, use the normal
 > `pip install ./packages/<pkg>` path above.
+
+> **Prefer a newer Python for the venv.** `requires-python >=3.9` is a *floor* (so the client also
+> runs on the Mac Studio's stock 3.9.6 with nothing installed) — it is not a cap. If a newer
+> interpreter is available, use it and the old-pip friction disappears; the exact pins then install
+> cleanly. Get one with zero system changes via uv: `uv python install 3.13` then
+> `uv venv --python 3.13 .venv-hm` (or `python3.13 -m venv .venv-hm` if you have it). Verified: the
+> pinned `requirements-client.txt` installs cleanly on Python 3.13.
