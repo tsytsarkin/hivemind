@@ -277,6 +277,8 @@ source = { virtual = "." }
 
 [package.dev-dependencies]
 dev = [
+    { name = "hivemind" },
+    { name = "hivemind-server" },
     { name = "httpx" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -286,6 +288,8 @@ dev = [
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "hivemind", editable = "packages/hivemind-client" },
+    { name = "hivemind-server", editable = "packages/hivemind-server" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "pytest", specifier = ">=8" },
     { name = "pytest-asyncio", specifier = ">=0.24" },
