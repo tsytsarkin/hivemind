@@ -4,6 +4,11 @@ A **domain-agnostic** shared service that lets a fleet of AI agents (local and r
 LAN/Tailscale mesh) read and write a common, versioned knowledge graph, store large artifacts, and
 publish/consume standalone tools — concurrently and safely.
 
+> ⚠️ **Work in progress — proof of concept.** This is early, has had light real-world use, and
+> almost certainly contains bugs, rough edges, and missing hardening. Treat it as a foundation to
+> build on, not a finished product. **Contributions are welcome** — please open issues/PRs upstream,
+> or **fork it** and make it your own. No stability or backwards-compatibility guarantees yet.
+
 Nothing about any particular subject is baked into the engine: **every node and edge type is
 defined at runtime in the schema.** The engine provides only *mechanics* (typed nodes/edges,
 two-axis versioning, content-addressed blobs, provenance, traversal, search, a tool registry, a
