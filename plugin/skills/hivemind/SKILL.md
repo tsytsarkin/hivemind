@@ -9,7 +9,7 @@ description: >-
   Domain-agnostic — call schema_get and guide_get first to learn this project's vocabulary.
 allowed-tools: Bash(${CLAUDE_SKILL_DIR}/scripts/guide.sh *) Read
 metadata:
-  version: "0.2.0"
+  version: "0.3.0"
 ---
 
 # Hivemind
@@ -96,43 +96,39 @@ DEPLOY.md). Point it at your project: `export HIVEMIND_SERVER_URL=… HIVEMIND_T
   generated `RUN.md` (bootstrap uv first: `scripts/bootstrap-uv.sh`).
 - `hivemind guide get [section]`, `hivemind schema get`.
 
-## This deployment: iOS/macOS security research
+## Writing safely in a shared, multi-writer graph
 
-Read `guide_get("taxonomy")` and `guide_get("reachability")` before writing. Two rules bite
-immediately:
+These are engine-level behaviours, not domain advice. Read `guide_get()` for the section index and
+follow whatever deployment sections exist before writing.
 
-**1. Principals and builds are subject-keyed identities. Look them up; never create an unkeyed one.**
+**Shared vocabulary nodes must be subject-keyed.** Anything many nodes point at — attacker
+positions, builds, or any shared identity — must be created with a stable `subject_key` and looked
+up before creating:
 
-    graph_get(subject_key="principal:sandboxed-app", subject_version="-")
-    graph_get(subject_key="build:24A5418b",          subject_version="-")
+    graph_get(subject_key="<kind>:<slug>", subject_version="-")
 
-A node created without a `subject_key` cannot be found or superseded by any other agent. Two
-concurrent importers already produced 21 duplicate principals/builds that way and needed 2,586
-edges re-pointed to undo it. Canonical principals: `sandboxed-app`, `unsandboxed-app`,
-`compromised-renderer`, `remote-web-content`, `remote-message`, `attacker-media`, `nearby-wireless`,
-`unauth-network`, `usb-physical`, `ota-baseband`, `second-stage`, `root`, `kernel`.
+A node with no `subject_key` is reachable only by `node_id`, so no other agent can find, reuse or
+supersede it — they create their own and the graph silently forks into parallel vocabularies with
+split edges. Check the deployment's guide for its canonical key list rather than inventing values.
 
-**2. No reachability claim without provenance.** `attacker_reaches` requires `verification`
-(`device-measured` > `vm-measured` > `profile-read` > `static-callgraph` > `doc-inferred` >
-`inferred`). To claim something is NOT reachable use `attacker_blocked`, which additionally requires
-a `control_test` — absence of an edge means *unknown*, never *blocked*.
+**Reconcile duplicates with `same_as`, never `contradicts`** — a duplicate is not a dispute, and
+`contradicts` is assertive so it would wrongly flag both nodes `disputed`. Set `props.canonical`,
+re-point the loser's edges, then mark it `deprecated`. Note that `redirect_to` does not merge edges:
+traversal resolves redirects only on the START node, so redirecting orphans the loser's edges rather
+than folding them in. Re-creating each edge against the canonical node is the only correct merge.
 
-Duplicates get `same_as` (symmetric, non-assertive), NOT `contradicts` — a duplicate is not a
-dispute. Set `props.canonical`, re-point the edges, then mark the loser `deprecated`. There is no
-delete, and the engine's `redirect_to` column is not exposed through MCP (and would not merge edges
-anyway — `neighbors()` resolves redirects only on the start node).
+## Gotchas worth knowing before you trust a write
 
-## Gotchas measured on this server
-
-- **A refused write is NOT a JSON-RPC error.** Validation failures come back as `{"ok": false,
-  "error_kind": "invalid", ...}` inside a normal 200 response. A client that only checks for
-  `error` will report success while every write silently vanishes. Check `ok`.
-- **`graph_search` cannot enumerate.** With an empty query it ignores `cursor` (re-serving page 0
-  forever) and returns 0 when a `types` filter is set. Use it for text search only; to walk the
-  graph, traverse from a known node or query the store directly.
-- Endpoint types ARE enforced against each edge type's `src_types`/`dst_types`.
-- Multiple writers are usually active. Pass `expected_head` when superseding; a 409 means re-read
-  and retry, not failure.
+- **A refused write is not a transport error.** Validation and endpoint-type failures come back as
+  `{"ok": false, "error_kind": "invalid", ...}` inside a normal 200 response. A client that only
+  checks for a JSON-RPC `error` reports success while every write silently vanishes. Check `ok`.
+- **`graph_search` is for text search, not enumeration.** With an empty query it ignores `cursor`
+  (re-serving the first page indefinitely) and returns nothing when a `types` filter is set. To walk
+  the graph, traverse from a known node.
+- Edge endpoint types are enforced against each edge type's `src_types`/`dst_types`.
+- Pass `expected_head` when superseding; a 409 means re-read and retry, not failure.
+- Widening an enum, adding an optional property, or widening an edge's `dst_types` is additive and
+  safe — re-applying a pack inserts a new type *version* and leaves existing data valid.
 
 ## Safety
 

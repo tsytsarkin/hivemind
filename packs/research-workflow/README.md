@@ -1,10 +1,10 @@
 # research-workflow pack
 
-Research-workflow vocabulary **captured from the live `default` project** — these types were added
+Research-workflow vocabulary **captured from a live project** — these types were added
 by agents at runtime (via `schema_propose`/`schema_apply`) and existed in no pack file, so they were
 not version-controlled. This pack pins them.
 
-**Node types:** `claim` (a statement with method/denominator/confidence), `lead` (an open question
+**Node types:** `device` + `lease` (test-device fleet coordination), `claim` (a statement with method/denominator/confidence), `lead` (an open question
 with priority/state/next_action), `measurement` (value + denominator + unit + scorer),
 `verdict` (subject + grade + venue + rationale), `note`, `lane` (a workstream), `instrument`
 (a scorer/tool with recall/defect stats).

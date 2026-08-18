@@ -11,7 +11,7 @@
       "name": "hivemind",
       "source": "./plugin",
       "description": "Connect Claude Code to a self-hosted Hivemind server (shared knowledge graph + artifacts + tool registry) and teach agents to use it.",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "category": "productivity",
       "homepage": "https://github.com/tsytsarkin/hivemind"
     }

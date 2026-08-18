@@ -28,14 +28,19 @@
               "speculative"
             ]
           },
-          "atlas_claim_id": {
-            "type": "integer"
-          },
           "author": {
             "type": "string"
           },
           "notes": {
             "type": "string"
+          },
+          "source_id": {
+            "type": "string",
+            "description": "Identifier of this record in the external system it was imported from, if any."
+          },
+          "source_system": {
+            "type": "string",
+            "description": "Name of the external system this record was imported from, if any."
           }
         },
         "required": [
@@ -69,11 +74,16 @@
           "powerless": {
             "type": "boolean"
           },
-          "atlas_instrument_id": {
-            "type": "integer"
-          },
           "notes": {
             "type": "string"
+          },
+          "source_id": {
+            "type": "string",
+            "description": "Identifier of this record in the external system it was imported from, if any."
+          },
+          "source_system": {
+            "type": "string",
+            "description": "Name of the external system this record was imported from, if any."
           }
         },
         "required": [
@@ -166,8 +176,13 @@
           "component": {
             "type": "string"
           },
-          "atlas_lead_id": {
-            "type": "integer"
+          "source_id": {
+            "type": "string",
+            "description": "Identifier of this record in the external system it was imported from, if any."
+          },
+          "source_system": {
+            "type": "string",
+            "description": "Name of the external system this record was imported from, if any."
           }
         },
         "required": [
@@ -201,11 +216,16 @@
           "base_rate": {
             "type": "string"
           },
-          "atlas_measurement_id": {
-            "type": "integer"
-          },
           "notes": {
             "type": "string"
+          },
+          "source_id": {
+            "type": "string",
+            "description": "Identifier of this record in the external system it was imported from, if any."
+          },
+          "source_system": {
+            "type": "string",
+            "description": "Name of the external system this record was imported from, if any."
           }
         },
         "required": [
@@ -230,11 +250,16 @@
           "build": {
             "type": "string"
           },
-          "atlas_note_id": {
-            "type": "integer"
-          },
           "author": {
             "type": "string"
+          },
+          "source_id": {
+            "type": "string",
+            "description": "Identifier of this record in the external system it was imported from, if any."
+          },
+          "source_system": {
+            "type": "string",
+            "description": "Name of the external system this record was imported from, if any."
           }
         },
         "required": [
@@ -269,15 +294,148 @@
           "build": {
             "type": "string"
           },
-          "atlas_verdict_id": {
-            "type": "integer"
-          },
           "author": {
             "type": "string"
+          },
+          "source_id": {
+            "type": "string",
+            "description": "Identifier of this record in the external system it was imported from, if any."
+          },
+          "source_system": {
+            "type": "string",
+            "description": "Name of the external system this record was imported from, if any."
           }
         },
         "required": [
           "subject"
+        ],
+        "additionalProperties": true
+      }
+    },
+    "device": {
+      "schema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "udid": {
+            "type": "string"
+          },
+          "devicectl_id": {
+            "type": "string"
+          },
+          "build": {
+            "type": "string"
+          },
+          "is_research_unit": {
+            "type": "boolean",
+            "description": "True if this unit is a dedicated research device rather than someone's daily driver."
+          },
+          "off_limits": {
+            "type": "boolean"
+          },
+          "off_limits_reason": {
+            "type": "string"
+          },
+          "venue": {
+            "type": "string"
+          },
+          "owner_host": {
+            "type": "string"
+          },
+          "lease_holder": {
+            "type": "string"
+          },
+          "lease_purpose": {
+            "type": "string"
+          },
+          "lease_acquired_at": {
+            "type": "string"
+          },
+          "lease_expires_at": {
+            "type": "string"
+          },
+          "lease_state": {
+            "enum": [
+              "free",
+              "held",
+              "reaped",
+              "off-limits"
+            ]
+          },
+          "notes": {
+            "type": "string"
+          },
+          "source_id": {
+            "type": "string",
+            "description": "Identifier of this record in the external system it was imported from, if any."
+          },
+          "source_system": {
+            "type": "string",
+            "description": "Name of the external system this record was imported from, if any."
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": true
+      }
+    },
+    "lease": {
+      "schema": {
+        "type": "object",
+        "properties": {
+          "device": {
+            "type": "string"
+          },
+          "holder": {
+            "type": "string"
+          },
+          "purpose": {
+            "type": "string"
+          },
+          "acquired_at": {
+            "type": "string"
+          },
+          "expires_at": {
+            "type": "string"
+          },
+          "released_at": {
+            "type": "string"
+          },
+          "release_note": {
+            "type": "string"
+          },
+          "renew_count": {
+            "type": "integer"
+          },
+          "reaped": {
+            "type": "boolean"
+          },
+          "build": {
+            "type": "string"
+          },
+          "outcome": {
+            "type": "string"
+          },
+          "notes": {
+            "type": "string"
+          },
+          "source_id": {
+            "type": "string",
+            "description": "Identifier of this record in the external system it was imported from, if any."
+          },
+          "source_system": {
+            "type": "string",
+            "description": "Name of the external system this record was imported from, if any."
+          }
+        },
+        "required": [
+          "holder"
         ],
         "additionalProperties": true
       }

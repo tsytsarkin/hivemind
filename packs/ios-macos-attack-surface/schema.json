@@ -255,13 +255,15 @@
             "type": "string"
           },
           "cwe": {
-            "type": "string"
+            "type": "string",
+            "description": "CWE identifier for the defect class, if one applies."
           },
           "summary": {
             "type": "string"
           },
           "attacker_position": {
-            "type": "string"
+            "type": "string",
+            "description": "subject_key slug of the principal this is reachable from (see the identity guide section)."
           },
           "interaction": {
             "enum": [
@@ -270,28 +272,40 @@
               "multi-step",
               "user-driven",
               "physical"
-            ]
+            ],
+            "description": "User interaction required to reach the defect."
           },
           "measured_on": {
-            "type": "string"
+            "type": "string",
+            "description": "Build the analysis or measurement was actually performed on."
           },
           "shipping_presence": {
-            "type": "string"
+            "type": "string",
+            "description": "How presence in a shipping release was established, and with what result."
           },
           "target_flag": {
-            "type": "string"
+            "type": "string",
+            "description": "Any vendor bounty-programme capture claim: what was captured and on which venue, or the worked reason none was claimable."
           },
           "case_id": {
-            "type": "string"
+            "type": "string",
+            "description": "Vendor-assigned case identifier once the report is filed."
           },
           "package": {
-            "type": "string"
+            "type": "string",
+            "description": "Filename of the frozen report package, if one was cut."
           },
           "ledger_row": {
-            "type": "string"
+            "type": "string",
+            "description": "Reference to this finding in the project's external submission-tracking document, if it keeps one."
           },
           "submitted_on": {
-            "type": "string"
+            "type": "string",
+            "description": "Date the report was submitted (ISO 8601)."
+          },
+          "source_path": {
+            "type": "string",
+            "description": "Path, relative to the project root, of the working notes this record was derived from."
           }
         },
         "required": [
@@ -757,42 +771,6 @@
       ],
       "dst_types": [
         "lane"
-      ]
-    },
-    "same_as": {
-      "schema": {
-        "type": "object",
-        "properties": {
-          "confidence": {
-            "enum": [
-              "exact",
-              "semantic",
-              "partial"
-            ]
-          },
-          "canonical": {
-            "type": "string"
-          },
-          "reason": {
-            "type": "string"
-          },
-          "notes": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "confidence"
-        ],
-        "additionalProperties": true
-      },
-      "versioned": true,
-      "symmetric": true,
-      "assertive": false,
-      "src_types": [
-        "*"
-      ],
-      "dst_types": [
-        "*"
       ]
     },
     "evidence_for": {
