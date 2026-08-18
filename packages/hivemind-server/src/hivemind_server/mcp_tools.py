@@ -184,6 +184,89 @@ def build_mcp(project: Project, *, instructions: str = INSTRUCTIONS) -> MCPServe
     def schema_apply(pack: dict, agent: str = "operator", force: bool = False) -> dict:
         return schemas.apply_pack(db, agent, pack, force=force)
 
+    # ── mini-skills: documented procedures, versioned like tools ──────────────────
+    @mcp.tool(annotations=RO,
+              description="Search the mini-skill registry — procedures other agents wrote down "
+                          "(how to do a complex action, with the gotchas). ALWAYS search here "
+                          "before working out a non-obvious procedure from scratch.")
+    @_envelope
+    def skill_search(query: str = "", tags: Optional[list[str]] = None, limit: int = 20,
+                     response_format: str = "concise") -> dict:
+        return skills.search(db, query, tags=tags, limit=limit, format=response_format)
+
+    @mcp.tool(annotations=RO,
+              description="Fetch a mini-skill's full procedure. constraint accepts ^, ~, >= or an "
+                          "exact version; default is the newest non-yanked version.")
+    @_envelope
+    def skill_get(id: str, constraint: str = "") -> dict:
+        return skills.get(db, id, constraint)
+
+    @mcp.tool(annotations=WRITE,
+              description="Publish a mini-skill: a repeatable procedure you worked out, so nobody "
+                          "re-derives it. Versions are IMMUTABLE — bump the semver to revise. "
+                          "Write `body` as steps someone else can follow, include the gotchas, and "
+                          "state in `verified_how` how you confirmed it actually works.")
+    @_envelope
+    def skill_publish(id: str, version: str, title: str, description: str, body: str,
+                      agent: str = "agent", when_to_use: Optional[str] = None,
+                      tags: Optional[list[str]] = None, requires: Optional[dict] = None,
+                      verified_how: Optional[str] = None) -> dict:
+        return skills.publish(db, agent, id=id, version=version, title=title,
+                              description=description, body=body, when_to_use=when_to_use,
+                              tags=tags, requires=requires, verified_how=verified_how)
+
+    @mcp.tool(annotations=WRITE,
+              description="Yank a mini-skill version (hide it from search; still fetchable by "
+                          "exact pin). Use when a procedure has become wrong or unsafe.")
+    @_envelope
+    def skill_yank(id: str, version: str, reason: str = "", agent: str = "agent") -> dict:
+        return skills.yank(db, agent, id, version, reason)
+
+    # ── traps: recorded dead-ends ─────────────────────────────────────────────────
+    @mcp.tool(annotations=RO,
+              description="Search recorded dead-ends (approaches that wasted time and why). "
+                          "Check this BEFORE starting a non-trivial approach.")
+    @_envelope
+    def trap_search(query: str = "", node_id: Optional[str] = None,
+                    include_retired: bool = False, limit: int = 20,
+                    response_format: str = "concise") -> dict:
+        return traps.search(db, query, node_id=node_id, include_retired=include_retired,
+                            limit=limit, format=response_format)
+
+    @mcp.tool(annotations=RO, description="Fetch one trap in full.")
+    @_envelope
+    def trap_get(trap_id: str) -> dict:
+        return traps.get(db, trap_id)
+
+    @mcp.tool(annotations=WRITE,
+              description="Record a dead-end so nobody repeats it. REQUIRED: what_failed (what you "
+                          "actually tried) and symptom (what you actually observed) — a trap "
+                          "without both is an opinion. Attach it to a node with node_id, and/or "
+                          "scope it with subject_key+subject_version when it is only true for one "
+                          "version; omit both for a project-wide trap. Record this WHEN YOU "
+                          "ABANDON AN APPROACH, not at the end of the task.")
+    @_envelope
+    def trap_record(title: str, what_failed: str, symptom: str, agent: str = "agent",
+                    root_cause: Optional[str] = None, instead: Optional[str] = None,
+                    node_id: Optional[str] = None, subject_key: Optional[str] = None,
+                    subject_version: Optional[str] = None, cost_minutes: Optional[int] = None,
+                    evidence: Optional[str] = None, verified_how: Optional[str] = None,
+                    confidence: str = "medium") -> dict:
+        return traps.record(db, agent, title=title, what_failed=what_failed, symptom=symptom,
+                            root_cause=root_cause, instead=instead, node_id=node_id,
+                            subject_key=subject_key, subject_version=subject_version,
+                            cost_minutes=cost_minutes, evidence=evidence,
+                            verified_how=verified_how, confidence=confidence)
+
+    @mcp.tool(annotations=WRITE,
+              description="Retire or dispute a trap: status='retired' when it no longer applies "
+                          "(fixed, or was version-specific), 'disputed' when you have evidence it "
+                          "is wrong. Always give a reason — a trap that misleads is worse than no "
+                          "trap. Disputed traps stay visible.")
+    @_envelope
+    def trap_status(trap_id: str, status: str, reason: str = "", agent: str = "agent") -> dict:
+        return traps.set_status(db, agent, trap_id, status, reason)
+
     # ── guide ────────────────────────────────────────────────────────────────────
     @mcp.tool(annotations=RO,
               description="Read the live guide. No section = the section index (names + token "

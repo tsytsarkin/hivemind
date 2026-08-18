@@ -144,3 +144,30 @@ def _call(r):
         return sc
     # fall back to the text content block
     return json.loads(body["result"]["content"][0]["text"])
+
+
+EXPECTED_TOOLS = {
+    "graph_search", "graph_get", "graph_subjects", "graph_neighbors", "graph_upsert",
+    "graph_link", "graph_bulk_load", "schema_get", "schema_propose", "schema_changes",
+    "schema_promote", "schema_apply", "guide_get", "guide_propose",
+    "skill_search", "skill_get", "skill_publish", "skill_yank",
+    "trap_search", "trap_get", "trap_record", "trap_status",
+    "artifact_ref", "artifact_attach", "artifact_refs",
+    "tool_publish", "tool_resolve", "tool_search", "tool_yank",
+}
+
+
+@pytest.mark.anyio
+async def test_every_expected_tool_is_registered(env):
+    """Guards against a tool block silently failing to register (a source edit that didn't
+    apply still passes unit tests, because those call the modules directly)."""
+    application, proj, tok = env
+    transport = httpx.ASGITransport(app=application)
+    async with Lifespan(application), httpx.AsyncClient(transport=transport, base_url="http://t",
+                                                        timeout=30) as c:
+        base = f"/p/{proj.name}"
+        r = await _post(c, base, tok, "tools/list")
+        assert r.status_code == 200, r.text
+        names = {t["name"] for t in _parse(r)["result"]["tools"]}
+        missing = EXPECTED_TOOLS - names
+        assert not missing, f"tools missing from the MCP surface: {sorted(missing)}"
