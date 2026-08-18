@@ -65,3 +65,16 @@ hivemind health
 > cleanly. Get one with zero system changes via uv: `uv python install 3.13` then
 > `uv venv --python 3.13 .venv-hm` (or `python3.13 -m venv .venv-hm` if you have it). Verified: the
 > pinned `requirements-client.txt` installs cleanly on Python 3.13.
+
+## Network exposure (who can reach it)
+
+The server binds **`127.0.0.1` by default — localhost only**, so a plain `hivemind-server`
+run is *not* reachable from other machines. To serve a LAN/Tailscale network set
+`HIVEMIND_HOST=0.0.0.0` (this is what `deploy/hivemind.env` does) and confirm with
+`curl http://<server-ip>:8787/healthz` from another host.
+
+Bearer auth gates every `/p/<project>` request regardless — being on the LAN is not
+authorization (unauthenticated requests get `401`). Never bind a public interface.
+
+To add client machines (token minting, secure transfer, installing just the plugin), see
+[../docs/clients.md](../docs/clients.md).

@@ -58,6 +58,21 @@ hivemind schema apply packs/ios-macos-attack-surface/schema.json                
 ```
 See [docs/packs.md](docs/packs.md) and the [full docs](docs/) (data model, API, security, guides).
 
+## Adding machines
+
+**One server, many clients** — don't run a second server per machine (each has its own database,
+so it would be a separate graph). The server listens on `127.0.0.1` by default; set
+`HIVEMIND_HOST=0.0.0.0` to serve your LAN/Tailscale. To put a machine on it, mint a token on the
+server and install the plugin there — no server or checkout needed on the client:
+
+```sh
+hivemind-admin --project default mint-token --client-id laptop   # on the server
+claude plugin marketplace add tsytsarkin/hivemind                # on the new machine
+claude plugin install hivemind@hivemind-marketplace --scope user \
+  --config server_url=http://<server-ip>:8787/p/default --config api_token=hm_…
+```
+Full walkthrough incl. secure token transfer: **[docs/clients.md](docs/clients.md)**.
+
 ## Reproducible dependencies
 
 `uv.lock` is the source of truth; `deploy/requirements-{server,client}.txt` are generated from it

@@ -1,0 +1,16 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "hivemind-marketplace",
+  "description": "Hivemind — shared agent knowledge graph, artifact store, and tool registry.",
+  "owner": { "name": "Nik Tsytsarkin", "url": "https://github.com/tsytsarkin/hivemind" },
+  "plugins": [
+    {
+      "name": "hivemind",
+      "source": "./plugin",
+      "description": "Connect Claude Code to a self-hosted Hivemind server (shared knowledge graph + artifacts + tool registry) and teach agents to use it.",
+      "version": "0.1.0",
+      "category": "productivity",
+      "homepage": "https://github.com/tsytsarkin/hivemind"
+    }
+  ]
+}
