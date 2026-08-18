@@ -1,30 +1,35 @@
 # Deploying Hivemind
 
-Every dependency is tracked three ways so any machine can reproduce the environment:
+Dependencies are tracked three ways so any machine can reproduce the environment:
 
-- **`uv.lock`** (repo root) — the source of truth, a universal lock across Python 3.9–3.14.
-- **`deploy/requirements-server.txt`** — fully pinned server deps (needs Python ≥3.11).
-- **`deploy/requirements-client.txt`** — fully pinned client deps (runs on Python ≥3.9).
+- **`uv.lock`** (repo root) — source of truth, a universal lock across Python 3.9–3.14. Used by
+  the `uv` path for an exact, reproducible install.
+- **`deploy/requirements-{server,client}.txt`** — fully-pinned exports of `uv.lock`, for an exact
+  `pip` install **against the same package index uv used** (regenerate with `deploy/relock.sh`).
+- The package metadata itself (`pyproject.toml`) — for a normal `pip install` that resolves
+  compatible dependencies against whatever index the machine sees. **Most portable.**
 
-Both requirements files are generated from `uv.lock` — never edit by hand. Regenerate with
-`deploy/relock.sh` after changing any `pyproject.toml`.
+Pick **uv** for an exact lockfile install, or **plain venv + pip** if uv isn't available.
 
 ## Server (lab box, Python ≥3.11)
 
-### Option A — uv (recommended, uses uv.lock exactly)
+### Option A — uv (recommended: exact, from uv.lock)
 ```sh
-curl -LsSf https://astral.sh/uv/install.sh | sh      # one-time; or deploy/bootstrap-uv.sh
+curl -LsSf https://astral.sh/uv/install.sh | sh          # one-time; or deploy/bootstrap-uv.sh
 git clone <repo> hivemind && cd hivemind
-uv sync --package hivemind-server                     # creates .venv from the lock
-uv run hivemind-server                                # or: .venv/bin/hivemind-server
+uv sync --package hivemind-server
+uv run hivemind-server                                    # or ./.venv/bin/hivemind-server
 ```
+`deploy/bootstrap-labbox.sh` does all of this + mints a token + installs the systemd service.
 
-### Option B — plain venv + pip (no uv on the box)
+### Option B — plain venv + pip
 ```sh
 git clone <repo> hivemind && cd hivemind
 python3 -m venv .venv && . .venv/bin/activate
-pip install -r deploy/requirements-server.txt         # pinned transitive deps
-pip install --no-deps ./packages/hivemind-server      # the server package itself
+pip install -U pip                                        # the bundled pip is often too old
+pip install ./packages/hivemind-server                    # normal resolution (portable)
+#   …or, for an exact pin against uv's index:
+#   pip install -r deploy/requirements-server.txt && pip install --no-deps ./packages/hivemind-server
 hivemind-server
 ```
 
@@ -32,16 +37,24 @@ hivemind-server
 
 ### Option A — uv
 ```sh
-uv tool install --from ./packages/hivemind-client hivemind   # puts `hivemind` on PATH
+uv tool install --from ./packages/hivemind-client hivemind      # puts `hivemind` on PATH
 ```
 
-### Option B — plain venv + pip
+### Option B — plain venv + pip  (tested on stock Python 3.9.6)
 ```sh
 python3 -m venv .venv-hm && . .venv-hm/bin/activate
-pip install -r deploy/requirements-client.txt
-pip install --no-deps ./packages/hivemind-client
+pip install -U pip
+pip install ./packages/hivemind-client                    # only real dep is httpx
 hivemind --help
 ```
+Then point it at your project:
+```sh
+export HIVEMIND_SERVER_URL=http://<lan-or-tailscale-ip>:8787/p/default
+export HIVEMIND_TOKEN=<token from `hivemind-admin mint-token`>
+hivemind health
+```
 
-The client's only third-party runtime dependency is `httpx` (plus its small transitive set),
-so it installs cleanly on a stock Python 3.9 with nothing preinstalled.
+> Note: `pip install -U pip` first — the pip bundled with an old system Python can fail to
+> resolve modern package metadata. The exact-pin `requirements-*.txt` files assume the same
+> package index uv resolved against; if a pin is unavailable on your mirror, use the normal
+> `pip install ./packages/<pkg>` path above.
