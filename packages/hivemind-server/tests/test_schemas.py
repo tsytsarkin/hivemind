@@ -91,3 +91,34 @@ def test_apply_pack_idempotent(fresh):
     pack["node_types"]["thing"]["schema"]["properties"]["y"] = {"type": "string"}
     r3 = schemas.apply_pack(fresh, "op", pack)
     assert r3["created"]["node"] == ["thing@2"]
+
+
+# ── token store: cross-process mint/revoke without restart ────────────────────────
+def test_token_store_picks_up_external_mint_and_revoke(tmp_path):
+    """A token minted by ANOTHER process (separate TokenStore on the same file) must be accepted
+    by an already-running store, and a revoked one must stop working — both without a restart."""
+    import json as _json
+    from hivemind_server.auth import TokenStore
+
+    path = tmp_path / "tokens.json"
+    server = TokenStore(path)          # simulates the long-running server
+    admin = TokenStore(path)           # simulates `hivemind-admin mint-token`
+
+    tok = admin.mint("laptop")         # minted out-of-process, after server started
+    assert server.verify(tok) is not None, "server must pick up an externally minted token"
+    assert server.verify(tok).client_id == "laptop"
+
+    # a second mint from the admin process must not clobber the first
+    tok2 = admin.mint("phone")
+    assert server.verify(tok) is not None and server.verify(tok2) is not None
+
+    # revocation: remove it from the file out-of-process -> server must reject it
+    data = _json.loads(path.read_text())
+    del data[tok]
+    path.write_text(_json.dumps(data))
+    assert server.verify(tok) is None, "revoked token must stop working without a restart"
+    assert server.verify(tok2) is not None
+
+    # a corrupt/torn file must not lock everyone out (keep last good copy)
+    path.write_text("{ not json")
+    assert server.verify(tok2) is not None
