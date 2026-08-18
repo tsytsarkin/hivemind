@@ -53,6 +53,8 @@ def main(argv=None) -> int:
     sub.add_parser("list-proposals")
     mg = sub.add_parser("merge-guide"); mg.add_argument("proposal_id")
     sg = sub.add_parser("set-guide"); sg.add_argument("section"); sg.add_argument("file")
+    rg = sub.add_parser("retire-guide"); rg.add_argument("section")
+    rg.add_argument("--reason", default="")
     gc = sub.add_parser("gc"); gc.add_argument("--yes", action="store_true")
     sub.add_parser("reindex")
 
@@ -88,6 +90,8 @@ def main(argv=None) -> int:
         _out(guide.merge_proposal(p.db, "admin", args.proposal_id))
     elif args.cmd == "set-guide":
         _out(guide.set_section(p.db, "admin", args.section, Path(args.file).read_text()))
+    elif args.cmd == "retire-guide":
+        _out(guide.retire_section(p.db, "admin", args.section, args.reason))
     elif args.cmd == "gc":
         _out(p.blobs.gc(dry_run=not args.yes))
     elif args.cmd == "reindex":

@@ -188,3 +188,16 @@ def test_change_feed_cursor_settles(fresh):
     guide.set_section(fresh, "human", "core", "updated")   # a new edit shows up again
     out = schemas.changes_since(fresh, cur)
     assert out["changed"] is True and out["guide_changes"]
+
+
+def test_retire_guide_section(fresh):
+    from hivemind_server import guide
+    from hivemind_server.db import NotFound
+    guide.set_section(fresh, "human", "old", "superseded content")
+    assert any(s["name"] == "old" for s in guide.get_index(fresh)["sections"])
+    guide.retire_section(fresh, "admin", "old", reason="superseded by new")
+    assert not any(s["name"] == "old" for s in guide.get_index(fresh)["sections"])
+    with pytest.raises(NotFound):
+        guide.get_section(fresh, "old")
+    with pytest.raises(NotFound):          # retiring twice is an error, not a silent no-op
+        guide.retire_section(fresh, "admin", "old")

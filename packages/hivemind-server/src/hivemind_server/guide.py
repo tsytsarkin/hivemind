@@ -45,6 +45,19 @@ def set_section(db: Database, agent_id: str, name: str, body: str) -> dict:
     return {"name": name, "guide_version": gv}
 
 
+def retire_section(db: Database, agent_id: str, name: str, reason: str = "") -> dict:
+    """Retire a guide section: remove it so agents stop loading superseded guidance.
+
+    The removal itself is recorded in the tx log (who/when/why), and the section's text remains
+    recoverable from whatever version-controlled source it came from. Retiring a section that
+    doesn't exist is an error, not a silent no-op."""
+    with db.write(agent_id, f"guide_retire {name}: {reason}".strip(": ")) as tx:
+        n = tx.cur.execute("DELETE FROM guide_section WHERE name=?", (name,)).rowcount
+        if n == 0:
+            raise NotFound(f"no guide section {name!r} to retire")
+    return {"name": name, "retired": True, "reason": reason}
+
+
 def propose_section(db: Database, agent_id: str, name: str, body: str, why: str = "") -> dict:
     """Agent path: file a proposal for human review. Never mutates the live section."""
     if len(body) > MAX_SECTION_CHARS:
