@@ -28,3 +28,6 @@ tokens.json
 
 # local dev tooling
 .tooling/
+
+# deployment env (environment-specific)
+deploy/hivemind.env
