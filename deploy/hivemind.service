@@ -1,0 +1,24 @@
+# systemd unit for the Hivemind server. Install: see deploy/bootstrap-labbox.sh.
+#   sudo cp deploy/hivemind.service /etc/systemd/system/hivemind.service
+#   sudo systemctl daemon-reload && sudo systemctl enable --now hivemind
+[Unit]
+Description=Hivemind server (shared agent knowledge graph + artifacts + tools)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nik
+WorkingDirectory=/home/nik/hivemind
+EnvironmentFile=/home/nik/hivemind/deploy/hivemind.env
+# Uses the venv created by bootstrap-labbox.sh. (Swap for `uv run hivemind-server` if preferred.)
+ExecStart=/home/nik/hivemind/.venv/bin/hivemind-server
+Restart=on-failure
+RestartSec=3
+# hardening
+NoNewPrivileges=true
+ProtectSystem=full
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

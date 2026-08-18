@@ -16,6 +16,7 @@ dependencies = [
 
 [project.scripts]
 hivemind-server = "hivemind_server.app:main"
+hivemind-admin = "hivemind_server.admin:main"
 
 [build-system]
 requires = ["hatchling"]

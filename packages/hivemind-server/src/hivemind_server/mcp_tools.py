@@ -149,6 +149,14 @@ def build_mcp(project: Project, *, instructions: str = INSTRUCTIONS) -> MCPServe
                        version: Optional[int] = None) -> dict:
         return schemas.promote_type(db, agent, kind, name, version=version)
 
+    @mcp.tool(annotations=WRITE,
+              description="Apply a domain pack: define many node/edge types as active at once. "
+                          "pack = {name, node_types:{name:{schema,parent?}}, "
+                          "edge_types:{name:{schema,...traits}}}. Operator action.")
+    @_envelope
+    def schema_apply(pack: dict, agent: str = "operator", force: bool = True) -> dict:
+        return schemas.apply_pack(db, agent, pack, force=force)
+
     # ── guide ────────────────────────────────────────────────────────────────────
     @mcp.tool(annotations=RO,
               description="Read the live guide. No section = the section index (names + token "

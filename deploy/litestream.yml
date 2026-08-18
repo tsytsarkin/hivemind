@@ -1,0 +1,9 @@
+# Litestream continuous backup for each project's SQLite DB. Replica is a private local dir
+# (or point at S3-compatible storage on your own network). No data leaves your machines.
+# Install litestream, then: litestream replicate -config deploy/litestream.yml
+dbs:
+  - path: /home/nik/hivemind-data/projects/default/hivemind.db
+    replicas:
+      - type: file
+        path: /home/nik/hivemind-backup/default
+# Add one block per project. Or run `litestream replicate` per DB in its own unit.

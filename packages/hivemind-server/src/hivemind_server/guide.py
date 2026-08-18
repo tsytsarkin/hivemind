@@ -95,7 +95,7 @@ guide (see `guide_get` with no section for the index).
     concurrent edits; a 409 means someone else moved the head — re-read and retry.
   - Subject-version: the version of the described thing (e.g. an OS build). Pass
     `subject_key`+`subject_version` (+ `subject_order` for as-of). Different subject_versions are
-    DIFFERENT coexisting nodes, not contradictions.
+    DIFFERENT coexisting nodes, not conflicts.
 - `graph_link(edge_type, src, dst, props)` adds a typed edge. For an `assertive` edge type put
   `status: "open"|"resolved"` in props; nodes with an OPEN assertive edge are flagged `disputed`
   — resolve before relying on them.
