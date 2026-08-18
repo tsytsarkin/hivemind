@@ -63,4 +63,5 @@ See [docs/packs.md](docs/packs.md) and the [full docs](docs/) (data model, API, 
 `uv.lock` is the source of truth; `deploy/requirements-{server,client}.txt` are generated from it
 for pure-`pip`/venv installs. Regenerate with `deploy/relock.sh` after editing any `pyproject.toml`.
 
-MIT licensed. Authorized-research / internal-team tooling.
+Licensed under the **Apache License 2.0** — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
+Fork it freely; please keep the NOTICE attribution pointing back to the original project.

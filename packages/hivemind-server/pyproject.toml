@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Hivemind server: shared agent knowledge-graph + artifact store + tool registry (MCP + REST)"
 readme = "README.md"
 requires-python = ">=3.11"          # official `mcp` 2.0 SDK requires >=3.10; we pin 3.11
-license = "MIT"
+license = "Apache-2.0"
 authors = [{ name = "Nik Tsytsarkin" }]
 dependencies = [
     "mcp>=2.0,<3",                  # official MCP Python SDK (MCPServer, streamable HTTP)
