@@ -339,11 +339,14 @@ def get_schema(db: Database, *, kind: Optional[str] = None,
 
 # ── change feed: "what changed since I last looked?" ────────────────────────────────
 def _schema_cursor(db: Database) -> int:
-    """Monotonic cursor over schema changes = the highest tx that defined a type."""
+    """Monotonic cursor over everything the change feed reports — type definitions AND guide
+    edits. It must cover both, or `since_cursor=cursor` would keep reporting stale guide edits
+    as new forever."""
     with db.read() as cur:
         r = cur.execute(
             "SELECT MAX(m) AS c FROM (SELECT MAX(created_tx) m FROM node_type "
-            "UNION ALL SELECT MAX(created_tx) FROM edge_type)").fetchone()
+            "UNION ALL SELECT MAX(created_tx) FROM edge_type "
+            "UNION ALL SELECT MAX(updated_tx) FROM guide_section)").fetchone()
     return int(r["c"] or 0)
 
 

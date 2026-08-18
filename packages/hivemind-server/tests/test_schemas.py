@@ -176,3 +176,15 @@ def test_schema_changes_feed(fresh):
     guide.set_section(fresh, "human", "core", "hello")
     g = schemas.changes_since(fresh, cur0)
     assert any(x["section"] == "core" for x in g["guide_changes"])
+
+
+def test_change_feed_cursor_settles(fresh):
+    """since_cursor=cursor must report nothing new — including after a guide edit."""
+    from hivemind_server import guide
+    schemas.apply_pack(fresh, "op", {"name": "p", "node_types": {"a": {"schema": {"type": "object"}}}})
+    guide.set_section(fresh, "human", "core", "hello")     # guide edit AFTER the schema change
+    cur = schemas.get_schema(fresh)["cursor"]
+    assert schemas.changes_since(fresh, cur)["changed"] is False, "cursor must cover guide edits"
+    guide.set_section(fresh, "human", "core", "updated")   # a new edit shows up again
+    out = schemas.changes_since(fresh, cur)
+    assert out["changed"] is True and out["guide_changes"]
