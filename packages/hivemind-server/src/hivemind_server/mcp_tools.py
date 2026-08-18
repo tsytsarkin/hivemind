@@ -10,7 +10,7 @@ from typing import Any, Callable, Optional
 from mcp.server import MCPServer
 from mcp.types import ToolAnnotations
 
-from . import graph, guide, schemas
+from . import graph, guide, schemas, skills, traps
 from .db import Conflict, Invalid, NotFound
 from .project import Project
 
@@ -22,7 +22,9 @@ INSTRUCTIONS = (
     "expected_head for safe concurrent edits) and subject-version (the version of the described "
     "thing, e.g. an OS build — pass subject_key/subject_version). Large binaries go through the "
     "REST /blobs endpoints (hivemind CLI), never inline. Nodes flagged 'disputed' have an open "
-    "assertive edge — resolve before relying on them."
+    "assertive edge — resolve before relying on them. Before working out a non-obvious procedure, "
+    "search skill_search and trap_search; when you solve one, skill_publish it, and when you "
+    "abandon an approach, trap_record it."
 )
 
 RO = ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True)
@@ -57,7 +59,14 @@ def build_mcp(project: Project, *, instructions: str = INSTRUCTIONS) -> MCPServe
     @_envelope
     def graph_search(query: str = "", types: Optional[list[str]] = None,
                      limit: int = 25, cursor: int = 0) -> dict:
-        return graph.search_nodes(db, query, types=types, limit=limit, cursor=cursor)
+        out = graph.search_nodes(db, query, types=types, limit=limit, cursor=cursor)
+        if query:                       # surface known dead-ends for this query, unprompted
+            rel = traps.search(db, query, limit=3)["traps"]
+            if rel:
+                out["related_traps"] = rel
+                out["trap_warning"] = ("Known dead-ends match this query — read them before "
+                                       "spending time; see trap_get(trap_id).")
+        return out
 
     @mcp.tool(annotations=RO,
               description="Fetch a node by node_id OR (subject_key+subject_version). "
@@ -67,8 +76,13 @@ def build_mcp(project: Project, *, instructions: str = INSTRUCTIONS) -> MCPServe
     def graph_get(node_id: Optional[str] = None, subject_key: Optional[str] = None,
                   subject_version: Optional[str] = None, as_of: Any = None,
                   history: bool = False) -> dict:
-        return graph.get_node(db, node_id=node_id, subject_key=subject_key,
-                              subject_version=subject_version, as_of=as_of, history=history)
+        out = graph.get_node(db, node_id=node_id, subject_key=subject_key,
+                             subject_version=subject_version, as_of=as_of, history=history)
+        t = traps.for_node(db, out["node_id"], subject_key=out.get("subject_key"),
+                           subject_version=out.get("subject_version"))
+        if t:                           # an agent reading this node cannot miss its dead-ends
+            out["traps"] = t
+        return out
 
     @mcp.tool(annotations=RO,
               description="List all subject-version cells of a thing (ordered), or with "

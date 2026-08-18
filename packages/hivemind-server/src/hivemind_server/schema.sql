@@ -183,3 +183,57 @@ CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 -- Two tokenizers: unicode61 for prose, trigram for symbols/paths (survives Foo::bar_baz).
 CREATE VIRTUAL TABLE IF NOT EXISTS node_fts USING fts5(node_id UNINDEXED, body, tokenize='unicode61');
 CREATE VIRTUAL TABLE IF NOT EXISTS sym_fts  USING fts5(node_id UNINDEXED, body, tokenize='trigram');
+
+-- ── mini-skills: documented procedures (CoALA "procedural memory") ───────────────
+-- Same immutable-version flow as the tool registry: a published version is never edited,
+-- supersede by publishing a new semver; retire with a yank.
+CREATE TABLE IF NOT EXISTS skill (
+  id             TEXT PRIMARY KEY,                       -- e.g. "re/unpack-dyld-cache"
+  latest_version TEXT,
+  created_tx     INTEGER NOT NULL REFERENCES tx(tx_id)
+);
+CREATE TABLE IF NOT EXISTS skill_version (
+  id            TEXT NOT NULL REFERENCES skill(id),
+  version       TEXT NOT NULL,                           -- exact semver, immutable
+  title         TEXT NOT NULL,
+  description   TEXT NOT NULL,                           -- what it does AND when to use it
+  when_to_use   TEXT,                                    -- trigger phrases
+  body          TEXT NOT NULL,                           -- the procedure (markdown)
+  tags          TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(tags)),
+  requires      TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(requires)),  -- tools/skills needed
+  verified_how  TEXT,                                    -- how the author confirmed it works
+  author        TEXT,
+  yanked        INTEGER NOT NULL DEFAULT 0,
+  yanked_reason TEXT,
+  created_tx    INTEGER NOT NULL REFERENCES tx(tx_id),
+  PRIMARY KEY (id, version)
+);
+CREATE VIRTUAL TABLE IF NOT EXISTS skill_fts USING fts5(id UNINDEXED, body, tokenize='unicode61');
+
+-- ── traps: recorded dead-ends / wrong approaches (CoALA "episodic memory") ────────
+-- Evidence-bearing by construction: a trap without what-was-tried and what-happened is not a
+-- trap, it is an opinion. Falsifiable (status) and scopeable (node and/or subject-version), so a
+-- stale or wrong trap can be retired or disputed instead of silently misleading everyone.
+CREATE TABLE IF NOT EXISTS trap (
+  trap_id      TEXT PRIMARY KEY,
+  title        TEXT NOT NULL,
+  what_failed  TEXT NOT NULL,                            -- the approach that was tried
+  symptom      TEXT NOT NULL,                            -- what was actually observed
+  root_cause   TEXT,                                     -- why, once understood
+  instead      TEXT,                                     -- what to do in its place
+  node_id      TEXT REFERENCES node(node_id),            -- NULL = project-wide
+  subject_key  TEXT, subject_version TEXT,               -- optional: only true for this version
+  cost_minutes INTEGER,                                  -- how much time it burned
+  evidence     TEXT,                                     -- log/digest/command that shows it
+  verified_how TEXT,                                     -- measured | reproduced | inferred
+  confidence   TEXT NOT NULL DEFAULT 'medium',           -- low | medium | high
+  status       TEXT NOT NULL DEFAULT 'active',           -- active | retired | disputed
+  status_reason TEXT,
+  author       TEXT,
+  created_tx   INTEGER NOT NULL REFERENCES tx(tx_id),
+  updated_tx   INTEGER NOT NULL REFERENCES tx(tx_id)
+);
+CREATE INDEX IF NOT EXISTS ix_trap_node ON trap(node_id) WHERE node_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS ix_trap_subject ON trap(subject_key, subject_version);
+CREATE INDEX IF NOT EXISTS ix_trap_status ON trap(status);
+CREATE VIRTUAL TABLE IF NOT EXISTS trap_fts USING fts5(trap_id UNINDEXED, body, tokenize='unicode61');

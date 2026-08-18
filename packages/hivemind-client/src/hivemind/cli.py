@@ -91,6 +91,30 @@ def build_parser() -> argparse.ArgumentParser:
     tg.add_argument("--dest", default="."); tg.add_argument("--os"); tg.add_argument("--arch")
     ts = tool.add_parser("search"); ts.add_argument("query", nargs="?", default="")
 
+    sk = sub.add_parser("skill").add_subparsers(dest="skill_cmd", required=True)
+    sks = sk.add_parser("search"); sks.add_argument("query", nargs="?", default="")
+    sks.add_argument("--tag", action="append", dest="tags")
+    skg = sk.add_parser("get"); skg.add_argument("id"); skg.add_argument("--constraint", default="")
+    skp = sk.add_parser("publish"); skp.add_argument("id"); skp.add_argument("--version", required=True)
+    skp.add_argument("--title", required=True); skp.add_argument("--description", required=True)
+    skp.add_argument("--body-file", required=True); skp.add_argument("--when-to-use")
+    skp.add_argument("--tag", action="append", dest="tags"); skp.add_argument("--verified-how")
+    sky = sk.add_parser("yank"); sky.add_argument("id"); sky.add_argument("version")
+    sky.add_argument("--reason", default="")
+
+    tr = sub.add_parser("trap").add_subparsers(dest="trap_cmd", required=True)
+    trs = tr.add_parser("search"); trs.add_argument("query", nargs="?", default="")
+    trs.add_argument("--node-id"); trs.add_argument("--include-retired", action="store_true")
+    trg = tr.add_parser("get"); trg.add_argument("trap_id")
+    trr = tr.add_parser("record"); trr.add_argument("--title", required=True)
+    trr.add_argument("--what-failed", required=True); trr.add_argument("--symptom", required=True)
+    trr.add_argument("--root-cause"); trr.add_argument("--instead"); trr.add_argument("--node-id")
+    trr.add_argument("--subject-key"); trr.add_argument("--subject-version")
+    trr.add_argument("--cost-minutes", type=int); trr.add_argument("--evidence")
+    trr.add_argument("--verified-how"); trr.add_argument("--confidence", default="medium")
+    trt = tr.add_parser("status"); trt.add_argument("trap_id"); trt.add_argument("status")
+    trt.add_argument("--reason", default="")
+
     guide = sub.add_parser("guide").add_subparsers(dest="guide_cmd", required=True)
     guide.add_parser("get").add_argument("section", nargs="?")
     gpr = guide.add_parser("propose"); gpr.add_argument("section"); gpr.add_argument("--body", required=True)
@@ -149,6 +173,33 @@ def main(argv=None) -> int:
                             os_=args.os, arch=args.arch))
         elif args.cmd == "tool" and args.tool_cmd == "search":
             _out(c.tool_search(args.query))
+        elif args.cmd == "skill" and args.skill_cmd == "search":
+            _out(c.call("skill_search", {"query": args.query, "tags": args.tags}))
+        elif args.cmd == "skill" and args.skill_cmd == "get":
+            _out(c.call("skill_get", {"id": args.id, "constraint": args.constraint}))
+        elif args.cmd == "skill" and args.skill_cmd == "publish":
+            _out(c.call("skill_publish", {"id": args.id, "version": args.version,
+                 "title": args.title, "description": args.description,
+                 "body": open(args.body_file).read(), "when_to_use": args.when_to_use,
+                 "tags": args.tags, "verified_how": args.verified_how}))
+        elif args.cmd == "skill" and args.skill_cmd == "yank":
+            _out(c.call("skill_yank", {"id": args.id, "version": args.version,
+                                       "reason": args.reason}))
+        elif args.cmd == "trap" and args.trap_cmd == "search":
+            _out(c.call("trap_search", {"query": args.query, "node_id": args.node_id,
+                                        "include_retired": args.include_retired}))
+        elif args.cmd == "trap" and args.trap_cmd == "get":
+            _out(c.call("trap_get", {"trap_id": args.trap_id}))
+        elif args.cmd == "trap" and args.trap_cmd == "record":
+            _out(c.call("trap_record", {"title": args.title, "what_failed": args.what_failed,
+                 "symptom": args.symptom, "root_cause": args.root_cause, "instead": args.instead,
+                 "node_id": args.node_id, "subject_key": args.subject_key,
+                 "subject_version": args.subject_version, "cost_minutes": args.cost_minutes,
+                 "evidence": args.evidence, "verified_how": args.verified_how,
+                 "confidence": args.confidence}))
+        elif args.cmd == "trap" and args.trap_cmd == "status":
+            _out(c.call("trap_status", {"trap_id": args.trap_id, "status": args.status,
+                                        "reason": args.reason}))
         elif args.cmd == "guide" and args.guide_cmd == "get":
             _out(c.guide(args.section))
         elif args.cmd == "guide" and args.guide_cmd == "propose":

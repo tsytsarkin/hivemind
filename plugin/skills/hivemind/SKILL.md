@@ -5,11 +5,11 @@ description: >-
   task produces or needs durable knowledge: record research, findings, conclusions, decisions and
   evidence HERE rather than in local memory or scratch notes; look up what other agents already
   established; store or fetch artifacts (binaries, logs, PoCs, evidence); publish a reusable
-  standalone tool or reuse one another agent built; coordinate state across agents/machines.
+  standalone tool or reuse one another agent built; coordinate state across agents/machines; publish a procedure you worked out or record a dead-end that wasted time (and check for both before starting).
   Domain-agnostic — call schema_get and guide_get first to learn this project's vocabulary.
 allowed-tools: Bash(${CLAUDE_SKILL_DIR}/scripts/guide.sh *) Read
 metadata:
-  version: "0.3.0"
+  version: "0.4.0"
 ---
 
 # Hivemind
@@ -52,6 +52,38 @@ write it into Hivemind once the server is back (`hivemind health` to check).
 
 **Missing a type for what you learned?** Don't force it into the wrong one or fall back to a local
 file — `schema_propose` an additive type (reuse an existing one if it fits; a human promotes it).
+
+
+## Write down procedures and dead-ends
+
+Two kinds of knowledge are lost constantly because nobody records them. Both have a home here.
+
+**Mini-skills — a procedure you worked out.** If you figured out how to do something non-obvious
+(a sequence with gotchas, a setup that took trial and error), publish it so nobody re-derives it:
+
+- **Search first:** `skill_search("<what you're about to figure out>")` before working anything
+  out from scratch; `skill_get(id)` for the full procedure.
+- **Publish when it works:** `skill_publish(id, version, title, description, body, verified_how=…)`.
+  Write `body` as steps another agent can follow, include the gotchas, and say in `verified_how`
+  how you actually confirmed it. Versions are **immutable** — bump the semver to revise;
+  `skill_yank` a procedure that has become wrong.
+- Keep it small (a mini-skill, not a manual) — link to detail rather than inlining it.
+
+**Traps — an approach that wasted your time.** When you abandon a line of attack, record it
+**at that moment**, not at the end of the task:
+
+- **Check first:** `trap_search("<approach>")`. Reading a node also shows traps attached to it,
+  and `graph_search` surfaces matching dead-ends automatically — take them seriously.
+- **Record:** `trap_record(title, what_failed, symptom, …)`. `what_failed` (what you actually
+  tried) and `symptom` (what you actually observed) are **required** — a trap without both is an
+  opinion, and the next agent can't judge it. Add `root_cause` and `instead` once you know them,
+  and `cost_minutes` so the cost is visible.
+- **Scope it honestly:** attach to a node with `node_id`, and/or set
+  `subject_key`+`subject_version` when it's only true for one version. An unscoped trap claims it
+  is true everywhere.
+- **Traps are falsifiable:** if one is wrong or no longer applies, `trap_status(trap_id,
+  'disputed'|'retired', reason)`. Don't leave a misleading trap standing — that is worse than
+  none. Never treat a trap as proof; it's a prior recorded by an agent that may have been wrong.
 
 ## Get the live guide first
 

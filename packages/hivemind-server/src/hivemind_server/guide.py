@@ -117,6 +117,15 @@ and evidence here **as you go**, not just at the end.
 - **Server unreachable?** Keep a local note, say so, and write it in once it's back.
 - **No fitting type?** `schema_propose` an additive one rather than falling back to a local file.
 
+
+## Procedures and dead-ends
+
+- `skill_search` / `skill_get` before working out a non-obvious procedure; `skill_publish` it once
+  it works (immutable semver versions, `verified_how` required in spirit — say how you confirmed it).
+- `trap_search` before starting an approach. When you abandon one, `trap_record(title, what_failed,
+  symptom, …)` immediately — both fields required, since a trap without observation is an opinion.
+  Scope it to a node and/or subject_version. Retire or dispute traps that turn out wrong.
+
 ## Writing to the graph
 - `graph_upsert(type, props, agent=...)` creates a node. To supersede an existing node pass its
   `node_id` (or its `subject_key`+`subject_version`) — the SAME research, updated.
