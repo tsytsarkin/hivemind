@@ -8,6 +8,23 @@ Hivemind is a shared, versioned knowledge graph + artifact store + tool registry
 domain-agnostic: node and edge **types are defined at runtime in the schema**. Before writing,
 call `schema_get` (this project's types) and `guide_get` (this project's guide sections).
 
+## Persist results here, not in local memory
+
+Hivemind is the durable home for research and results — local memory and scratch notes are
+per-machine and invisible to other agents. Record findings, conclusions, decisions, measurements
+and evidence here **as you go**, not just at the end.
+
+- **Read first:** `graph_search` — build on (supersede/refine) what another agent established
+  instead of re-deriving or duplicating it.
+- **Write:** `graph_upsert(type, props, …)`; pass `node_id` (or `subject_key`+`subject_version`)
+  to supersede the same item, and `expected_head` so a concurrent writer isn't clobbered.
+- **Evidence:** `hivemind artifact put <file>` then `artifact_attach(digest, version_id, role=…)`
+  so a claim carries its proof. **Relate:** `graph_link(...)`.
+- **Keep local:** secrets/tokens, machine-specific config, throwaway scratch, anything private.
+  Everything on this server is shared with every agent and person on it.
+- **Server unreachable?** Keep a local note, say so, and write it in once it's back.
+- **No fitting type?** `schema_propose` an additive one rather than falling back to a local file.
+
 ## Writing
 - `graph_upsert(type, props, agent=…)` creates a node; pass `node_id` (or `subject_key`+
   `subject_version`) to supersede the same item. Pass `expected_head` for safe concurrent edits —

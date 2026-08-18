@@ -2,13 +2,14 @@
 name: hivemind
 description: >-
   Use the shared Hivemind knowledge graph, artifact store, and tool registry. Use whenever the
-  task needs to record or look up shared research/findings, store or fetch artifacts (binaries,
-  logs, PoCs, evidence), publish a reusable standalone tool or reuse one another agent built, or
-  coordinate state with other agents/machines. Domain-agnostic — call schema_get and guide_get
-  first to learn this project's vocabulary.
+  task produces or needs durable knowledge: record research, findings, conclusions, decisions and
+  evidence HERE rather than in local memory or scratch notes; look up what other agents already
+  established; store or fetch artifacts (binaries, logs, PoCs, evidence); publish a reusable
+  standalone tool or reuse one another agent built; coordinate state across agents/machines.
+  Domain-agnostic — call schema_get and guide_get first to learn this project's vocabulary.
 allowed-tools: Bash(${CLAUDE_SKILL_DIR}/scripts/guide.sh *) Read
 metadata:
-  version: "0.1.0"
+  version: "0.2.0"
 ---
 
 # Hivemind
@@ -16,6 +17,41 @@ metadata:
 Hivemind is a **shared, versioned** knowledge graph + artifact store + tool registry served over
 MCP. The MCP tools (prefix `hivemind`) are connected once the plugin is configured. This file is a
 small bootstrap; the **authoritative, live** guidance comes from the server.
+
+## Persist results here, not in local memory
+
+**Hivemind is the durable home for research and results.** Local memory files, scratch notes, and
+session context are per-machine and invisible to every other agent — anything worth keeping goes
+into the graph instead, where the whole fleet can find it, supersede it, and see its history.
+
+**Write to Hivemind when you:** reach a finding or conclusion · confirm or refute something ·
+measure a result · make a decision worth recalling · produce evidence (a binary, log, crash,
+PoC, screenshot) · learn something that would change another agent's approach. Do it **as you go**,
+not only at the end of a task — a session that dies mid-way should leave its knowledge behind.
+
+**Read before you work:** `graph_search` first. If another agent already established it, build on
+that node (supersede/refine it) instead of re-deriving it or creating a duplicate.
+
+The loop:
+1. `schema_get` → learn this project's node/edge types. `graph_search` → what's already known.
+2. `graph_upsert(type, props, …)` → record the finding. Updating something that already exists?
+   Pass its `node_id` (or `subject_key`+`subject_version`) so it **supersedes** rather than
+   duplicates, and pass `expected_head` so a concurrent writer can't be silently clobbered.
+3. `hivemind artifact put <file>` → upload evidence; `artifact_attach(digest, version_id, role=…)`
+   → bind it to the node so the claim carries its proof.
+4. `graph_link(...)` → connect it (derived-from, evidence-for, refines, disputes — whatever this
+   project's schema defines).
+5. Reusable tooling you built? `hivemind tool publish` it so other machines can run it.
+
+**What still belongs locally, not in Hivemind:** secrets and tokens; machine-specific paths and
+config; throwaway scratch for the current step; anything you were asked to keep private. Hivemind
+is shared by every agent and person on it — write it there only if it should be shared.
+
+**If the server is unreachable:** don't drop the result. Keep a local note, say so plainly, and
+write it into Hivemind once the server is back (`hivemind health` to check).
+
+**Missing a type for what you learned?** Don't force it into the wrong one or fall back to a local
+file — `schema_propose` an additive type (reuse an existing one if it fits; a human promotes it).
 
 ## Get the live guide first
 
