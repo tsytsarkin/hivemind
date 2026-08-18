@@ -154,7 +154,7 @@ def build_mcp(project: Project, *, instructions: str = INSTRUCTIONS) -> MCPServe
                           "pack = {name, node_types:{name:{schema,parent?}}, "
                           "edge_types:{name:{schema,...traits}}}. Operator action.")
     @_envelope
-    def schema_apply(pack: dict, agent: str = "operator", force: bool = True) -> dict:
+    def schema_apply(pack: dict, agent: str = "operator", force: bool = False) -> dict:
         return schemas.apply_pack(db, agent, pack, force=force)
 
     # ── guide ────────────────────────────────────────────────────────────────────

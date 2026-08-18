@@ -1,0 +1,315 @@
+{
+  "name": "research-workflow",
+  "description": "Research-workflow vocabulary captured from the live  project: claims, leads, measurements, verdicts, notes, lanes and instruments. Layers on top of security-research.",
+  "node_types": {
+    "claim": {
+      "schema": {
+        "type": "object",
+        "properties": {
+          "statement": {
+            "type": "string"
+          },
+          "component": {
+            "type": "string"
+          },
+          "build": {
+            "type": "string"
+          },
+          "denominator": {
+            "type": "string"
+          },
+          "method": {
+            "type": "string"
+          },
+          "confidence": {
+            "enum": [
+              "certain",
+              "probable",
+              "speculative"
+            ]
+          },
+          "atlas_claim_id": {
+            "type": "integer"
+          },
+          "author": {
+            "type": "string"
+          },
+          "notes": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "statement"
+        ],
+        "additionalProperties": true
+      }
+    },
+    "instrument": {
+      "schema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "recall": {
+            "type": "string"
+          },
+          "recall_n": {
+            "type": "integer"
+          },
+          "defect": {
+            "type": "string"
+          },
+          "repair_delta": {
+            "type": "string"
+          },
+          "powerless": {
+            "type": "boolean"
+          },
+          "atlas_instrument_id": {
+            "type": "integer"
+          },
+          "notes": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": true
+      }
+    },
+    "lane": {
+      "schema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "verdict": {
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "open",
+              "closed-negative",
+              "closed-positive",
+              "partial",
+              "retired",
+              "unknown"
+            ]
+          },
+          "topic": {
+            "type": "string"
+          },
+          "note_count": {
+            "type": "integer"
+          },
+          "bytes": {
+            "type": "integer"
+          },
+          "key_docs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "notes": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": true
+      }
+    },
+    "lead": {
+      "schema": {
+        "type": "object",
+        "properties": {
+          "question": {
+            "type": "string"
+          },
+          "priority": {
+            "enum": [
+              "P1",
+              "P2",
+              "P3",
+              "unknown"
+            ]
+          },
+          "state": {
+            "enum": [
+              "open",
+              "answered",
+              "dead",
+              "promoted",
+              "partial"
+            ]
+          },
+          "next_action": {
+            "type": "string"
+          },
+          "outcome": {
+            "type": "string"
+          },
+          "build": {
+            "type": "string"
+          },
+          "component": {
+            "type": "string"
+          },
+          "atlas_lead_id": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "question"
+        ],
+        "additionalProperties": true
+      }
+    },
+    "measurement": {
+      "schema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          },
+          "denominator": {
+            "type": "string"
+          },
+          "unit": {
+            "type": "string"
+          },
+          "build": {
+            "type": "string"
+          },
+          "scorer": {
+            "type": "string"
+          },
+          "base_rate": {
+            "type": "string"
+          },
+          "atlas_measurement_id": {
+            "type": "integer"
+          },
+          "notes": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": true
+      }
+    },
+    "note": {
+      "schema": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "body": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "build": {
+            "type": "string"
+          },
+          "atlas_note_id": {
+            "type": "integer"
+          },
+          "author": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "title"
+        ],
+        "additionalProperties": true
+      }
+    },
+    "verdict": {
+      "schema": {
+        "type": "object",
+        "properties": {
+          "subject": {
+            "type": "string"
+          },
+          "grade": {
+            "enum": [
+              "vulnerable",
+              "safe",
+              "unresolved",
+              "not_payable",
+              "fence",
+              "other"
+            ]
+          },
+          "venue": {
+            "type": "string"
+          },
+          "rationale": {
+            "type": "string"
+          },
+          "build": {
+            "type": "string"
+          },
+          "atlas_verdict_id": {
+            "type": "integer"
+          },
+          "author": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "subject"
+        ],
+        "additionalProperties": true
+      }
+    }
+  },
+  "edge_types": {
+    "documented_by": {
+      "schema": {
+        "type": "object",
+        "properties": {
+          "notes": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "src_types": [
+        "finding",
+        "component",
+        "entry_point",
+        "function"
+      ],
+      "dst_types": [
+        "lane"
+      ],
+      "cardinality": "N:N",
+      "directed": true,
+      "symmetric": false,
+      "transitive": false,
+      "acyclic": false,
+      "versioned": true,
+      "assertive": false
+    }
+  }
+}

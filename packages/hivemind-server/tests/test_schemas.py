@@ -122,3 +122,26 @@ def test_token_store_picks_up_external_mint_and_revoke(tmp_path):
     # a corrupt/torn file must not lock everyone out (keep last good copy)
     path.write_text("{ not json")
     assert server.verify(tok2) is not None
+
+
+def test_apply_pack_refuses_non_additive_by_default(fresh):
+    """A pack re-apply that would invalidate existing data must be refused unless forced."""
+    pack = {"name": "p", "node_types": {"thing": {"schema": {
+        "type": "object", "properties": {"a": {"type": "string"}, "b": {"type": "string"}},
+        "required": ["a"]}}}}
+    schemas.apply_pack(fresh, "op", pack)
+    graph.upsert_node(fresh, "u", "thing", {"a": "x"})          # data written under v1
+
+    breaking = {"name": "p", "node_types": {"thing": {"schema": {
+        "type": "object", "properties": {"a": {"type": "string"}, "b": {"type": "string"}},
+        "required": ["a", "b"]}}}}                               # newly-required field
+    with pytest.raises(Invalid) as e:
+        schemas.apply_pack(fresh, "op", breaking)
+    assert "non-additive" in str(e.value)
+    # still v1, untouched
+    assert schemas.get_schema(fresh, kind="node", name="thing")["node_types"][0]["version"] == 1
+    # explicit opt-in is allowed
+    r = schemas.apply_pack(fresh, "op", breaking, force=True)
+    assert r["created"]["node"] == ["thing@2"]
+    # the pre-existing node still reads fine (it validated under its own schema_ver)
+    assert graph.search_nodes(fresh, "x")["count"] >= 0

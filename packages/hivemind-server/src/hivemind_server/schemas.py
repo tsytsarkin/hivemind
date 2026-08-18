@@ -265,8 +265,15 @@ def _type_unchanged(cur, kind: str, name: str, json_schema: dict,
     return True
 
 
-def apply_pack(db: Database, agent_id: str, pack: dict, *, force: bool = True) -> dict:
+def apply_pack(db: Database, agent_id: str, pack: dict, *, force: bool = False) -> dict:
     """Operator: load a domain pack's schema. Defines node/edge types as ACTIVE directly.
+
+    A pack is COPIED into this project (type rows in the DB) — there is no live link back to
+    the file, so later edits to the pack only matter when you re-apply it.
+
+    force=False (default) refuses a NON-ADDITIVE change to an existing type (new required
+    field, removed property, narrowed enum) because that would invalidate data already in the
+    graph. Pass force=True only when you accept that.
 
     pack = {"node_types": {name: {"schema": {...}, "parent": ...}},
             "edge_types": {name: {"schema": {...}, ...traits}}}
@@ -294,6 +301,11 @@ def apply_pack(db: Database, agent_id: str, pack: dict, *, force: bool = True) -
             schema = spec.get("schema", {"type": "object"})
             if _type_unchanged(cur, "edge", name, schema, traits):
                 unchanged["edge"].append(name); continue
+            existing_e = usable_type(cur, "edge", name)
+            if existing_e is not None and not force:
+                reason = _additive_ok(json.loads(existing_e["json_schema"]), schema)
+                if reason:
+                    raise Invalid(f"pack change to edge {name!r} non-additive: {reason}")
             v = define_type(cur, tx, "edge", name, schema, status="active", traits=traits)
             created["edge"].append(f"{name}@{v}")
         return {"pack": pack.get("name"), "created": created, "unchanged": unchanged}

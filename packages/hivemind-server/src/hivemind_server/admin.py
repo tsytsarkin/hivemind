@@ -46,6 +46,8 @@ def main(argv=None) -> int:
     sub.add_parser("list-projects")
     sub.add_parser("create-project")
     ap_pack = sub.add_parser("apply-pack"); ap_pack.add_argument("pack_file")
+    ap_pack.add_argument("--force", action="store_true",
+                         help="allow a NON-ADDITIVE change to an existing type")
     pr = sub.add_parser("promote"); pr.add_argument("kind"); pr.add_argument("name")
     pr.add_argument("--version", type=int)
     sub.add_parser("list-proposals")
@@ -74,7 +76,7 @@ def main(argv=None) -> int:
         _out({"created": p.name, "dir": str(p.dir)})
     elif args.cmd == "apply-pack":
         pack = json.loads(Path(args.pack_file).read_text())
-        res = schemas.apply_pack(p.db, "admin", pack, force=True)
+        res = schemas.apply_pack(p.db, "admin", pack, force=args.force)
         # load any guide sections shipped in the pack dir
         loaded = _load_pack_guide(p, Path(args.pack_file))
         _out({**res, "guide_sections_loaded": loaded})
