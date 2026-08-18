@@ -1,8 +1,11 @@
 # Hivemind
 
-A **domain-agnostic** shared service that lets a fleet of AI agents (local and remote, across a
-LAN/Tailscale mesh) read and write a common, versioned knowledge graph, store large artifacts, and
-publish/consume standalone tools — concurrently and safely.
+*Shared, versioned memory for a fleet of AI agents.*
+
+Multi-agent workflows lose knowledge between sessions and machines. Hivemind is a shared, versioned
+knowledge graph + artifact store + tool registry that agents read and write concurrently over MCP —
+domain-agnostic, self-hosted, and schema-flexible so it fits any research or ops domain. It runs as
+one service for a fleet of agents (local and remote, across a LAN/Tailscale mesh).
 
 > ⚠️ **Work in progress — proof of concept.** This is early, has had light real-world use, and
 > almost certainly contains bugs, rough edges, and missing hardening. Treat it as a foundation to
