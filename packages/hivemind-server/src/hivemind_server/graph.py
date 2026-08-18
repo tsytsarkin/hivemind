@@ -135,6 +135,8 @@ def upsert_node(db: Database, agent_id: str, node_type: str, props: dict, *,
                 "content_hash,tx_from,tx_to) VALUES(?,?,?,?,?,?,?,?,?)",
                 (vid, nid, 1, None, canonical_json(props), schema_ver, ch, tx.tx_id, SENTINEL),
             )
+            from . import search as _search
+            _search.index_node(cur, nid, props)
             return {"node_id": nid, "version_id": vid, "seq": 1, "created": True,
                     "superseded": False, "axis": "subject"}
 
@@ -168,6 +170,8 @@ def upsert_node(db: Database, agent_id: str, node_type: str, props: dict, *,
         )
         if subject_order is not None:
             cur.execute("UPDATE node SET subject_order=? WHERE node_id=?", (subject_order, nid))
+        from . import search as _search
+        _search.index_node(cur, nid, props)
         return {"node_id": nid, "version_id": vid, "seq": seq, "created": False,
                 "superseded": True, "axis": "revision"}
 
@@ -442,8 +446,9 @@ def neighbors(db: Database, node_id: str, *, edge_types: Optional[list[str]] = N
 
 def search_nodes(db: Database, query: str, *, types: Optional[list[str]] = None,
                  limit: int = 25, cursor: int = 0) -> dict:
-    """Basic substring search over current node versions (FTS backend replaces this in search.py).
-    Returns id@head, type, a snippet, and dispute flags. Paginated by integer cursor."""
+    """Search current node versions via FTS5 (unicode61 + trigram, RRF-fused)."""
+    from . import search as _search
+    return _search.search(db, query, types=types, limit=limit)
     limit = max(1, min(limit, 200))
     with db.read() as cur:
         params: list = []

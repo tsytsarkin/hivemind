@@ -32,6 +32,8 @@ class Client:
         self._http = httpx.Client(timeout=timeout)
         from .artifacts import Artifacts
         self.artifacts = Artifacts(self)
+        from . import tools as _tools
+        self._tools = _tools
 
     # ── low-level ────────────────────────────────────────────────────────────────
     def _auth(self) -> Dict[str, str]:
@@ -108,6 +110,15 @@ class Client:
         # /healthz lives at server root, above the project prefix
         root = self.base_url.rsplit("/p/", 1)[0]
         return self._http.get(root + "/healthz").json()
+
+    def tool_publish(self, path, *, id, version, **kw):
+        return self._tools.publish(self, path, id=id, version=version, **kw)
+
+    def tool_get(self, id, *, constraint="", dest_dir=".", **kw):
+        return self._tools.get(self, id, constraint=constraint, dest_dir=dest_dir, **kw)
+
+    def tool_search(self, query="", **kw):
+        return self._tools.search(self, query, **kw)
 
     def close(self) -> None:
         self._http.close()

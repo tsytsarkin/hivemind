@@ -178,3 +178,8 @@ CREATE TABLE IF NOT EXISTS guide_proposal (
 
 -- ── meta: schema_version counter + engine bookkeeping ───────────────────────────
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+
+-- ── full-text search (app-maintained; props are arbitrary JSON) ─────────────────
+-- Two tokenizers: unicode61 for prose, trigram for symbols/paths (survives Foo::bar_baz).
+CREATE VIRTUAL TABLE IF NOT EXISTS node_fts USING fts5(node_id UNINDEXED, body, tokenize='unicode61');
+CREATE VIRTUAL TABLE IF NOT EXISTS sym_fts  USING fts5(node_id UNINDEXED, body, tokenize='trigram');
