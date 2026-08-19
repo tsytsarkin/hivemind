@@ -107,3 +107,49 @@ def reindex_all(db: Database) -> int:
         for r in rows:
             index_node(cur, r["node_id"], json.loads(r["props"]))
     return len(rows)
+
+
+_LINK_STOP = {"the", "a", "an", "and", "or", "of", "to", "for", "in", "on", "with", "how", "use",
+              "when", "this", "that", "it", "is", "are", "be", "by", "from", "into", "you",
+              "your", "run", "using", "step", "steps"}
+
+
+def candidate_nodes(db: Database, text: str, *, limit: int = 15, max_terms: int = 10) -> list:
+    """Cheap topical lookup used by auto-linking.
+
+    `search()` is built for agent queries: it ORs every token across BOTH the prose and trigram
+    indexes and then computes dispute flags per hit. Feeding it a whole skill description made
+    that ~12s per item against a 92k-node graph with a 380MB trigram index. Linking only needs
+    topical proximity, so this uses the prose index alone, keeps the few most distinctive terms,
+    and skips the per-result enrichment.
+    """
+    seen, terms = set(), []
+    for tok in sorted(set(_TOKENS(text)), key=len, reverse=True):
+        if tok in _LINK_STOP or len(tok) < 4 or tok in seen:
+            continue
+        seen.add(tok)
+        terms.append(tok)
+        if len(terms) >= max_terms:
+            break
+    if not terms:
+        return []
+    match = " OR ".join('"' + t.replace('"', '""') + '"' for t in terms)
+    with db.read() as cur:
+        rows = cur.execute(
+            "SELECT f.node_id, f.rank AS score, n.node_type, n.subject_key, nv.props "
+            "FROM node_fts f JOIN node n ON n.node_id = f.node_id "
+            "JOIN node_version nv ON nv.node_id = n.node_id AND nv.tx_to = ? "
+            "WHERE node_fts MATCH ? AND n.redirect_to IS NULL ORDER BY f.rank LIMIT ?",
+            (SENTINEL, match, limit)).fetchall()
+    out = []
+    for r in rows:
+        out.append({"node_id": r["node_id"], "node_type": r["node_type"],
+                    "subject_key": r["subject_key"],
+                    "snippet": (r["props"] or "")[:200],
+                    "score": -float(r["score"] or 0.0)})   # fts5 rank: more negative = better
+    return out
+
+
+def _TOKENS(text: str):
+    import re as _re
+    return _re.findall(r"[a-z0-9_]{2,}", (text or "").lower())

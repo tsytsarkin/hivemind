@@ -453,9 +453,9 @@ def suggest_links(db: Database, item_id: str, *, limit: int = 5) -> dict:
     node index) and leaves confirmation to the caller, mirroring propose->promote for schema and
     the human-gated guide.
     """
-    from .search import search as node_search
+    from .search import candidate_nodes
     text, existing = _link_query_text(db, item_id)
-    hits = node_search(db, text, limit=limit * 3)["results"]
+    hits = candidate_nodes(db, text, limit=limit * 3)
     out = []
     for h in hits:
         if h["node_id"] in existing:
