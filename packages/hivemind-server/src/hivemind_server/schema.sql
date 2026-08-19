@@ -237,3 +237,16 @@ CREATE INDEX IF NOT EXISTS ix_trap_node ON trap(node_id) WHERE node_id IS NOT NU
 CREATE INDEX IF NOT EXISTS ix_trap_subject ON trap(subject_key, subject_version);
 CREATE INDEX IF NOT EXISTS ix_trap_status ON trap(status);
 CREATE VIRTUAL TABLE IF NOT EXISTS trap_fts USING fts5(trap_id UNINDEXED, body, tokenize='unicode61');
+
+-- ── skill ↔ graph links: which nodes a procedure is about ────────────────────────
+-- Gives topical organisation today (find skills from the thing you are looking at) and is the
+-- seed data for a real skill graph later, if the library ever grows big enough to need one.
+CREATE TABLE IF NOT EXISTS skill_link (
+  id         TEXT NOT NULL REFERENCES skill(id),
+  node_id    TEXT NOT NULL REFERENCES node(node_id),
+  relation   TEXT NOT NULL DEFAULT 'about',        -- about | uses | produces | supersedes_manual
+  note       TEXT,
+  created_tx INTEGER NOT NULL REFERENCES tx(tx_id),
+  PRIMARY KEY (id, node_id, relation)
+);
+CREATE INDEX IF NOT EXISTS ix_skill_link_node ON skill_link(node_id);

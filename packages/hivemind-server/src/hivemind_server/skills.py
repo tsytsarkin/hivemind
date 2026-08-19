@@ -6,6 +6,7 @@ is the payload: a tool ships executable bytes, a skill ships a procedure in pros
 """
 from __future__ import annotations
 
+import difflib
 import json
 from typing import Optional
 
@@ -39,14 +40,28 @@ def _index(cur, sid: str, title: str, description: str, when_to_use: str, body: 
 
 def publish(db: Database, agent_id: str, *, id: str, version: str, title: str, description: str,
             body: str, when_to_use: Optional[str] = None, tags: Optional[list] = None,
-            requires: Optional[dict] = None, verified_how: Optional[str] = None) -> dict:
+            requires: Optional[dict] = None, verified_how: Optional[str] = None,
+            force: bool = False) -> dict:
     _validate(id, version, title, description, body)
     tags = tags or []
+    warnings = []
+    is_new = False
     with db.write(agent_id, f"skill_publish {id}@{version}") as tx:
         cur = tx.cur
         if cur.execute("SELECT 1 FROM skill_version WHERE id=? AND version=?",
                        (id, version)).fetchone():
             raise Conflict(f"{id}@{version} already published (immutable). Bump the version.")
+        is_new = cur.execute("SELECT 1 FROM skill WHERE id=?", (id,)).fetchone() is None
+        if is_new:
+            dups = find_similar(db, id=id, title=title, description=description)
+            if dups and not force:
+                listed = ", ".join(f"{d['id']}@{d['version']} ({d['why']})" for d in dups)
+                raise Invalid(
+                    f"a similar skill already exists: {listed}. Publish a NEW VERSION of it "
+                    f"instead of a duplicate (skill_publish with that id and a bumped semver), "
+                    f"or re-publish with force=true if this is genuinely different.")
+            if dups:
+                warnings.append({"similar_skills": dups, "note": "published despite similarity"})
         cur.execute("INSERT INTO skill(id, latest_version, created_tx) VALUES(?,?,?) "
                     "ON CONFLICT(id) DO NOTHING", (id, version, tx.tx_id))
         cur.execute(
@@ -60,7 +75,8 @@ def publish(db: Database, agent_id: str, *, id: str, version: str, title: str, d
         cur.execute("UPDATE skill SET latest_version=? WHERE id=?", (latest, id))
         if latest == version:                       # only the newest version drives search
             _index(cur, id, title, description, when_to_use or "", body, tags)
-    return {"id": id, "version": version, "latest": latest}
+    return {"id": id, "version": version, "latest": latest, "new_skill": is_new,
+            "warnings": warnings}
 
 
 def yank(db: Database, agent_id: str, id: str, version: str, reason: str = "") -> dict:
@@ -142,3 +158,97 @@ def search(db: Database, query: str = "", *, tags: Optional[list] = None,
     return {"skills": out, "count": len(out),
             "hint": "call skill_get(id) for the full procedure" if out else
                     "nothing matched — if you solve this, skill_publish it"}
+
+
+# ── duplicate prevention ────────────────────────────────────────────────────────────
+_DUP_NAME = 0.72          # id/title similarity above this is suspicious
+_DUP_TEXT = 0.62          # description similarity above this is suspicious
+
+
+def _similar(a: str, b: str) -> float:
+    return difflib.SequenceMatcher(None, (a or "").lower(), (b or "").lower()).ratio()
+
+
+def find_similar(db: Database, *, id: str, title: str = "", description: str = "",
+                 limit: int = 5) -> list:
+    """Existing skills that look like the one being published. Cheap and deterministic: name and
+    description similarity, no embeddings — enough to stop the same procedure being written twice
+    under different names, which is the actual failure mode in a small library."""
+    out = []
+    with db.read() as cur:
+        rows = cur.execute(
+            "SELECT s.id, sv.title, sv.description, s.latest_version FROM skill s "
+            "JOIN skill_version sv ON sv.id=s.id AND sv.version=s.latest_version").fetchall()
+    for r in rows:
+        if r["id"] == id:
+            continue
+        name_score = max(_similar(id, r["id"]), _similar(title, r["title"]))
+        text_score = _similar(description, r["description"])
+        if name_score >= _DUP_NAME or text_score >= _DUP_TEXT:
+            out.append({"id": r["id"], "version": r["latest_version"], "title": r["title"],
+                        "why": ("similar name" if name_score >= _DUP_NAME
+                                else "similar description"),
+                        "score": round(max(name_score, text_score), 2)})
+    out.sort(key=lambda d: d["score"], reverse=True)
+    return out[:limit]
+
+
+# ── catalog: what is in here, so agents can browse rather than guess a query ──────────
+def catalog(db: Database, *, topic: Optional[str] = None, limit: int = 200) -> dict:
+    """Advertise the library: topics with counts, plus a one-line entry per skill.
+
+    Deliberately flat + faceted rather than a graph: at this library size faceted browse beats
+    graph diffusion (see docs/skills-and-traps.md), and it costs one query.
+    """
+    with db.read() as cur:
+        rows = cur.execute(
+            "SELECT s.id, s.latest_version, sv.title, sv.description, sv.tags, sv.author, "
+            "sv.when_to_use FROM skill s JOIN skill_version sv "
+            "ON sv.id=s.id AND sv.version=s.latest_version "
+            "WHERE s.latest_version IS NOT NULL ORDER BY s.id LIMIT ?", (limit,)).fetchall()
+        link_counts = dict(cur.execute(
+            "SELECT id, COUNT(*) FROM skill_link GROUP BY id").fetchall() or [])
+    topics: dict = {}
+    entries = []
+    for r in rows:
+        tags = json.loads(r["tags"]) or ["untagged"]
+        for t in tags:
+            topics[t] = topics.get(t, 0) + 1
+        if topic and topic not in tags:
+            continue
+        entries.append({"id": r["id"], "version": r["latest_version"], "title": r["title"],
+                        "description": r["description"], "tags": json.loads(r["tags"]),
+                        "linked_nodes": link_counts.get(r["id"], 0)})
+    return {"count": len(entries), "total_skills": len(rows),
+            "topics": [{"topic": k, "skills": v} for k, v in
+                       sorted(topics.items(), key=lambda kv: (-kv[1], kv[0]))],
+            "skills": entries,
+            "hint": "skill_get(id) for the procedure; skill_catalog(topic=…) to narrow"}
+
+
+# ── linking skills to the graph ──────────────────────────────────────────────────────
+def link(db: Database, agent_id: str, skill_id: str, node_id: str, *, relation: str = "about",
+         note: Optional[str] = None) -> dict:
+    with db.write(agent_id, f"skill_link {skill_id} -> {node_id}") as tx:
+        cur = tx.cur
+        if cur.execute("SELECT 1 FROM skill WHERE id=?", (skill_id,)).fetchone() is None:
+            raise NotFound(f"skill {skill_id!r} not found")
+        if cur.execute("SELECT 1 FROM node WHERE node_id=?", (node_id,)).fetchone() is None:
+            raise Invalid(f"node {node_id!r} not found")
+        cur.execute("INSERT INTO skill_link(id,node_id,relation,note,created_tx) "
+                    "VALUES(?,?,?,?,?) ON CONFLICT(id,node_id,relation) DO UPDATE SET note=?",
+                    (skill_id, node_id, relation, note, tx.tx_id, note))
+    return {"skill_id": skill_id, "node_id": node_id, "relation": relation}
+
+
+def for_node(db: Database, node_id: str) -> list:
+    """Skills attached to a node — so an agent reading a thing sees the procedures about it."""
+    with db.read() as cur:
+        rows = cur.execute(
+            "SELECT sl.id, sl.relation, sl.note, s.latest_version, sv.title, sv.description "
+            "FROM skill_link sl JOIN skill s ON s.id=sl.id "
+            "LEFT JOIN skill_version sv ON sv.id=s.id AND sv.version=s.latest_version "
+            "WHERE sl.node_id=? ORDER BY sl.created_tx DESC LIMIT 10", (node_id,)).fetchall()
+    return [{"id": r["id"], "version": r["latest_version"], "title": r["title"],
+             "description": r["description"], "relation": r["relation"], "note": r["note"]}
+            for r in rows]

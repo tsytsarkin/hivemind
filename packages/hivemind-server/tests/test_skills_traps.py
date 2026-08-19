@@ -94,3 +94,57 @@ def test_trap_scoped_to_subject_version(db):
     n2 = graph.upsert_node(db, "a", "thing", {"v": 2}, subject_key="X",
                            subject_version="27.0")["node_id"]
     assert traps.for_node(db, n2, subject_key="X", subject_version="27.0") == []
+
+
+# ── discovery: catalog, duplicate prevention, node linking ──────────────────────
+def _pub(db, sid, title, desc, tags=None, force=False):
+    return skills.publish(db, "a", id=sid, version="1.0.0", title=title, description=desc,
+                          body="steps", tags=tags or [], force=force)
+
+
+def test_catalog_lists_topics_and_entries(db):
+    _pub(db, "ops/restart", "Restart the server", "How to restart it safely.", ["ops"])
+    _pub(db, "re/unpack", "Unpack a cache", "Pull raw images out of a shared cache.",
+         ["re", "binary"])
+    cat = skills.catalog(db)
+    assert cat["total_skills"] == 2
+    topics = {t["topic"]: t["skills"] for t in cat["topics"]}
+    assert topics == {"binary": 1, "ops": 1, "re": 1}
+    assert {s["id"] for s in cat["skills"]} == {"ops/restart", "re/unpack"}
+    narrowed = skills.catalog(db, topic="ops")
+    assert [s["id"] for s in narrowed["skills"]] == ["ops/restart"]
+
+
+def test_duplicate_new_skill_is_refused_but_revision_is_not(db):
+    _pub(db, "ops/restart-server", "Restart the server", "How to restart the server safely.")
+    # a near-identical NEW id is refused, and the error names the skill to revise instead
+    with pytest.raises(Invalid) as e:
+        _pub(db, "ops/restart-the-server", "Restart the server",
+             "How to restart the server safely.")
+    msg = str(e.value)
+    assert "ops/restart-server@1.0.0" in msg and "NEW VERSION" in msg
+    # force is the explicit override
+    r = _pub(db, "ops/restart-the-server", "Restart the server",
+             "How to restart the server safely.", force=True)
+    assert r["warnings"] and r["warnings"][0]["similar_skills"]
+    # revising the ORIGINAL skill must never be blocked by its own similarity
+    r2 = skills.publish(db, "a", id="ops/restart-server", version="1.1.0",
+                        title="Restart the server", description="How to restart it safely.",
+                        body="better steps")
+    assert r2["version"] == "1.1.0" and r2["new_skill"] is False
+    # an unrelated skill sails through
+    assert _pub(db, "re/decode-firmware", "Decode firmware", "Turn a blob into images.")
+
+
+def test_skill_linked_to_node_is_discoverable_from_it(db):
+    n = graph.upsert_node(db, "a", "thing", {"name": "IOSurface"})["node_id"]
+    _pub(db, "re/trace-iosurface", "Trace IOSurface calls", "How to trace the client.")
+    skills.link(db, "a", "re/trace-iosurface", n, relation="about", note="entry point")
+    got = skills.for_node(db, n)
+    assert [s["id"] for s in got] == ["re/trace-iosurface"]
+    assert got[0]["relation"] == "about"
+    assert skills.catalog(db)["skills"][0]["linked_nodes"] == 1
+    with pytest.raises(Invalid):
+        skills.link(db, "a", "re/trace-iosurface", "no-such-node")
+    with pytest.raises(NotFound):
+        skills.link(db, "a", "no/such-skill", n)

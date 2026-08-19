@@ -94,11 +94,15 @@ def build_parser() -> argparse.ArgumentParser:
     sk = sub.add_parser("skill").add_subparsers(dest="skill_cmd", required=True)
     sks = sk.add_parser("search"); sks.add_argument("query", nargs="?", default="")
     sks.add_argument("--tag", action="append", dest="tags")
+    skc = sk.add_parser("catalog"); skc.add_argument("--topic")
+    skl = sk.add_parser("link"); skl.add_argument("skill_id"); skl.add_argument("node_id")
+    skl.add_argument("--relation", default="about"); skl.add_argument("--note")
     skg = sk.add_parser("get"); skg.add_argument("id"); skg.add_argument("--constraint", default="")
     skp = sk.add_parser("publish"); skp.add_argument("id"); skp.add_argument("--version", required=True)
     skp.add_argument("--title", required=True); skp.add_argument("--description", required=True)
     skp.add_argument("--body-file", required=True); skp.add_argument("--when-to-use")
     skp.add_argument("--tag", action="append", dest="tags"); skp.add_argument("--verified-how")
+    skp.add_argument("--force", action="store_true", help="publish despite a similar existing skill")
     sky = sk.add_parser("yank"); sky.add_argument("id"); sky.add_argument("version")
     sky.add_argument("--reason", default="")
 
@@ -175,13 +179,18 @@ def main(argv=None) -> int:
             _out(c.tool_search(args.query))
         elif args.cmd == "skill" and args.skill_cmd == "search":
             _out(c.call("skill_search", {"query": args.query, "tags": args.tags}))
+        elif args.cmd == "skill" and args.skill_cmd == "catalog":
+            _out(c.call("skill_catalog", {"topic": args.topic}))
+        elif args.cmd == "skill" and args.skill_cmd == "link":
+            _out(c.call("skill_link", {"skill_id": args.skill_id, "node_id": args.node_id,
+                                       "relation": args.relation, "note": args.note}))
         elif args.cmd == "skill" and args.skill_cmd == "get":
             _out(c.call("skill_get", {"id": args.id, "constraint": args.constraint}))
         elif args.cmd == "skill" and args.skill_cmd == "publish":
             _out(c.call("skill_publish", {"id": args.id, "version": args.version,
                  "title": args.title, "description": args.description,
                  "body": open(args.body_file).read(), "when_to_use": args.when_to_use,
-                 "tags": args.tags, "verified_how": args.verified_how}))
+                 "tags": args.tags, "verified_how": args.verified_how, "force": args.force}))
         elif args.cmd == "skill" and args.skill_cmd == "yank":
             _out(c.call("skill_yank", {"id": args.id, "version": args.version,
                                        "reason": args.reason}))

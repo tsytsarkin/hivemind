@@ -82,6 +82,9 @@ def build_mcp(project: Project, *, instructions: str = INSTRUCTIONS) -> MCPServe
                            subject_version=out.get("subject_version"))
         if t:                           # an agent reading this node cannot miss its dead-ends
             out["traps"] = t
+        sk = skills.for_node(db, out["node_id"])
+        if sk:                          # ...nor the procedures written about it
+            out["skills"] = sk
         return out
 
     @mcp.tool(annotations=RO,
@@ -195,6 +198,22 @@ def build_mcp(project: Project, *, instructions: str = INSTRUCTIONS) -> MCPServe
         return skills.search(db, query, tags=tags, limit=limit, format=response_format)
 
     @mcp.tool(annotations=RO,
+              description="Browse the whole mini-skill library: topics with counts plus a one-line "
+                          "entry per skill. Use this to see what exists before inventing a query; "
+                          "pass topic= to narrow to one tag.")
+    @_envelope
+    def skill_catalog(topic: Optional[str] = None, limit: int = 200) -> dict:
+        return skills.catalog(db, topic=topic, limit=limit)
+
+    @mcp.tool(annotations=WRITE,
+              description="Link a skill to a graph node it is about (relation: about|uses|"
+                          "produces). Anyone reading that node then sees the procedure.")
+    @_envelope
+    def skill_link(skill_id: str, node_id: str, relation: str = "about",
+                   note: Optional[str] = None, agent: str = "agent") -> dict:
+        return skills.link(db, agent, skill_id, node_id, relation=relation, note=note)
+
+    @mcp.tool(annotations=RO,
               description="Fetch a mini-skill's full procedure. constraint accepts ^, ~, >= or an "
                           "exact version; default is the newest non-yanked version.")
     @_envelope
@@ -205,15 +224,16 @@ def build_mcp(project: Project, *, instructions: str = INSTRUCTIONS) -> MCPServe
               description="Publish a mini-skill: a repeatable procedure you worked out, so nobody "
                           "re-derives it. Versions are IMMUTABLE — bump the semver to revise. "
                           "Write `body` as steps someone else can follow, include the gotchas, and "
-                          "state in `verified_how` how you confirmed it actually works.")
+                          "state in `verified_how` how you confirmed it actually works. Publishing a NEW id that looks like an existing skill is refused — revise the existing one by bumping its version instead (force=true to override).")
     @_envelope
     def skill_publish(id: str, version: str, title: str, description: str, body: str,
                       agent: str = "agent", when_to_use: Optional[str] = None,
                       tags: Optional[list[str]] = None, requires: Optional[dict] = None,
-                      verified_how: Optional[str] = None) -> dict:
+                      verified_how: Optional[str] = None, force: bool = False) -> dict:
         return skills.publish(db, agent, id=id, version=version, title=title,
                               description=description, body=body, when_to_use=when_to_use,
-                              tags=tags, requires=requires, verified_how=verified_how)
+                              tags=tags, requires=requires, verified_how=verified_how,
+                              force=force)
 
     @mcp.tool(annotations=WRITE,
               description="Yank a mini-skill version (hide it from search; still fetchable by "

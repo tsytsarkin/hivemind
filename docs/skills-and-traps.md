@@ -33,6 +33,37 @@ library, only admits a skill to the library after self-verification. An unverifi
 guess, and a guess published as a skill costs the next agent more than it saves.
 
 
+### Finding what exists
+
+Three surfaces, cheapest first:
+
+```sh
+skill_catalog()                      # browse: topics with counts + one line per skill
+skill_catalog(topic="ops")           # narrow to a tag
+skill_search("restart the server")   # full-text over id/title/description/when_to_use/body
+skill_get("ops/restart-hivemind")    # the procedure itself
+```
+Also over plain HTTP, for dashboards or non-MCP clients:
+`GET /p/<project>/skills[?topic=…]` and `GET /p/<project>/skills/<id>[?constraint=^1.0]`.
+
+**Skills are also discoverable from the graph.** `skill_link(skill_id, node_id, relation)`
+attaches a procedure to the thing it is about, and `graph_get` on that node then returns its
+skills alongside its traps — so an agent looking at a component finds the procedures for it
+without having to guess a search query.
+
+### Avoiding duplicates
+
+Publishing a **new id** that closely resembles an existing skill (by name or description) is
+**refused**, and the error names the skill to revise instead:
+
+> a similar skill already exists: ops/restart-server@1.0.0 (similar name). Publish a NEW VERSION
+> of it instead of a duplicate, or re-publish with force=true if this is genuinely different.
+
+Bumping the version of an *existing* skill is never blocked — that is the intended way to revise.
+`force=true` overrides and records a warning on the publish result. The check is deterministic
+string similarity, not embeddings: enough to stop the same procedure being written twice under two
+names, which is the real failure mode at this library size.
+
 ### Field reference
 
 | Field | Required | Notes |
@@ -97,6 +128,37 @@ become self-reinforcing false beliefs.
 Treat a trap as a *prior recorded by an agent who may have been wrong*, never as proof.
 
 
+### Finding what exists
+
+Three surfaces, cheapest first:
+
+```sh
+skill_catalog()                      # browse: topics with counts + one line per skill
+skill_catalog(topic="ops")           # narrow to a tag
+skill_search("restart the server")   # full-text over id/title/description/when_to_use/body
+skill_get("ops/restart-hivemind")    # the procedure itself
+```
+Also over plain HTTP, for dashboards or non-MCP clients:
+`GET /p/<project>/skills[?topic=…]` and `GET /p/<project>/skills/<id>[?constraint=^1.0]`.
+
+**Skills are also discoverable from the graph.** `skill_link(skill_id, node_id, relation)`
+attaches a procedure to the thing it is about, and `graph_get` on that node then returns its
+skills alongside its traps — so an agent looking at a component finds the procedures for it
+without having to guess a search query.
+
+### Avoiding duplicates
+
+Publishing a **new id** that closely resembles an existing skill (by name or description) is
+**refused**, and the error names the skill to revise instead:
+
+> a similar skill already exists: ops/restart-server@1.0.0 (similar name). Publish a NEW VERSION
+> of it instead of a duplicate, or re-publish with force=true if this is genuinely different.
+
+Bumping the version of an *existing* skill is never blocked — that is the intended way to revise.
+`force=true` overrides and records a warning on the publish result. The check is deterministic
+string similarity, not embeddings: enough to stop the same procedure being written twice under two
+names, which is the real failure mode at this library size.
+
 ### Field reference
 
 | Field | Required | Notes |
@@ -160,6 +222,32 @@ Recording is useless if nobody reads it, so the surfacing is automatic rather th
 - The server `instructions` and the bundled skill both tell agents to search the registries first
   and to publish/record as they go — a trap is recorded **when you abandon the approach**, not in
   a tidy-up at the end of the task.
+
+## Why not a skill graph (yet)
+
+The obvious next step is to make skills nodes in a graph — topic edges, prerequisite edges,
+retrieval by diffusion. [Graph-of-Skills](https://arxiv.org/html/2604.05333) builds exactly that
+(dependency, workflow, semantic and alternative edges; hybrid seeds then Personalized PageRank),
+and its own numbers say when it is worth it: **at 200 skills flat retrieval still slightly wins
+(32.5 vs 32.1 reward); the graph only pulls ahead once the library is "moderately large"**, with
+gains shown up to 2,000 skills. This library is nowhere near that, so the graph would be
+machinery without a problem.
+
+What that paper *does* justify now:
+- its semantic edges exist partly to link **near-duplicate** skills — duplication is a real, known
+  failure of flat libraries, so it is guarded at publish time instead;
+- its dependency edges are derived **deterministically from I/O compatibility, with no LLM** —
+  which means the graph can be *computed later* from data recorded now.
+
+So the current design records the graph's raw material without paying for the graph: `requires`
+captures prerequisites, `tags` capture topics, and `skill_link` captures what a skill is about.
+If the library ever grows past a few hundred skills, those three fields are enough to build
+dependency/semantic edges and switch retrieval over — without re-modelling anything.
+
+Related reading: [SkillFlow](https://arxiv.org/html/2504.06188v2) (multi-stage narrowing: dense →
+rerank → LLM select) and the [ecosystem-scale survey](https://arxiv.org/html/2605.07358v1), which
+both find that **too many irrelevant skills degrades agent performance** — an argument for better
+discovery, not a bigger library.
 
 ## Lifecycle and precedence
 
