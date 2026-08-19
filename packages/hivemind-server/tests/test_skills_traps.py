@@ -148,3 +148,25 @@ def test_skill_linked_to_node_is_discoverable_from_it(db):
         skills.link(db, "a", "re/trace-iosurface", "no-such-node")
     with pytest.raises(NotFound):
         skills.link(db, "a", "no/such-skill", n)
+
+
+def test_catalog_counts_are_not_the_page_size(db):
+    # deliberately unrelated names/descriptions — the dedup guard rejects near-identical ones
+    fixtures = [("ops/rotate-logs", "Rotate logs", "Trim and archive server log files."),
+                ("re/decode-firmware", "Decode firmware", "Turn a packed blob into images."),
+                ("ops/mint-token", "Mint a token", "Issue credentials for a new machine."),
+                ("re/diff-binaries", "Diff binaries", "Compare two builds for changed functions."),
+                ("ops/backup-db", "Back up the database", "Snapshot and replicate storage."),
+                ("re/trace-syscalls", "Trace syscalls", "Watch kernel entry points at runtime."),
+                ("ops/prune-blobs", "Prune blobs", "Reclaim unreferenced artifact storage.")]
+    for i, (sid, title, desc) in enumerate(fixtures):
+        _pub(db, sid, title, desc, ["ops"] if sid.startswith("ops") else ["re"])
+    page = skills.catalog(db, limit=3)
+    assert page["total_skills"] == 7          # the library, not the page
+    assert page["returned"] == 3 and page["next_offset"] == 3
+    rest = skills.catalog(db, limit=3, offset=3)
+    assert rest["returned"] == 3 and rest["next_offset"] == 6
+    last = skills.catalog(db, limit=3, offset=6)
+    assert last["returned"] == 1 and last["next_offset"] is None
+    ops = skills.catalog(db, topic="ops", limit=100)
+    assert ops["matched"] == 4 and ops["total_skills"] == 7

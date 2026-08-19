@@ -22,8 +22,10 @@ def register_skill_routes(mcp, project) -> None:
     @mcp.custom_route("/skills", methods=["GET"])
     async def skill_catalog(req: Request) -> Response:
         topic = req.query_params.get("topic")
-        limit = min(int(req.query_params.get("limit", 200)), 500)
-        return JSONResponse(await run_in_threadpool(skills.catalog, db, topic=topic, limit=limit))
+        limit = min(int(req.query_params.get("limit", 100)), 500)
+        offset = max(int(req.query_params.get("offset", 0)), 0)
+        return JSONResponse(await run_in_threadpool(skills.catalog, db, topic=topic,
+                                                    limit=limit, offset=offset))
 
     @mcp.custom_route("/skills/{skill_id:path}", methods=["GET"])
     async def skill_get(req: Request) -> Response:

@@ -194,36 +194,54 @@ def find_similar(db: Database, *, id: str, title: str = "", description: str = "
 
 
 # ── catalog: what is in here, so agents can browse rather than guess a query ──────────
-def catalog(db: Database, *, topic: Optional[str] = None, limit: int = 200) -> dict:
-    """Advertise the library: topics with counts, plus a one-line entry per skill.
+def catalog(db: Database, *, topic: Optional[str] = None, limit: int = 100,
+            offset: int = 0, max_topics: int = 30) -> dict:
+    """Advertise the library: real totals, the busiest topics, and a page of one-line entries.
 
-    Deliberately flat + faceted rather than a graph: at this library size faceted browse beats
-    graph diffusion (see docs/skills-and-traps.md), and it costs one query.
+    Counts come from the whole table, never from the page — a catalog that reports the size of
+    its own LIMIT is worse than no catalog, because it silently understates the library.
     """
+    limit = max(1, min(limit, 500))
     with db.read() as cur:
+        total = cur.execute(
+            "SELECT COUNT(*) c FROM skill WHERE latest_version IS NOT NULL").fetchone()["c"]
+        topic_rows = cur.execute(
+            "SELECT j.value AS topic, COUNT(*) AS n FROM skill s "
+            "JOIN skill_version sv ON sv.id=s.id AND sv.version=s.latest_version, "
+            "json_each(sv.tags) j GROUP BY j.value ORDER BY n DESC, j.value").fetchall()
+        params: list = []
+        where = "WHERE s.latest_version IS NOT NULL"
+        if topic:
+            where += (" AND EXISTS (SELECT 1 FROM json_each(sv.tags) j2 WHERE j2.value = ?)")
+            params.append(topic)
+        matched = cur.execute(
+            f"SELECT COUNT(*) c FROM skill s JOIN skill_version sv "
+            f"ON sv.id=s.id AND sv.version=s.latest_version {where}", params).fetchone()["c"]
         rows = cur.execute(
-            "SELECT s.id, s.latest_version, sv.title, sv.description, sv.tags, sv.author, "
-            "sv.when_to_use FROM skill s JOIN skill_version sv "
-            "ON sv.id=s.id AND sv.version=s.latest_version "
-            "WHERE s.latest_version IS NOT NULL ORDER BY s.id LIMIT ?", (limit,)).fetchall()
+            f"SELECT s.id, s.latest_version, sv.title, sv.description, sv.tags "
+            f"FROM skill s JOIN skill_version sv ON sv.id=s.id AND sv.version=s.latest_version "
+            f"{where} ORDER BY s.id LIMIT ? OFFSET ?", (*params, limit, offset)).fetchall()
         link_counts = dict(cur.execute(
             "SELECT id, COUNT(*) FROM skill_link GROUP BY id").fetchall() or [])
-    topics: dict = {}
-    entries = []
-    for r in rows:
-        tags = json.loads(r["tags"]) or ["untagged"]
-        for t in tags:
-            topics[t] = topics.get(t, 0) + 1
-        if topic and topic not in tags:
-            continue
-        entries.append({"id": r["id"], "version": r["latest_version"], "title": r["title"],
-                        "description": r["description"], "tags": json.loads(r["tags"]),
-                        "linked_nodes": link_counts.get(r["id"], 0)})
-    return {"count": len(entries), "total_skills": len(rows),
-            "topics": [{"topic": k, "skills": v} for k, v in
-                       sorted(topics.items(), key=lambda kv: (-kv[1], kv[0]))],
-            "skills": entries,
-            "hint": "skill_get(id) for the procedure; skill_catalog(topic=…) to narrow"}
+    entries = [{"id": r["id"], "version": r["latest_version"], "title": r["title"],
+                "description": r["description"], "tags": json.loads(r["tags"]),
+                "linked_nodes": link_counts.get(r["id"], 0)} for r in rows]
+    out = {
+        "total_skills": total,
+        "matched": matched,
+        "returned": len(entries),
+        "offset": offset,
+        "next_offset": (offset + len(entries)) if offset + len(entries) < matched else None,
+        "topics": [{"topic": r["topic"], "skills": r["n"]} for r in topic_rows[:max_topics]],
+        "total_topics": len(topic_rows),
+        "skills": entries,
+    }
+    if len(topic_rows) > max_topics:
+        out["topics_truncated"] = (
+            f"{len(topic_rows)} topics exist; showing the {max_topics} largest. "
+            f"With more tags than skills, prefer skill_search over browsing by topic.")
+    out["hint"] = "skill_get(id) for the procedure; skill_catalog(topic=…) or skill_search(query)"
+    return out
 
 
 # ── linking skills to the graph ──────────────────────────────────────────────────────

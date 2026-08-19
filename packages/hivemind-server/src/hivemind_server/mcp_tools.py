@@ -202,8 +202,8 @@ def build_mcp(project: Project, *, instructions: str = INSTRUCTIONS) -> MCPServe
                           "entry per skill. Use this to see what exists before inventing a query; "
                           "pass topic= to narrow to one tag.")
     @_envelope
-    def skill_catalog(topic: Optional[str] = None, limit: int = 200) -> dict:
-        return skills.catalog(db, topic=topic, limit=limit)
+    def skill_catalog(topic: Optional[str] = None, limit: int = 100, offset: int = 0) -> dict:
+        return skills.catalog(db, topic=topic, limit=limit, offset=offset)
 
     @mcp.tool(annotations=WRITE,
               description="Link a skill to a graph node it is about (relation: about|uses|"
