@@ -83,10 +83,27 @@ class Database:
             self._local.conn = c
         return c
 
+    # Columns added to tables that may already exist on a deployed database. schema.sql uses
+    # CREATE TABLE IF NOT EXISTS, which silently does nothing for an existing table, so additive
+    # columns must be applied explicitly. Additive only — never drop or retype here.
+    _MIGRATIONS = (
+        ("skill_link", "source", "TEXT NOT NULL DEFAULT 'auto'"),
+        ("skill_link", "score", "REAL"),
+        ("tool_link", "source", "TEXT NOT NULL DEFAULT 'auto'"),
+        ("tool_link", "score", "REAL"),
+    )
+
     def apply_schema(self) -> None:
         con = self.conn()
         with self._write_lock:
             con.executescript(_SCHEMA_PATH.read_text())
+            for table, column, decl in self._MIGRATIONS:
+                try:
+                    cols = {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
+                except sqlite3.OperationalError:
+                    continue                      # table not created yet on this database
+                if cols and column not in cols:
+                    con.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
 
     # ── reads (autocommit; WAL lets readers run concurrently with the writer) ────
     @contextmanager

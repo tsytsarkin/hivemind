@@ -4,7 +4,7 @@
 Graph: `graph_search`, `graph_get`, `graph_subjects`, `graph_neighbors`, `graph_upsert`,
 `graph_link`, `graph_bulk_load`. Schema: `schema_get`, `schema_propose`, `schema_promote`,
 `schema_apply` (returns `{created, unchanged}`; idempotent). Artifacts: `artifact_ref`, `artifact_attach`, `artifact_refs`. Tools:
-`tool_catalog`, `tool_publish`, `tool_resolve`, `tool_search`, `tool_link`, `tool_suggest_links`, `tool_yank`. Mini-skills: `skill_catalog`, `skill_search`, `skill_get`, `skill_publish`, `skill_link`, `skill_suggest_links`, `skill_yank`. Traps:
+`tool_catalog`, `tool_publish`, `tool_resolve`, `tool_search`, `tool_link`, `tool_unlink`, `tool_autolink`, `tool_suggest_links`, `tool_yank`. Mini-skills: `skill_catalog`, `skill_search`, `skill_get`, `skill_publish`, `skill_link`, `skill_unlink`, `skill_autolink`, `skill_suggest_links`, `skill_yank`. Traps:
 `trap_search`, `trap_get`, `trap_record`, `trap_status`. Guide: `guide_get`, `guide_propose`.
 Read tools are annotated `readOnlyHint`; all return `{ok, …}` or `{ok:false, error, error_kind}`.
 

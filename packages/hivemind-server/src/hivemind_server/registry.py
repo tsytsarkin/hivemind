@@ -83,6 +83,10 @@ def publish(db: Database, agent_id: str, manifest: dict, artifact_digest: str, *
         embeddings.upsert(db, "tool", tid, " ".join(filter(None, [
             tid, manifest.get("description", ""), " ".join(manifest.get("tags") or []),
             manifest.get("runtime", "")])), agent_id=agent_id)
+        try:
+            autolink(db, tid, agent_id=agent_id)
+        except Exception:
+            pass
     return {"id": tid, "version": version, "latest": latest, "artifact_digest": artifact_digest,
             "new_tool": is_new, "warnings": warnings}
 
@@ -215,9 +219,24 @@ def attach_tools(mcp, project, envelope, RO, WRITE, base) -> None:
                      force: bool = False) -> dict:
         return publish(db, agent, manifest, artifact_digest, force=force)
 
+    @mcp.tool(annotations=WRITE,
+              description="Remove a tool<->node link (the correction path for a wrong automatic "
+                          "guess).")
+    @envelope
+    def tool_unlink(tool_id: str, node_id: str, relation: str = "about",
+                    agent: str = "agent") -> dict:
+        return unlink(db, agent, tool_id, node_id, relation)
+
+    @mcp.tool(annotations=WRITE,
+              description="Re-run automatic linking for a tool (or omit tool_id to backfill every "
+                          "unlinked tool). Runs on publish already; use this after the graph has "
+                          "grown.")
+    @envelope
+    def tool_autolink(tool_id: Optional[str] = None, agent: str = "agent") -> dict:
+        return autolink(db, tool_id, agent_id=agent) if tool_id else autolink_all(db, agent_id=agent)
+
     @mcp.tool(annotations=RO,
-              description="Suggest graph nodes a tool is probably about, ranked. These are "
-                          "GUESSES - confirm the real ones with tool_link.")
+              description="Preview which nodes a tool would be linked to, without linking.")
     @envelope
     def tool_suggest_links(tool_id: str, limit: int = 5) -> dict:
         return suggest_links(db, tool_id, limit=limit)
@@ -347,23 +366,31 @@ def catalog(db: Database, *, topic: Optional[str] = None, limit: int = 100, offs
 
 
 def link(db: Database, agent_id: str, tool_id: str, node_id: str, *, relation: str = "about",
-         note: Optional[str] = None) -> dict:
+         note: Optional[str] = None, source: str = "confirmed",
+         score: Optional[float] = None) -> dict:
     with db.write(agent_id, f"tool_link {tool_id} -> {node_id}") as tx:
         cur = tx.cur
         if cur.execute("SELECT 1 FROM tool WHERE id=?", (tool_id,)).fetchone() is None:
             raise NotFound(f"tool {tool_id!r} not found")
         if cur.execute("SELECT 1 FROM node WHERE node_id=?", (node_id,)).fetchone() is None:
             raise Invalid(f"node {node_id!r} not found")
-        cur.execute("INSERT INTO tool_link(id,node_id,relation,note,created_tx) "
-                    "VALUES(?,?,?,?,?) ON CONFLICT(id,node_id,relation) DO UPDATE SET note=?",
-                    (tool_id, node_id, relation, note, tx.tx_id, note))
-    return {"tool_id": tool_id, "node_id": node_id, "relation": relation}
+        cur.execute(
+            "INSERT INTO tool_link(id,node_id,relation,source,score,note,created_tx) "
+            "VALUES(?,?,?,?,?,?,?) ON CONFLICT(id,node_id,relation) DO UPDATE SET "
+            "note=COALESCE(excluded.note, tool_link.note), "
+            "score=COALESCE(excluded.score, tool_link.score), "
+            # a human/agent confirmation upgrades an auto link; it is never downgraded
+            "source=CASE WHEN tool_link.source='confirmed' OR excluded.source='confirmed' "
+            "THEN 'confirmed' ELSE 'auto' END",
+            (tool_id, node_id, relation, source, score, note, tx.tx_id))
+    return {"tool_id": tool_id, "node_id": node_id, "relation": relation,
+            "source": source}
 
 
 def for_node(db: Database, node_id: str) -> list:
     with db.read() as cur:
         rows = cur.execute(
-            "SELECT tl.id, tl.relation, tl.note, t.latest_version, tv.manifest FROM tool_link tl "
+            "SELECT tl.id, tl.relation, tl.note, tl.source, tl.score, t.latest_version, tv.manifest FROM tool_link tl "
             "JOIN tool t ON t.id=tl.id LEFT JOIN tool_version tv "
             "ON tv.id=t.id AND tv.version=t.latest_version WHERE tl.node_id=? "
             "ORDER BY tl.created_tx DESC LIMIT 10", (node_id,)).fetchall()
@@ -372,7 +399,7 @@ def for_node(db: Database, node_id: str) -> list:
         m = json.loads(r["manifest"]) if r["manifest"] else {}
         out.append({"id": r["id"], "version": r["latest_version"],
                     "description": m.get("description", ""), "relation": r["relation"],
-                    "note": r["note"]})
+                    "note": r["note"], "source": r["source"], "score": r["score"]})
     return out
 
 
@@ -441,3 +468,57 @@ def suggest_links(db: Database, item_id: str, *, limit: int = 5) -> dict:
     return {"tool_id": item_id, "suggestions": out, "count": len(out),
             "already_linked": len(existing),
             "hint": "these are GUESSES - confirm with tool_link(...) only where the match is real"}
+
+
+# ── automatic linking ────────────────────────────────────────────────────────────────
+# Links are created automatically, because a confirmation step that nobody performs is just an
+# empty table. The guard against bad links is not a human gate but three cheap constraints:
+#   * only the top few candidates per item, and only those close to the best match (relative
+#     threshold), so the long tail of weak matches is never linked;
+#   * every auto link records source='auto' and its score, so a reader can weigh it;
+#   * a confirmed link is never downgraded, and anything can be unlinked.
+AUTO_TOP_K = 3
+AUTO_REL_SCORE = 0.55        # keep candidates scoring >= 55% of the best hit for this item
+
+
+def autolink(db: Database, item_id: str, *, agent_id: str = "autolink", top_k: int = AUTO_TOP_K,
+             rel_score: float = AUTO_REL_SCORE) -> dict:
+    """Link an tool to the nodes it is most likely about. Idempotent; never downgrades a
+    confirmed link."""
+    sug = suggest_links(db, item_id, limit=max(top_k * 3, 6))["suggestions"]
+    if not sug:
+        return {"tool_id": item_id, "linked": 0, "considered": 0}
+    best = max((s["score"] or 0) for s in sug) or 0.0
+    keep = [s for s in sug if best <= 0 or (s["score"] or 0) >= best * rel_score][:top_k]
+    linked = []
+    for s in keep:
+        link(db, agent_id, item_id, s["node_id"], relation="about", source="auto",
+             score=s["score"])
+        linked.append(s["node_id"])
+    return {"tool_id": item_id, "linked": len(linked), "considered": len(sug),
+            "node_ids": linked}
+
+
+def autolink_all(db: Database, *, agent_id: str = "autolink", top_k: int = AUTO_TOP_K) -> dict:
+    """Backfill: autolink every item that has no links yet. Safe to re-run."""
+    with db.read() as cur:
+        ids = [r[0] for r in cur.execute(
+            "SELECT t.id FROM tool t LEFT JOIN tool_link l ON l.id=t.id "
+            "WHERE t.latest_version IS NOT NULL GROUP BY t.id HAVING COUNT(l.node_id)=0")]
+    total = 0
+    for i in ids:
+        try:
+            total += autolink(db, i, agent_id=agent_id, top_k=top_k)["linked"]
+        except Exception:
+            continue                      # one bad item must not abort a backfill
+    return {"items_processed": len(ids), "links_created": total}
+
+
+def unlink(db: Database, agent_id: str, item_id: str, node_id: str,
+           relation: str = "about") -> dict:
+    """Remove a link — the correction path for an automatic guess that is wrong."""
+    with db.write(agent_id, f"unlink tool {item_id} -/-> {node_id}") as tx:
+        n = tx.cur.execute(
+            "DELETE FROM tool_link WHERE id=? AND node_id=? AND relation=?",
+            (item_id, node_id, relation)).rowcount
+    return {"tool_id": item_id, "node_id": node_id, "removed": bool(n)}

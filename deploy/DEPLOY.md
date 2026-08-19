@@ -86,6 +86,7 @@ Indexes are maintained on write, so no routine maintenance is needed. Two except
 ```sh
 hivemind-admin --project default embed      # after adding the embedding index, or changing backend
 hivemind-admin --project default reindex    # rebuild node search indexes
+hivemind-admin --project default autolink   # link skills/tools that have no links yet
 ```
 Semantic search is optional and degrades safely: without `sentence-transformers` installed the
 server uses a built-in hashed TF-IDF vectoriser, and every search reports which backend answered.

@@ -219,10 +219,25 @@ def build_mcp(project: Project, *, instructions: str = INSTRUCTIONS) -> MCPServe
                    note: Optional[str] = None, agent: str = "agent") -> dict:
         return skills.link(db, agent, skill_id, node_id, relation=relation, note=note)
 
+    @mcp.tool(annotations=WRITE,
+              description="Remove a skill<->node link. Use when an automatic link is wrong — that "
+                          "is the correction path, since linking happens automatically.")
+    @_envelope
+    def skill_unlink(skill_id: str, node_id: str, relation: str = "about",
+                     agent: str = "agent") -> dict:
+        return skills.unlink(db, agent, skill_id, node_id, relation)
+
+    @mcp.tool(annotations=WRITE,
+              description="Re-run automatic linking for a skill (or omit skill_id to backfill "
+                          "every unlinked skill). Happens on publish already; use this after the "
+                          "graph has grown new nodes worth linking to.")
+    @_envelope
+    def skill_autolink(skill_id: Optional[str] = None, agent: str = "agent") -> dict:
+        return (skills.autolink(db, skill_id, agent_id=agent) if skill_id
+                else skills.autolink_all(db, agent_id=agent))
+
     @mcp.tool(annotations=RO,
-              description="Suggest graph nodes a skill is probably about, ranked. These are "
-                          "GUESSES - confirm the real ones with skill_link; a wrong link shows an "
-                          "irrelevant procedure to everyone reading that node.")
+              description="Preview which nodes a skill would be linked to, without linking.")
     @_envelope
     def skill_suggest_links(skill_id: str, limit: int = 5) -> dict:
         return skills.suggest_links(db, skill_id, limit=limit)

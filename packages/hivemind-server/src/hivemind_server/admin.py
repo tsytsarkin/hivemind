@@ -58,6 +58,7 @@ def main(argv=None) -> int:
     gc = sub.add_parser("gc"); gc.add_argument("--yes", action="store_true")
     sub.add_parser("reindex")
     sub.add_parser("embed")
+    sub.add_parser("autolink")
 
     args = ap.parse_args(argv)
     reg = _registry()
@@ -116,6 +117,9 @@ def main(argv=None) -> int:
                "tools": embeddings.backfill(p.db, "tool", tl),
                "tool_fts_reindexed": _reg.reindex_all(p.db)}
         _out(res)
+    elif args.cmd == "autolink":
+        from . import registry as _reg, skills as _sk
+        _out({"skills": _sk.autolink_all(p.db), "tools": _reg.autolink_all(p.db)})
     elif args.cmd == "reindex":
         _out({"reindexed_nodes": search.reindex_all(p.db)})
     return 0

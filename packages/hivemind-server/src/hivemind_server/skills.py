@@ -80,6 +80,11 @@ def publish(db: Database, agent_id: str, *, id: str, version: str, title: str, d
         embeddings.upsert(db, "skill", id,
                           " ".join([id, title, description, when_to_use or "", body,
                                     " ".join(tags)]), agent_id=agent_id)
+        # link it to the graph immediately: a step deferred to a human is a step never taken
+        try:
+            autolink(db, id, agent_id=agent_id)
+        except Exception:
+            pass                          # discovery is best-effort; never fail a publish for it
     return {"id": id, "version": version, "latest": latest, "new_skill": is_new,
             "warnings": warnings}
 
@@ -266,29 +271,38 @@ def catalog(db: Database, *, topic: Optional[str] = None, limit: int = 100,
 
 # ── linking skills to the graph ──────────────────────────────────────────────────────
 def link(db: Database, agent_id: str, skill_id: str, node_id: str, *, relation: str = "about",
-         note: Optional[str] = None) -> dict:
+         note: Optional[str] = None, source: str = "confirmed",
+         score: Optional[float] = None) -> dict:
     with db.write(agent_id, f"skill_link {skill_id} -> {node_id}") as tx:
         cur = tx.cur
         if cur.execute("SELECT 1 FROM skill WHERE id=?", (skill_id,)).fetchone() is None:
             raise NotFound(f"skill {skill_id!r} not found")
         if cur.execute("SELECT 1 FROM node WHERE node_id=?", (node_id,)).fetchone() is None:
             raise Invalid(f"node {node_id!r} not found")
-        cur.execute("INSERT INTO skill_link(id,node_id,relation,note,created_tx) "
-                    "VALUES(?,?,?,?,?) ON CONFLICT(id,node_id,relation) DO UPDATE SET note=?",
-                    (skill_id, node_id, relation, note, tx.tx_id, note))
-    return {"skill_id": skill_id, "node_id": node_id, "relation": relation}
+        cur.execute(
+            "INSERT INTO skill_link(id,node_id,relation,source,score,note,created_tx) "
+            "VALUES(?,?,?,?,?,?,?) ON CONFLICT(id,node_id,relation) DO UPDATE SET "
+            "note=COALESCE(excluded.note, skill_link.note), "
+            "score=COALESCE(excluded.score, skill_link.score), "
+            # a human/agent confirmation upgrades an auto link; it is never downgraded
+            "source=CASE WHEN skill_link.source='confirmed' OR excluded.source='confirmed' "
+            "THEN 'confirmed' ELSE 'auto' END",
+            (skill_id, node_id, relation, source, score, note, tx.tx_id))
+    return {"skill_id": skill_id, "node_id": node_id, "relation": relation,
+            "source": source}
 
 
 def for_node(db: Database, node_id: str) -> list:
     """Skills attached to a node — so an agent reading a thing sees the procedures about it."""
     with db.read() as cur:
         rows = cur.execute(
-            "SELECT sl.id, sl.relation, sl.note, s.latest_version, sv.title, sv.description "
+            "SELECT sl.id, sl.relation, sl.note, sl.source, sl.score, s.latest_version, sv.title, sv.description "
             "FROM skill_link sl JOIN skill s ON s.id=sl.id "
             "LEFT JOIN skill_version sv ON sv.id=s.id AND sv.version=s.latest_version "
             "WHERE sl.node_id=? ORDER BY sl.created_tx DESC LIMIT 10", (node_id,)).fetchall()
     return [{"id": r["id"], "version": r["latest_version"], "title": r["title"],
-             "description": r["description"], "relation": r["relation"], "note": r["note"]}
+             "description": r["description"], "relation": r["relation"], "note": r["note"],
+             "source": r["source"], "score": r["score"]}
             for r in rows]
 
 
@@ -344,3 +358,57 @@ def suggest_links(db: Database, item_id: str, *, limit: int = 5) -> dict:
     return {"skill_id": item_id, "suggestions": out, "count": len(out),
             "already_linked": len(existing),
             "hint": "these are GUESSES - confirm with skill_link(...) only where the match is real"}
+
+
+# ── automatic linking ────────────────────────────────────────────────────────────────
+# Links are created automatically, because a confirmation step that nobody performs is just an
+# empty table. The guard against bad links is not a human gate but three cheap constraints:
+#   * only the top few candidates per item, and only those close to the best match (relative
+#     threshold), so the long tail of weak matches is never linked;
+#   * every auto link records source='auto' and its score, so a reader can weigh it;
+#   * a confirmed link is never downgraded, and anything can be unlinked.
+AUTO_TOP_K = 3
+AUTO_REL_SCORE = 0.55        # keep candidates scoring >= 55% of the best hit for this item
+
+
+def autolink(db: Database, item_id: str, *, agent_id: str = "autolink", top_k: int = AUTO_TOP_K,
+             rel_score: float = AUTO_REL_SCORE) -> dict:
+    """Link an skill to the nodes it is most likely about. Idempotent; never downgrades a
+    confirmed link."""
+    sug = suggest_links(db, item_id, limit=max(top_k * 3, 6))["suggestions"]
+    if not sug:
+        return {"skill_id": item_id, "linked": 0, "considered": 0}
+    best = max((s["score"] or 0) for s in sug) or 0.0
+    keep = [s for s in sug if best <= 0 or (s["score"] or 0) >= best * rel_score][:top_k]
+    linked = []
+    for s in keep:
+        link(db, agent_id, item_id, s["node_id"], relation="about", source="auto",
+             score=s["score"])
+        linked.append(s["node_id"])
+    return {"skill_id": item_id, "linked": len(linked), "considered": len(sug),
+            "node_ids": linked}
+
+
+def autolink_all(db: Database, *, agent_id: str = "autolink", top_k: int = AUTO_TOP_K) -> dict:
+    """Backfill: autolink every item that has no links yet. Safe to re-run."""
+    with db.read() as cur:
+        ids = [r[0] for r in cur.execute(
+            "SELECT t.id FROM skill t LEFT JOIN skill_link l ON l.id=t.id "
+            "WHERE t.latest_version IS NOT NULL GROUP BY t.id HAVING COUNT(l.node_id)=0")]
+    total = 0
+    for i in ids:
+        try:
+            total += autolink(db, i, agent_id=agent_id, top_k=top_k)["linked"]
+        except Exception:
+            continue                      # one bad item must not abort a backfill
+    return {"items_processed": len(ids), "links_created": total}
+
+
+def unlink(db: Database, agent_id: str, item_id: str, node_id: str,
+           relation: str = "about") -> dict:
+    """Remove a link — the correction path for an automatic guess that is wrong."""
+    with db.write(agent_id, f"unlink skill {item_id} -/-> {node_id}") as tx:
+        n = tx.cur.execute(
+            "DELETE FROM skill_link WHERE id=? AND node_id=? AND relation=?",
+            (item_id, node_id, relation)).rowcount
+    return {"skill_id": item_id, "node_id": node_id, "removed": bool(n)}

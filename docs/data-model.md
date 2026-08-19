@@ -30,7 +30,7 @@ registry (yank, never delete; only the newest non-yanked version is indexed in `
 `node_id` and `subject_key`/`subject_version` scope it, and `status`
 (`active`/`disputed`/`retired`) makes it falsifiable. Indexed in `trap_fts`; every record and
 status change writes a `tx` row for provenance.
-`skill_link` / `tool_link` attach either to a node (`relation`: about/uses/produces/analyses) and are what `graph_get` surfaces. `embedding` holds one L2-normalised float32 vector per skill/tool per backend (`model`), used for semantic search; `skill_fts` / `tool_fts` hold the lexical side. Details: [skills-and-traps.md](skills-and-traps.md).
+`skill_link` / `tool_link` attach either to a node (`relation`, plus `source`=auto|confirmed and the retrieval `score`) and are what `graph_get` surfaces; they are written automatically on publish and a confirmed link is never downgraded. `embedding` holds one L2-normalised float32 vector per skill/tool per backend (`model`), used for semantic search; `skill_fts` / `tool_fts` hold the lexical side. Details: [skills-and-traps.md](skills-and-traps.md).
 
 ## Schema, tools, guide
 `node_type`/`edge_type` (versioned, additive-only, proposed→active; operator `apply_pack` is

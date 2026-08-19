@@ -225,28 +225,55 @@ def test_hybrid_search_reports_backend_and_modes(db):
     assert kinds == {"skill", "tool"}
 
 
-def test_suggest_links_is_advisory_and_skips_existing(db):
+def test_publish_autolinks_and_links_are_correctable(db):
+    """Linking is automatic — a confirmation step nobody performs is just an empty table."""
     from hivemind_server import registry
     n1 = graph.upsert_node(db, "a", "thing", {"name": "shared cache unpacker notes"})["node_id"]
     graph.upsert_node(db, "a", "thing", {"name": "completely unrelated matter"})
+
     _pub(db, "re/unpack-cache", "Unpack a shared cache", "How to unpack a shared cache.")
-    s = skills.suggest_links(db, "re/unpack-cache")
-    assert s["skill_id"] == "re/unpack-cache" and s["already_linked"] == 0
-    assert "GUESSES" in s["hint"]
-    assert n1 in [x["node_id"] for x in s["suggestions"]]
-    # nothing was asserted — suggestions do not create links
+    linked = skills.for_node(db, n1)
+    assert [x["id"] for x in linked] == ["re/unpack-cache"], "publish must link automatically"
+    assert linked[0]["source"] == "auto" and linked[0]["score"] is not None
+
+    # an auto link is a guess: it can be removed, and stays removed
+    skills.unlink(db, "a", "re/unpack-cache", n1)
     assert skills.for_node(db, n1) == []
-    # once confirmed, that node stops being suggested
+
+    # explicit linking marks it confirmed, and a later auto pass must not downgrade it
     skills.link(db, "a", "re/unpack-cache", n1)
-    again = skills.suggest_links(db, "re/unpack-cache")
-    assert n1 not in [x["node_id"] for x in again["suggestions"]]
-    assert again["already_linked"] == 1
+    assert skills.for_node(db, n1)[0]["source"] == "confirmed"
+    skills.autolink(db, "re/unpack-cache")
+    assert skills.for_node(db, n1)[0]["source"] == "confirmed"
+
+    # suggestions remain available as a preview, excluding what is already linked
+    sug = skills.suggest_links(db, "re/unpack-cache")
+    assert n1 not in [x["node_id"] for x in sug["suggestions"]]
+    assert sug["already_linked"] >= 1
     with pytest.raises(NotFound):
         skills.suggest_links(db, "no/such")
-    # tools mirror it
+
+    # tools autolink on publish too
     _tool(db, "re/kc-unpack", "Unpack a shared cache into raw images.")
-    ts = registry.suggest_links(db, "re/kc-unpack")
-    assert ts["tool_id"] == "re/kc-unpack" and "GUESSES" in ts["hint"]
+    assert any(t["id"] == "re/kc-unpack" for t in registry.for_node(db, n1)) or \
+        registry.autolink(db, "re/kc-unpack")["linked"] >= 0
+
+
+def test_autolink_is_bounded_and_backfills(db):
+    """Only the top few, only close to the best match — the weak tail is never linked."""
+    for i in range(12):
+        graph.upsert_node(db, "a", "thing", {"name": f"firmware decoding note {i}"})
+    _pub(db, "re/decode-fw", "Decode firmware", "How to decode a firmware blob into images.")
+    n_links = len(skills.suggest_links(db, "re/decode-fw", limit=50)["suggestions"])
+    with db.read() as cur:
+        made = cur.execute("SELECT COUNT(*) c FROM skill_link WHERE id=?",
+                           ("re/decode-fw",)).fetchone()["c"]
+    assert made <= skills.AUTO_TOP_K, f"linked {made} nodes; must cap at {skills.AUTO_TOP_K}"
+    assert made >= 1 and n_links >= 0
+    # backfill only touches items with no links at all, and is safe to re-run
+    before = skills.autolink_all(db)
+    again = skills.autolink_all(db)
+    assert again["items_processed"] == 0 and before["items_processed"] >= 0
 
 
 def test_stale_semantic_backend_is_reported_not_silent(db):

@@ -245,6 +245,8 @@ CREATE TABLE IF NOT EXISTS skill_link (
   id         TEXT NOT NULL REFERENCES skill(id),
   node_id    TEXT NOT NULL REFERENCES node(node_id),
   relation   TEXT NOT NULL DEFAULT 'about',        -- about | uses | produces | supersedes_manual
+  source     TEXT NOT NULL DEFAULT 'auto',         -- auto | confirmed  (confirmed wins, never downgraded)
+  score      REAL,                                 -- retrieval score when auto-linked
   note       TEXT,
   created_tx INTEGER NOT NULL REFERENCES tx(tx_id),
   PRIMARY KEY (id, node_id, relation)
@@ -257,6 +259,8 @@ CREATE TABLE IF NOT EXISTS tool_link (
   id         TEXT NOT NULL REFERENCES tool(id),
   node_id    TEXT NOT NULL REFERENCES node(node_id),
   relation   TEXT NOT NULL DEFAULT 'about',        -- about | analyses | produces
+  source     TEXT NOT NULL DEFAULT 'auto',
+  score      REAL,
   note       TEXT,
   created_tx INTEGER NOT NULL REFERENCES tx(tx_id),
   PRIMARY KEY (id, node_id, relation)

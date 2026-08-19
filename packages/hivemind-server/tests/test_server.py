@@ -151,11 +151,11 @@ EXPECTED_TOOLS = {
     "graph_link", "graph_bulk_load", "schema_get", "schema_propose", "schema_changes",
     "schema_promote", "schema_apply", "guide_get", "guide_propose",
     "skill_search", "skill_get", "skill_publish", "skill_yank",
-    "skill_catalog", "skill_link", "skill_suggest_links",
+    "skill_catalog", "skill_link", "skill_suggest_links", "skill_unlink", "skill_autolink",
     "trap_search", "trap_get", "trap_record", "trap_status",
     "artifact_ref", "artifact_attach", "artifact_refs",
     "tool_publish", "tool_resolve", "tool_search", "tool_yank",
-    "tool_catalog", "tool_link", "tool_suggest_links",
+    "tool_catalog", "tool_link", "tool_suggest_links", "tool_unlink", "tool_autolink",
 }
 
 

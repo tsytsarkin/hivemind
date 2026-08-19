@@ -261,7 +261,82 @@ The discovery problem is identical, so the tool registry has the same surface:
 | Publish (immutable semver) | `skill_publish` | `tool_publish` |
 | Retire | `skill_yank` | `tool_yank` |
 | Attach to a node | `skill_link` | `tool_link` |
-| Propose attachments | `skill_suggest_links` | `tool_suggest_links` |
+| Auto-link on publish | ✔ | ✔ |
+| Preview / re-run / remove | `skill_suggest_links`, `skill_autolink`, `skill_unlink` | `tool_suggest_links`, `tool_autolink`, `tool_unlink` |
+| Duplicate guard on new ids | ✔ | ✔ |
+| REST | `GET /skills`, `/skills/{id}` | `GET /tools`, `/tools/{id}` |
+
+`graph_get` on a node returns its linked **tools, skills and traps** together — one call tells an
+agent everything recorded about the thing in front of it.
+
+## Linking is automatic
+
+Publishing a skill or tool **links it to the graph immediately** — no confirmation step. That is a
+deliberate reversal: an earlier design made links human-confirmed, and the result was an empty
+table, because a step deferred to a human is a step never taken.
+
+The safeguards are not a gate but three cheap constraints:
+
+- **Bounded.** At most `AUTO_TOP_K` (3) nodes per item, and only candidates scoring at least 55%
+  of that item's best match — so the long tail of weak matches is never linked.
+- **Attributed.** Every link records `source` (`auto` | `confirmed`) and the retrieval `score`,
+  and `graph_get` returns both. A reader can tell a guess from a judgement.
+- **Correctable.** `skill_unlink` / `tool_unlink` remove a wrong link. `skill_link` /`tool_link`
+  mark one `confirmed`, and a later automatic pass **never downgrades a confirmed link**.
+
+| Call | Effect |
+|---|---|
+| `skill_publish` / `tool_publish` | links automatically (best effort — never fails the publish) |
+| `skill_autolink()` / `tool_autolink()` | backfill every item that has no links; safe to re-run |
+| `skill_autolink(id)` | re-run for one item, e.g. after the graph gained relevant nodes |
+| `skill_suggest_links(id)` | preview candidates **without** linking |
+| `skill_link(id, node_id)` | mark a link confirmed (creates it if absent) |
+| `skill_unlink(id, node_id)` | remove a link |
+
+Because the graph keeps growing, linking is not one-and-done: run
+`hivemind-admin --project <p> autolink` periodically (or call `skill_autolink()`) so items
+published before a node existed get connected to it.
+
+## Semantic search
+
+Both registries search **hybrid** by default: FTS5/BM25 (lexical) and embedding cosine (semantic),
+fused with reciprocal-rank fusion — tuning-free, and it does not require BM25 ranks and cosine
+scores to be on comparable scales. `mode="lexical"` or `mode="semantic"` forces one side.
+
+The embedder is pluggable and degrades honestly:
+
+| Backend | When | Quality |
+|---|---|---|
+| `sentence-transformers` (`st:all-MiniLM-L6-v2`) | if importable — install the optional extra | real neural embeddings; matches paraphrase |
+| `hashing-tfidf-512` | fallback, always available | classical vector-space; generalises over shared/rare terms, **not** true paraphrase |
+
+Every search response reports `semantic_backend`, so the fallback is never mistaken for neural
+retrieval — and if the stored vectors were produced by a *different* backend (e.g. you installed
+`sentence-transformers` after embedding with the fallback), the response carries an explicit
+`semantic_warning` instead of silently degrading to lexical-only:
+
+> semantic search is INACTIVE: 0 vectors for the active backend 'st:all-MiniLM-L6-v2', but
+> hashing-tfidf-512 (287) exist from a previous backend. Results are lexical-only until you run
+> `hivemind-admin --project <p> embed` to re-embed. Vectors are L2-normalised float32 in SQLite and cosine is a dot product; at a few
+thousand items brute force costs microseconds and needs no vector index (sqlite-vec is still
+pre-1.0). Embeddings are written on publish, **after** the write transaction commits — the
+database write lock is not reentrant, so embedding inside it would deadlock. Backfill existing
+items with `hivemind-admin --project <p> embed`.
+
+## The tool registry gets the same treatment
+
+The discovery problem is identical, so the tool registry has the same surface:
+
+| | Mini-skills | Tools |
+|---|---|---|
+| Browse | `skill_catalog(topic=)` | `tool_catalog(topic=)` |
+| Search (hybrid) | `skill_search(query, mode=)` | `tool_search(query, mode=)` |
+| Fetch | `skill_get(id, constraint)` | `tool_resolve(id, constraint)` |
+| Publish (immutable semver) | `skill_publish` | `tool_publish` |
+| Retire | `skill_yank` | `tool_yank` |
+| Attach to a node | `skill_link` | `tool_link` |
+| Auto-link on publish | ✔ | ✔ |
+| Preview / re-run / remove | `skill_suggest_links`, `skill_autolink`, `skill_unlink` | `tool_suggest_links`, `tool_autolink`, `tool_unlink` |
 | Duplicate guard on new ids | ✔ | ✔ |
 | REST | `GET /skills`, `/skills/{id}` | `GET /tools`, `/tools/{id}` |
 
@@ -330,7 +405,7 @@ Both live in the engine (not a pack) because they describe the agent workflow, n
 | Published before the FTS/embedding indexes existed | `hivemind-admin --project <p> embed` — backfills skill + tool embeddings and reindexes tool FTS |
 | Switched embedding backend | re-run `embed`; until you do, searches carry `semantic_warning` |
 | Rebuild node search indexes | `hivemind-admin --project <p> reindex` |
-| Want links populated | `skill_suggest_links` / `tool_suggest_links`, then confirm with `*_link` |
+| Graph gained nodes worth linking | `hivemind-admin --project <p> autolink` — links items that have none |
 
 Everything derivable is indexed on write, so a backfill is only needed after adding an index or
 changing backend — not as routine maintenance.
