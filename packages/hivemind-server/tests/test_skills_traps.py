@@ -223,3 +223,39 @@ def test_hybrid_search_reports_backend_and_modes(db):
     with db.read() as cur:
         kinds = {r[0] for r in cur.execute("SELECT DISTINCT kind FROM embedding")}
     assert kinds == {"skill", "tool"}
+
+
+def test_suggest_links_is_advisory_and_skips_existing(db):
+    from hivemind_server import registry
+    n1 = graph.upsert_node(db, "a", "thing", {"name": "shared cache unpacker notes"})["node_id"]
+    graph.upsert_node(db, "a", "thing", {"name": "completely unrelated matter"})
+    _pub(db, "re/unpack-cache", "Unpack a shared cache", "How to unpack a shared cache.")
+    s = skills.suggest_links(db, "re/unpack-cache")
+    assert s["skill_id"] == "re/unpack-cache" and s["already_linked"] == 0
+    assert "GUESSES" in s["hint"]
+    assert n1 in [x["node_id"] for x in s["suggestions"]]
+    # nothing was asserted — suggestions do not create links
+    assert skills.for_node(db, n1) == []
+    # once confirmed, that node stops being suggested
+    skills.link(db, "a", "re/unpack-cache", n1)
+    again = skills.suggest_links(db, "re/unpack-cache")
+    assert n1 not in [x["node_id"] for x in again["suggestions"]]
+    assert again["already_linked"] == 1
+    with pytest.raises(NotFound):
+        skills.suggest_links(db, "no/such")
+    # tools mirror it
+    _tool(db, "re/kc-unpack", "Unpack a shared cache into raw images.")
+    ts = registry.suggest_links(db, "re/kc-unpack")
+    assert ts["tool_id"] == "re/kc-unpack" and "GUESSES" in ts["hint"]
+
+
+def test_stale_semantic_backend_is_reported_not_silent(db):
+    _pub(db, "ops/x", "A thing", "Does a thing.")
+    # simulate vectors left behind by a previous backend (e.g. after installing a neural model)
+    with db.write("t", "fake stale vectors") as tx:
+        tx.cur.execute("UPDATE embedding SET model='st:some-old-model' WHERE kind='skill'")
+    out = skills.search(db, "thing", mode="hybrid")
+    assert "semantic_warning" in out
+    assert "INACTIVE" in out["semantic_warning"] and "hivemind-admin" in out["semantic_warning"]
+    # lexical mode makes no semantic claim, so it does not warn
+    assert "semantic_warning" not in skills.search(db, "thing", mode="lexical")

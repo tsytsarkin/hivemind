@@ -137,3 +137,35 @@ def backfill(db: Database, kind: str, items: Iterable[tuple]) -> dict:
         upsert(db, kind, item_id, text)
         n += 1
     return {"kind": kind, "embedded": n, "backend": backend_name(), "neural": is_neural()}
+
+
+def coverage(db: Database, kind: str) -> dict:
+    """How many vectors exist for the ACTIVE backend vs other backends.
+
+    query() filters by model name, so after switching backend (e.g. installing
+    sentence-transformers) the old vectors stop matching and semantic search silently returns
+    nothing while hybrid quietly degrades to lexical. Callers surface this rather than let a
+    soft failure look like a thin library.
+    """
+    active = backend_name()
+    with db.read() as cur:
+        rows = cur.execute(
+            "SELECT model, COUNT(*) n FROM embedding WHERE kind=? GROUP BY model",
+            (kind,)).fetchall()
+    by_model = {r["model"]: r["n"] for r in rows}
+    mine = by_model.pop(active, 0)
+    return {"backend": active, "vectors": mine, "stale_other_backends": by_model,
+            "stale": bool(by_model) and mine == 0}
+
+
+def warning_if_stale(db: Database, kind: str) -> Optional[str]:
+    c = coverage(db, kind)
+    if c["stale"]:
+        others = ", ".join(f"{k} ({v})" for k, v in c["stale_other_backends"].items())
+        return (f"semantic search is INACTIVE: 0 vectors for the active backend {c['backend']!r}, "
+                f"but {others} exist from a previous backend. Results are lexical-only until you "
+                f"run `hivemind-admin --project <p> embed` to re-embed.")
+    if c["vectors"] == 0:
+        return (f"semantic search is INACTIVE: no embeddings stored for {kind}s. Run "
+                f"`hivemind-admin --project <p> embed` to enable it.")
+    return None

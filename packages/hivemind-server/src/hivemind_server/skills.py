@@ -172,8 +172,10 @@ def search(db: Database, query: str = "", *, tags: Optional[list] = None,
             if len(out) >= limit:
                 break
     from . import embeddings
+    warn = embeddings.warning_if_stale(db, "skill") if mode in ("hybrid", "semantic") else None
     return {"skills": out, "count": len(out), "mode": mode,
             "semantic_backend": embeddings.backend_name(),
+            **({"semantic_warning": warn} if warn else {}),
             "hint": "call skill_get(id) for the full procedure" if out else
                     "nothing matched — if you solve this, skill_publish it"}
 
@@ -302,3 +304,43 @@ def _rrf(*ranked_lists) -> dict:
         for i, item_id in enumerate(lst):
             scores[item_id] = scores.get(item_id, 0.0) + 1.0 / (_RRF_K + i)
     return scores
+
+
+def _link_query_text(db: Database, skill_id: str):
+    with db.read() as cur:
+        r = cur.execute(
+            "SELECT sv.title, sv.description, sv.when_to_use, sv.tags FROM skill s "
+            "JOIN skill_version sv ON sv.id=s.id AND sv.version=s.latest_version "
+            "WHERE s.id=?", (skill_id,)).fetchone()
+        if r is None:
+            raise NotFound(f"skill {skill_id!r} not found")
+        existing = {x["node_id"] for x in cur.execute(
+            "SELECT node_id FROM skill_link WHERE id=?", (skill_id,))}
+    text = " ".join(filter(None, [r["title"], r["description"], r["when_to_use"] or "",
+                                  " ".join(json.loads(r["tags"]))]))
+    return text, existing
+
+
+def suggest_links(db: Database, item_id: str, *, limit: int = 5) -> dict:
+    """Propose graph nodes this skill is probably about — suggestions only, never asserted.
+
+    A link is a semantic claim, and a wrong one puts an irrelevant skill in front of every agent
+    who reads that node. So this ranks candidates (by running the skill's own text against the
+    node index) and leaves confirmation to the caller, mirroring propose->promote for schema and
+    the human-gated guide.
+    """
+    from .search import search as node_search
+    text, existing = _link_query_text(db, item_id)
+    hits = node_search(db, text, limit=limit * 3)["results"]
+    out = []
+    for h in hits:
+        if h["node_id"] in existing:
+            continue
+        out.append({"node_id": h["node_id"], "node_type": h["node_type"],
+                    "subject_key": h.get("subject_key"),
+                    "snippet": h["snippet"][:140], "score": h.get("score", 0)})
+        if len(out) >= limit:
+            break
+    return {"skill_id": item_id, "suggestions": out, "count": len(out),
+            "already_linked": len(existing),
+            "hint": "these are GUESSES - confirm with skill_link(...) only where the match is real"}

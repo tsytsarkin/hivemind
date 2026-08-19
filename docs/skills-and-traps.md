@@ -237,7 +237,13 @@ The embedder is pluggable and degrades honestly:
 | `hashing-tfidf-512` | fallback, always available | classical vector-space; generalises over shared/rare terms, **not** true paraphrase |
 
 Every search response reports `semantic_backend`, so the fallback is never mistaken for neural
-retrieval. Vectors are L2-normalised float32 in SQLite and cosine is a dot product; at a few
+retrieval — and if the stored vectors were produced by a *different* backend (e.g. you installed
+`sentence-transformers` after embedding with the fallback), the response carries an explicit
+`semantic_warning` instead of silently degrading to lexical-only:
+
+> semantic search is INACTIVE: 0 vectors for the active backend 'st:all-MiniLM-L6-v2', but
+> hashing-tfidf-512 (287) exist from a previous backend. Results are lexical-only until you run
+> `hivemind-admin --project <p> embed` to re-embed. Vectors are L2-normalised float32 in SQLite and cosine is a dot product; at a few
 thousand items brute force costs microseconds and needs no vector index (sqlite-vec is still
 pre-1.0). Embeddings are written on publish, **after** the write transaction commits — the
 database write lock is not reentrant, so embedding inside it would deadlock. Backfill existing
@@ -245,9 +251,31 @@ items with `hivemind-admin --project <p> embed`.
 
 ## The tool registry gets the same treatment
 
-`tool_catalog`, hybrid `tool_search`, `tool_link`, duplicate prevention on publish, and
-`GET /tools` + `GET /tools/{id}` — mirroring the skill library, because the discovery problem is
-identical. `graph_get` on a node returns its linked **tools, skills and traps** together.
+The discovery problem is identical, so the tool registry has the same surface:
+
+| | Mini-skills | Tools |
+|---|---|---|
+| Browse | `skill_catalog(topic=)` | `tool_catalog(topic=)` |
+| Search (hybrid) | `skill_search(query, mode=)` | `tool_search(query, mode=)` |
+| Fetch | `skill_get(id, constraint)` | `tool_resolve(id, constraint)` |
+| Publish (immutable semver) | `skill_publish` | `tool_publish` |
+| Retire | `skill_yank` | `tool_yank` |
+| Attach to a node | `skill_link` | `tool_link` |
+| Propose attachments | `skill_suggest_links` | `tool_suggest_links` |
+| Duplicate guard on new ids | ✔ | ✔ |
+| REST | `GET /skills`, `/skills/{id}` | `GET /tools`, `/tools/{id}` |
+
+`graph_get` on a node returns its linked **tools, skills and traps** together — one call tells an
+agent everything recorded about the thing in front of it.
+
+## Linking without guessing
+
+Links are semantic claims: a wrong one puts an irrelevant procedure in front of everyone who reads
+that node. So nothing is auto-linked. `skill_suggest_links(skill_id)` / `tool_suggest_links(tool_id)`
+rank candidate nodes by running the item's own text against the node index and return them as
+**suggestions**, already-linked nodes excluded; a caller confirms the real ones with
+`skill_link` / `tool_link`. This mirrors propose→promote for schema types and the human-gated
+guide: the machine narrows, a judgement call commits.
 
 ## Why not a skill graph (yet)
 
@@ -293,3 +321,16 @@ Both live in the engine (not a pack) because they describe the agent workflow, n
 `skill` / `skill_version` (immutable rows, mirroring `tool` / `tool_version`) and `trap`
 (one row, updated in place, with `tx` provenance), each with its own FTS5 index. See
 [data-model.md](data-model.md).
+
+
+## Operating them
+
+| Situation | Do |
+|---|---|
+| Published before the FTS/embedding indexes existed | `hivemind-admin --project <p> embed` — backfills skill + tool embeddings and reindexes tool FTS |
+| Switched embedding backend | re-run `embed`; until you do, searches carry `semantic_warning` |
+| Rebuild node search indexes | `hivemind-admin --project <p> reindex` |
+| Want links populated | `skill_suggest_links` / `tool_suggest_links`, then confirm with `*_link` |
+
+Everything derivable is indexed on write, so a backfill is only needed after adding an index or
+changing backend — not as routine maintenance.

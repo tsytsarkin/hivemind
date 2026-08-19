@@ -220,6 +220,14 @@ def build_mcp(project: Project, *, instructions: str = INSTRUCTIONS) -> MCPServe
         return skills.link(db, agent, skill_id, node_id, relation=relation, note=note)
 
     @mcp.tool(annotations=RO,
+              description="Suggest graph nodes a skill is probably about, ranked. These are "
+                          "GUESSES - confirm the real ones with skill_link; a wrong link shows an "
+                          "irrelevant procedure to everyone reading that node.")
+    @_envelope
+    def skill_suggest_links(skill_id: str, limit: int = 5) -> dict:
+        return skills.suggest_links(db, skill_id, limit=limit)
+
+    @mcp.tool(annotations=RO,
               description="Fetch a mini-skill's full procedure. constraint accepts ^, ~, >= or an "
                           "exact version; default is the newest non-yanked version.")
     @_envelope

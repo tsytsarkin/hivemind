@@ -194,8 +194,10 @@ def search(db: Database, query: str = "", *, os: Optional[str] = None,
             if len(out) >= limit:
                 break
     from . import embeddings
+    warn = embeddings.warning_if_stale(db, "tool") if mode in ("hybrid", "semantic") else None
     return {"tools": out, "count": len(out), "mode": mode,
             "semantic_backend": embeddings.backend_name(),
+            **({"semantic_warning": warn} if warn else {}),
             "hint": "tool_resolve(id) for the ready-to-run command" if out else
                     "nothing matched - if you build one, tool_publish it"}
 
@@ -212,6 +214,13 @@ def attach_tools(mcp, project, envelope, RO, WRITE, base) -> None:
     def tool_publish(manifest: dict, artifact_digest: str, agent: str = "agent",
                      force: bool = False) -> dict:
         return publish(db, agent, manifest, artifact_digest, force=force)
+
+    @mcp.tool(annotations=RO,
+              description="Suggest graph nodes a tool is probably about, ranked. These are "
+                          "GUESSES - confirm the real ones with tool_link.")
+    @envelope
+    def tool_suggest_links(tool_id: str, limit: int = 5) -> dict:
+        return suggest_links(db, tool_id, limit=limit)
 
     @mcp.tool(annotations=RO,
               description="Resolve a tool to a runnable version. Returns the exact version, a "
@@ -392,3 +401,43 @@ def _rrf(*ranked_lists) -> dict:
         for i, item_id in enumerate(lst):
             scores[item_id] = scores.get(item_id, 0.0) + 1.0 / (_RRF_K + i)
     return scores
+
+
+def _link_query_text(db: Database, tool_id: str):
+    with db.read() as cur:
+        row = cur.execute(
+            "SELECT tv.manifest FROM tool t JOIN tool_version tv ON tv.id=t.id "
+            "AND tv.version=t.latest_version WHERE t.id=?", (tool_id,)).fetchone()
+        if row is None:
+            raise NotFound(f"tool {tool_id!r} not found")
+        existing = {x["node_id"] for x in cur.execute(
+            "SELECT node_id FROM tool_link WHERE id=?", (tool_id,))}
+    m = json.loads(row["manifest"])
+    text = " ".join(filter(None, [tool_id, m.get("description", ""),
+                                  " ".join(m.get("tags") or [])]))
+    return text, existing
+
+
+def suggest_links(db: Database, item_id: str, *, limit: int = 5) -> dict:
+    """Propose graph nodes this tool is probably about — suggestions only, never asserted.
+
+    A link is a semantic claim, and a wrong one puts an irrelevant tool in front of every agent
+    who reads that node. So this ranks candidates (by running the tool's own text against the
+    node index) and leaves confirmation to the caller, mirroring propose->promote for schema and
+    the human-gated guide.
+    """
+    from .search import search as node_search
+    text, existing = _link_query_text(db, item_id)
+    hits = node_search(db, text, limit=limit * 3)["results"]
+    out = []
+    for h in hits:
+        if h["node_id"] in existing:
+            continue
+        out.append({"node_id": h["node_id"], "node_type": h["node_type"],
+                    "subject_key": h.get("subject_key"),
+                    "snippet": h["snippet"][:140], "score": h.get("score", 0)})
+        if len(out) >= limit:
+            break
+    return {"tool_id": item_id, "suggestions": out, "count": len(out),
+            "already_linked": len(existing),
+            "hint": "these are GUESSES - confirm with tool_link(...) only where the match is real"}

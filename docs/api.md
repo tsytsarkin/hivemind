@@ -4,19 +4,20 @@
 Graph: `graph_search`, `graph_get`, `graph_subjects`, `graph_neighbors`, `graph_upsert`,
 `graph_link`, `graph_bulk_load`. Schema: `schema_get`, `schema_propose`, `schema_promote`,
 `schema_apply` (returns `{created, unchanged}`; idempotent). Artifacts: `artifact_ref`, `artifact_attach`, `artifact_refs`. Tools:
-`tool_publish`, `tool_resolve`, `tool_search`, `tool_yank`. Mini-skills: `skill_catalog`, `skill_search`, `skill_get`, `skill_publish`, `skill_link`, `skill_yank`. Traps:
+`tool_catalog`, `tool_publish`, `tool_resolve`, `tool_search`, `tool_link`, `tool_suggest_links`, `tool_yank`. Mini-skills: `skill_catalog`, `skill_search`, `skill_get`, `skill_publish`, `skill_link`, `skill_suggest_links`, `skill_yank`. Traps:
 `trap_search`, `trap_get`, `trap_record`, `trap_status`. Guide: `guide_get`, `guide_propose`.
 Read tools are annotated `readOnlyHint`; all return `{ok, …}` or `{ok:false, error, error_kind}`.
 
 Two reads carry extra, unrequested context so recorded dead-ends can't be missed:
 `graph_get` includes a `traps` list for the node (and traps scoped to its subject), and
-`graph_search` adds `related_traps` + a `trap_warning` when the query matches one. See
+`graph_search` adds `related_traps` + a `trap_warning` when the query matches one; `graph_get` also returns linked `skills` and `tools`. See
 [skills-and-traps.md](skills-and-traps.md).
 
 ## REST (same prefix, same Bearer auth)
 - `PUT/GET/HEAD /blobs/{algo}/{hex}` (streaming, Range, immutable) · `POST /blobs/batch` (LFS).
 - `GET /guide` · `GET /guide/{section}` (ETag = guide_version).
-- `GET /skills[?topic=]` · `GET /skills/{id}[?constraint=]` — browsable skill catalog.
+- `GET /skills[?topic=&limit=&offset=]` · `GET /skills/{id}[?constraint=]` — skill catalog.
+- `GET /tools[?topic=&limit=&offset=]` · `GET /tools/{id}[?constraint=]` — tool catalog.
 - `GET /healthz`, `GET /projects` (server root, /healthz open).
 
 ## Clients
@@ -27,3 +28,5 @@ Two reads carry extra, unrequested context so recorded dead-ends can't be missed
   `.artifacts.put/get`, `.tool_publish/get/search`.
 - `hivemind-admin` (operator, on the server host): `mint-token`, `create-project`, `apply-pack`,
   `promote`, `merge-guide`, `set-guide`, `gc`, `reindex`.
+
+`skill_search` / `tool_search` take `mode=hybrid|lexical|semantic` and report `semantic_backend` (plus `semantic_warning` when embeddings are missing or from another backend). See [skills-and-traps.md](skills-and-traps.md).

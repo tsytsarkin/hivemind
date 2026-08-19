@@ -50,9 +50,12 @@ pip install -r deploy/requirements-client.txt && pip install --no-deps ./package
 
 Alongside the graph (what is true) Hivemind keeps **mini-skills** — procedures agents worked out,
 versioned immutably like tools — and **traps** — dead-ends that wasted time, with the evidence,
-scoped to a node or a version and always falsifiable. Both are searchable, and traps surface
-automatically when you read a node or run a search. See
-**[docs/skills-and-traps.md](docs/skills-and-traps.md)**.
+scoped to a node or a version and always falsifiable.
+
+Skills and tools share one discovery surface: a browsable catalog, **hybrid lexical + semantic
+search**, duplicate prevention on publish, and links to the graph nodes they are about. Reading a
+node returns the tools, skills and traps attached to it, so an agent is told what already exists
+before it builds anything. See **[docs/skills-and-traps.md](docs/skills-and-traps.md)**.
 
 ## Domain packs
 

@@ -78,3 +78,16 @@ authorization (unauthenticated requests get `401`). Never bind a public interfac
 
 To add client machines (token minting, secure transfer, installing just the plugin), see
 [../docs/clients.md](../docs/clients.md).
+
+## After upgrading
+
+Indexes are maintained on write, so no routine maintenance is needed. Two exceptions:
+
+```sh
+hivemind-admin --project default embed      # after adding the embedding index, or changing backend
+hivemind-admin --project default reindex    # rebuild node search indexes
+```
+Semantic search is optional and degrades safely: without `sentence-transformers` installed the
+server uses a built-in hashed TF-IDF vectoriser, and every search reports which backend answered.
+Installing a neural backend later requires re-running `embed` — until then searches say so
+explicitly rather than quietly returning lexical-only results.
