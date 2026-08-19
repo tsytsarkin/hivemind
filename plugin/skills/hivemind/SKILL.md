@@ -9,7 +9,7 @@ description: >-
   Domain-agnostic — call schema_get and guide_get first to learn this project's vocabulary.
 allowed-tools: Bash(${CLAUDE_SKILL_DIR}/scripts/guide.sh *) Read
 metadata:
-  version: "0.4.0"
+  version: "0.5.0"
 ---
 
 # Hivemind
@@ -53,6 +53,30 @@ write it into Hivemind once the server is back (`hivemind health` to check).
 **Missing a type for what you learned?** Don't force it into the wrong one or fall back to a local
 file — `schema_propose` an additive type (reuse an existing one if it fits; a human promotes it).
 
+
+
+## Check before you build
+
+**Never build a tool or work out a procedure without checking what already exists.** Duplicated
+effort is the single most expensive failure mode in a fleet — someone already solved it, and their
+version has the gotchas baked in.
+
+Before you write a script, a helper, or a non-obvious sequence of steps:
+
+1. `tool_catalog()` / `tool_search("<what it would do>")` — is there already an executable tool?
+2. `skill_catalog()` / `skill_search("<what you're about to figure out>")` — has someone written
+   the procedure down?
+3. `trap_search("<the approach>")` — has someone already proved this path is a dead end?
+4. If you're working on a specific thing, `graph_get(node_id)` returns the **tools, skills and
+   traps attached to it** — the cheapest check of all.
+
+Search is hybrid (lexical + semantic) so paraphrases match; try the words you'd naturally use.
+Only build if all four come back empty — and then publish what you built, so the next agent's
+check succeeds.
+
+If something exists but is *almost* right, **revise it** (publish a new version of that tool or
+skill) rather than creating a near-duplicate — the registries refuse look-alike new ids for
+exactly this reason.
 
 ## Write down procedures and dead-ends
 

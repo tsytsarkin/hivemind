@@ -223,6 +223,32 @@ Recording is useless if nobody reads it, so the surfacing is automatic rather th
   and to publish/record as they go — a trap is recorded **when you abandon the approach**, not in
   a tidy-up at the end of the task.
 
+## Semantic search
+
+Both registries search **hybrid** by default: FTS5/BM25 (lexical) and embedding cosine (semantic),
+fused with reciprocal-rank fusion — tuning-free, and it does not require BM25 ranks and cosine
+scores to be on comparable scales. `mode="lexical"` or `mode="semantic"` forces one side.
+
+The embedder is pluggable and degrades honestly:
+
+| Backend | When | Quality |
+|---|---|---|
+| `sentence-transformers` (`st:all-MiniLM-L6-v2`) | if importable — install the optional extra | real neural embeddings; matches paraphrase |
+| `hashing-tfidf-512` | fallback, always available | classical vector-space; generalises over shared/rare terms, **not** true paraphrase |
+
+Every search response reports `semantic_backend`, so the fallback is never mistaken for neural
+retrieval. Vectors are L2-normalised float32 in SQLite and cosine is a dot product; at a few
+thousand items brute force costs microseconds and needs no vector index (sqlite-vec is still
+pre-1.0). Embeddings are written on publish, **after** the write transaction commits — the
+database write lock is not reentrant, so embedding inside it would deadlock. Backfill existing
+items with `hivemind-admin --project <p> embed`.
+
+## The tool registry gets the same treatment
+
+`tool_catalog`, hybrid `tool_search`, `tool_link`, duplicate prevention on publish, and
+`GET /tools` + `GET /tools/{id}` — mirroring the skill library, because the discovery problem is
+identical. `graph_get` on a node returns its linked **tools, skills and traps** together.
+
 ## Why not a skill graph (yet)
 
 The obvious next step is to make skills nodes in a graph — topic edges, prerequisite edges,

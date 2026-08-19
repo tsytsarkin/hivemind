@@ -75,6 +75,11 @@ def publish(db: Database, agent_id: str, *, id: str, version: str, title: str, d
         cur.execute("UPDATE skill SET latest_version=? WHERE id=?", (latest, id))
         if latest == version:                       # only the newest version drives search
             _index(cur, id, title, description, when_to_use or "", body, tags)
+    if latest == version:
+        from . import embeddings
+        embeddings.upsert(db, "skill", id,
+                          " ".join([id, title, description, when_to_use or "", body,
+                                    " ".join(tags)]), agent_id=agent_id)
     return {"id": id, "version": version, "latest": latest, "new_skill": is_new,
             "warnings": warnings}
 
@@ -121,15 +126,26 @@ def get(db: Database, id: str, constraint: str = "") -> dict:
 
 
 def search(db: Database, query: str = "", *, tags: Optional[list] = None,
-           limit: int = 20, format: str = "concise") -> dict:
+           limit: int = 20, format: str = "concise", mode: str = "hybrid") -> dict:
     limit = max(1, min(limit, 100))
     from .search import _fts_query
     with db.read() as cur:
         if query:
             m = _fts_query(query)
-            ids = [r["id"] for r in cur.execute(
+            lexical = [r["id"] for r in cur.execute(
                 "SELECT id FROM skill_fts WHERE skill_fts MATCH ? ORDER BY rank LIMIT ?",
                 (m, limit * 3))] if m else []
+            semantic = []
+            if mode in ("hybrid", "semantic"):
+                from . import embeddings
+                semantic = [i for i, _ in embeddings.query(db, "skill", query, limit=limit * 3)]
+            if mode == "lexical":
+                ids = lexical
+            elif mode == "semantic":
+                ids = semantic or lexical
+            else:
+                fused = _rrf(lexical, semantic)
+                ids = sorted(fused, key=lambda k: fused[k], reverse=True)
         else:
             ids = [r["id"] for r in cur.execute(
                 "SELECT id FROM skill ORDER BY created_tx DESC LIMIT ?", (limit * 3,))]
@@ -155,7 +171,9 @@ def search(db: Database, query: str = "", *, tags: Optional[list] = None,
                             "verified_how": r["verified_how"], "author": r["author"]})
             if len(out) >= limit:
                 break
-    return {"skills": out, "count": len(out),
+    from . import embeddings
+    return {"skills": out, "count": len(out), "mode": mode,
+            "semantic_backend": embeddings.backend_name(),
             "hint": "call skill_get(id) for the full procedure" if out else
                     "nothing matched — if you solve this, skill_publish it"}
 
@@ -270,3 +288,17 @@ def for_node(db: Database, node_id: str) -> list:
     return [{"id": r["id"], "version": r["latest_version"], "title": r["title"],
              "description": r["description"], "relation": r["relation"], "note": r["note"]}
             for r in rows]
+
+
+# ── hybrid retrieval: lexical (FTS/BM25) + semantic (embeddings), fused by RRF ───────
+_RRF_K = 60
+
+
+def _rrf(*ranked_lists) -> dict:
+    """Reciprocal-rank fusion: robust, tuning-free, and it does not need the two scorers to be
+    on comparable scales (BM25 ranks and cosine similarities are not)."""
+    scores: dict = {}
+    for lst in ranked_lists:
+        for i, item_id in enumerate(lst):
+            scores[item_id] = scores.get(item_id, 0.0) + 1.0 / (_RRF_K + i)
+    return scores

@@ -13,7 +13,7 @@ from . import registry as reg
 from .db import Conflict, Invalid, NotFound
 from .rest_blobs import register_blob_routes
 from .rest_guide import register_guide_routes
-from .rest_skills import register_skill_routes
+from .rest_skills import register_skill_routes, register_tool_routes
 
 RO = ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True)
 WRITE = ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=False)
@@ -40,6 +40,7 @@ def attach(mcp, project) -> None:
     register_blob_routes(mcp, project)
     register_guide_routes(mcp, project)
     register_skill_routes(mcp, project)
+    register_tool_routes(mcp, project)
     store = project.blobs
     db = project.db
     base = f"/p/{project.name}"

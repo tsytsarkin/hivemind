@@ -3,6 +3,7 @@ range strings are rejected as versions; yank (never delete) hides a version from
 it is the only exact match. Tool bytes live in the blob store (artifact_digest)."""
 from __future__ import annotations
 
+import difflib
 import json
 import re
 from typing import Optional
@@ -39,9 +40,12 @@ def _run_command(manifest: dict) -> str:
     return f"./{entry}"
 
 
-def publish(db: Database, agent_id: str, manifest: dict, artifact_digest: str) -> dict:
+def publish(db: Database, agent_id: str, manifest: dict, artifact_digest: str, *,
+            force: bool = False) -> dict:
     _validate_manifest(manifest)
     tid, version = manifest["id"], str(manifest["version"])
+    warnings = []
+    is_new = False
     with db.write(agent_id, f"tool_publish {tid}@{version}") as tx:
         cur = tx.cur
         b = cur.execute("SELECT 1 FROM blob WHERE digest=?", (artifact_digest,)).fetchone()
@@ -51,6 +55,17 @@ def publish(db: Database, agent_id: str, manifest: dict, artifact_digest: str) -
                              (tid, version)).fetchone()
         if exists:
             raise Conflict(f"{tid}@{version} already published (immutable). Bump the version.")
+        is_new = cur.execute("SELECT 1 FROM tool WHERE id=?", (tid,)).fetchone() is None
+        if is_new:
+            dups = find_similar(db, id=tid, description=manifest.get("description", ""))
+            if dups and not force:
+                listed = ", ".join(f"{d['id']}@{d['version']} ({d['why']})" for d in dups)
+                raise Invalid(
+                    f"a similar tool already exists: {listed}. Publish a NEW VERSION of it "
+                    f"instead of a duplicate, or re-publish with force=true if this is "
+                    f"genuinely different.")
+            if dups:
+                warnings.append({"similar_tools": dups, "note": "published despite similarity"})
         cur.execute("INSERT INTO tool(id,latest_version,created_tx) VALUES(?,?,?) "
                     "ON CONFLICT(id) DO NOTHING", (tid, version, tx.tx_id))
         cur.execute("INSERT INTO tool_version(id,version,manifest,artifact_digest,created_tx) "
@@ -61,7 +76,15 @@ def publish(db: Database, agent_id: str, manifest: dict, artifact_digest: str) -
                            (tid,)).fetchall()
         latest = semver.latest([r["version"] for r in rows]) or version
         cur.execute("UPDATE tool SET latest_version=? WHERE id=?", (latest, tid))
-    return {"id": tid, "version": version, "latest": latest, "artifact_digest": artifact_digest}
+        if latest == version:
+            _index(cur, tid, manifest)
+    if latest == version:
+        from . import embeddings
+        embeddings.upsert(db, "tool", tid, " ".join(filter(None, [
+            tid, manifest.get("description", ""), " ".join(manifest.get("tags") or []),
+            manifest.get("runtime", "")])), agent_id=agent_id)
+    return {"id": tid, "version": version, "latest": latest, "artifact_digest": artifact_digest,
+            "new_tool": is_new, "warnings": warnings}
 
 
 def yank(db: Database, agent_id: str, tid: str, version: str, reason: str = "") -> dict:
@@ -75,7 +98,13 @@ def yank(db: Database, agent_id: str, tid: str, version: str, reason: str = "") 
                            (tid,)).fetchall()
         latest = semver.latest([r["version"] for r in rows])
         cur.execute("UPDATE tool SET latest_version=? WHERE id=?", (latest, tid))
-    return {"id": tid, "version": version, "yanked": True, "reason": reason}
+        if latest is None:
+            cur.execute("DELETE FROM tool_fts WHERE id=?", (tid,))
+        else:
+            r = cur.execute("SELECT manifest FROM tool_version WHERE id=? AND version=?",
+                            (tid, latest)).fetchone()
+            _index(cur, tid, json.loads(r["manifest"]))
+    return {"id": tid, "version": version, "yanked": True, "latest": latest, "reason": reason}
 
 
 def resolve(db: Database, tid: str, *, constraint: str = "", os: Optional[str] = None,
@@ -122,25 +151,53 @@ def _newer_incompatible(all_versions, chosen: str, constraint: str):
 
 
 def search(db: Database, query: str = "", *, os: Optional[str] = None,
-           arch: Optional[str] = None, limit: int = 25) -> dict:
+           arch: Optional[str] = None, limit: int = 25, mode: str = "hybrid") -> dict:
+    """FTS-backed tool search (was a full-table scan with Python-side filtering)."""
+    from .search import _fts_query
+    limit = max(1, min(limit, 200))
     with db.read() as cur:
-        rows = cur.execute(
-            "SELECT t.id, t.latest_version, tv.manifest FROM tool t "
-            "JOIN tool_version tv ON tv.id=t.id AND tv.version=t.latest_version").fetchall()
-    out = []
-    q = query.lower()
-    for r in rows:
-        m = json.loads(r["manifest"])
-        hay = " ".join([r["id"], m.get("description", ""), " ".join(m.get("tags", []) or [])]).lower()
-        if q and q not in hay:
-            continue
-        platforms = [f"{a.get('os')}/{a.get('arch')}" for a in (m.get("artifacts") or [])]
-        out.append({"id": r["id"], "latest": r["latest_version"],
-                    "description": m.get("description", ""),
-                    "runtime": m.get("runtime"), "platforms": platforms or ["any"]})
-        if len(out) >= limit:
-            break
-    return {"tools": out, "count": len(out)}
+        if query:
+            m = _fts_query(query)
+            lexical = [r["id"] for r in cur.execute(
+                "SELECT id FROM tool_fts WHERE tool_fts MATCH ? ORDER BY rank LIMIT ?",
+                (m, limit * 3))] if m else []
+            semantic = []
+            if mode in ("hybrid", "semantic"):
+                from . import embeddings
+                semantic = [i for i, _ in embeddings.query(db, "tool", query, limit=limit * 3)]
+            if mode == "lexical":
+                ids = lexical
+            elif mode == "semantic":
+                ids = semantic or lexical
+            else:
+                fused = _rrf(lexical, semantic)
+                ids = sorted(fused, key=lambda k: fused[k], reverse=True)
+        else:
+            ids = [r["id"] for r in cur.execute(
+                "SELECT id FROM tool ORDER BY created_tx DESC LIMIT ?", (limit * 3,))]
+        out = []
+        for tid in ids:
+            r = cur.execute(
+                "SELECT t.latest_version, tv.manifest FROM tool t JOIN tool_version tv "
+                "ON tv.id=t.id AND tv.version=t.latest_version WHERE t.id=?", (tid,)).fetchone()
+            if r is None:
+                continue
+            m2 = json.loads(r["manifest"])
+            arts = m2.get("artifacts") or []
+            if os and arts and not any(a.get("os") == os for a in arts):
+                continue
+            if arch and arts and not any(a.get("arch") == arch for a in arts):
+                continue
+            out.append({"id": tid, "latest": r["latest_version"],
+                        "description": m2.get("description", ""), "runtime": m2.get("runtime"),
+                        "platforms": [f"{a.get('os')}/{a.get('arch')}" for a in arts] or ["any"]})
+            if len(out) >= limit:
+                break
+    from . import embeddings
+    return {"tools": out, "count": len(out), "mode": mode,
+            "semantic_backend": embeddings.backend_name(),
+            "hint": "tool_resolve(id) for the ready-to-run command" if out else
+                    "nothing matched - if you build one, tool_publish it"}
 
 
 # ── MCP tool attachment (called from registry_tools.attach) ────────────────────────
@@ -150,10 +207,11 @@ def attach_tools(mcp, project, envelope, RO, WRITE, base) -> None:
     @mcp.tool(annotations=WRITE,
               description="Publish an immutable tool version. `manifest` must include id "
                           "(reverse-dns), version (exact semver — no ranges), runtime, entrypoint. "
-                          "Upload the tool blob first (PUT /blobs/...) and pass its artifact_digest.")
+                          "Upload the tool blob first (PUT /blobs/...) and pass its artifact_digest. SEARCH FIRST (tool_search/tool_catalog): publishing a NEW id that resembles an existing tool is refused - bump that tool's version instead (force=true).")
     @envelope
-    def tool_publish(manifest: dict, artifact_digest: str, agent: str = "agent") -> dict:
-        return publish(db, agent, manifest, artifact_digest)
+    def tool_publish(manifest: dict, artifact_digest: str, agent: str = "agent",
+                     force: bool = False) -> dict:
+        return publish(db, agent, manifest, artifact_digest, force=force)
 
     @mcp.tool(annotations=RO,
               description="Resolve a tool to a runnable version. Returns the exact version, a "
@@ -166,12 +224,27 @@ def attach_tools(mcp, project, envelope, RO, WRITE, base) -> None:
                        include_prerelease=include_prerelease)
 
     @mcp.tool(annotations=RO,
+              description="Browse the whole tool registry: tags with counts plus a one-line entry "
+                          "per tool. Use before building anything - check what already exists.")
+    @envelope
+    def tool_catalog(topic: Optional[str] = None, limit: int = 100, offset: int = 0) -> dict:
+        return catalog(db, topic=topic, limit=limit, offset=offset)
+
+    @mcp.tool(annotations=WRITE,
+              description="Link a tool to a graph node it is about (relation: about|analyses|"
+                          "produces). Anyone reading that node then sees the tool.")
+    @envelope
+    def tool_link(tool_id: str, node_id: str, relation: str = "about",
+                  note: Optional[str] = None, agent: str = "agent") -> dict:
+        return link(db, agent, tool_id, node_id, relation=relation, note=note)
+
+    @mcp.tool(annotations=RO,
               description="List/search published tools (id, latest version, description, "
                           "platforms). Use this to discover what tools other agents have shared.")
     @envelope
     def tool_search(query: str = "", os: Optional[str] = None, arch: Optional[str] = None,
-                    limit: int = 25) -> dict:
-        return search(db, query, os=os, arch=arch, limit=limit)
+                    limit: int = 25, mode: str = "hybrid") -> dict:
+        return search(db, query, os=os, arch=arch, limit=limit, mode=mode)
 
     @mcp.tool(annotations=WRITE,
               description="Yank a tool version (hide from resolution; still fetchable by exact pin). "
@@ -179,3 +252,143 @@ def attach_tools(mcp, project, envelope, RO, WRITE, base) -> None:
     @envelope
     def tool_yank(id: str, version: str, reason: str = "", agent: str = "agent") -> dict:
         return yank(db, agent, id, version, reason)
+
+
+# ── discovery: FTS index, duplicate prevention, catalog, graph links ────────────────
+_DUP_NAME = 0.72
+_DUP_TEXT = 0.62
+
+
+def _index(cur, tid: str, manifest: dict) -> None:
+    text = " ".join(filter(None, [
+        tid, manifest.get("description", ""), " ".join(manifest.get("tags") or []),
+        manifest.get("runtime", ""), manifest.get("entrypoint", ""),
+        " ".join(e.get("cmd", "") for e in (manifest.get("examples") or []))]))
+    cur.execute("DELETE FROM tool_fts WHERE id=?", (tid,))
+    cur.execute("INSERT INTO tool_fts(id, body) VALUES(?,?)", (tid, text))
+
+
+def _similar(a: str, b: str) -> float:
+    return difflib.SequenceMatcher(None, (a or "").lower(), (b or "").lower()).ratio()
+
+
+def find_similar(db: Database, *, id: str, description: str = "", limit: int = 5) -> list:
+    """Existing tools that resemble the one being published — stops the same utility landing
+    twice under two names, which is the failure mode a flat registry actually hits."""
+    out = []
+    with db.read() as cur:
+        rows = cur.execute(
+            "SELECT t.id, t.latest_version, tv.manifest FROM tool t "
+            "JOIN tool_version tv ON tv.id=t.id AND tv.version=t.latest_version").fetchall()
+    for r in rows:
+        if r["id"] == id:
+            continue
+        m = json.loads(r["manifest"])
+        name_score = _similar(id, r["id"])
+        text_score = _similar(description, m.get("description", ""))
+        if name_score >= _DUP_NAME or text_score >= _DUP_TEXT:
+            out.append({"id": r["id"], "version": r["latest_version"],
+                        "why": "similar name" if name_score >= _DUP_NAME else "similar description",
+                        "score": round(max(name_score, text_score), 2)})
+    out.sort(key=lambda d: d["score"], reverse=True)
+    return out[:limit]
+
+
+def catalog(db: Database, *, topic: Optional[str] = None, limit: int = 100, offset: int = 0,
+            max_topics: int = 30) -> dict:
+    """Advertise the tool registry: real totals, busiest tags, a page of one-line entries.
+    Counts come from the table, never from the page."""
+    limit = max(1, min(limit, 500))
+    with db.read() as cur:
+        total = cur.execute(
+            "SELECT COUNT(*) c FROM tool WHERE latest_version IS NOT NULL").fetchone()["c"]
+        topic_rows = cur.execute(
+            "SELECT j.value AS topic, COUNT(*) AS n FROM tool t "
+            "JOIN tool_version tv ON tv.id=t.id AND tv.version=t.latest_version, "
+            "json_each(json_extract(tv.manifest, '$.tags')) j "
+            "GROUP BY j.value ORDER BY n DESC, j.value").fetchall()
+        rows = cur.execute(
+            "SELECT t.id, t.latest_version, tv.manifest FROM tool t "
+            "JOIN tool_version tv ON tv.id=t.id AND tv.version=t.latest_version "
+            "WHERE t.latest_version IS NOT NULL ORDER BY t.id").fetchall()
+        link_counts = dict(cur.execute(
+            "SELECT id, COUNT(*) FROM tool_link GROUP BY id").fetchall() or [])
+    entries = []
+    for r in rows:
+        m = json.loads(r["manifest"])
+        if topic and topic not in (m.get("tags") or []):
+            continue
+        entries.append({"id": r["id"], "version": r["latest_version"],
+                        "description": m.get("description", ""), "runtime": m.get("runtime"),
+                        "tags": m.get("tags") or [],
+                        "platforms": [f"{a.get('os')}/{a.get('arch')}"
+                                      for a in (m.get("artifacts") or [])] or ["any"],
+                        "linked_nodes": link_counts.get(r["id"], 0)})
+    matched = len(entries)
+    page = entries[offset:offset + limit]
+    out = {"total_tools": total, "matched": matched, "returned": len(page), "offset": offset,
+           "next_offset": (offset + len(page)) if offset + len(page) < matched else None,
+           "topics": [{"topic": r["topic"], "tools": r["n"]} for r in topic_rows[:max_topics]],
+           "total_topics": len(topic_rows), "tools": page,
+           "hint": "tool_resolve(id) for the run command; tool_catalog(topic=…) to narrow"}
+    if len(topic_rows) > max_topics:
+        out["topics_truncated"] = (f"{len(topic_rows)} tags exist; showing the {max_topics} "
+                                   f"largest. Prefer tool_search for anything specific.")
+    return out
+
+
+def link(db: Database, agent_id: str, tool_id: str, node_id: str, *, relation: str = "about",
+         note: Optional[str] = None) -> dict:
+    with db.write(agent_id, f"tool_link {tool_id} -> {node_id}") as tx:
+        cur = tx.cur
+        if cur.execute("SELECT 1 FROM tool WHERE id=?", (tool_id,)).fetchone() is None:
+            raise NotFound(f"tool {tool_id!r} not found")
+        if cur.execute("SELECT 1 FROM node WHERE node_id=?", (node_id,)).fetchone() is None:
+            raise Invalid(f"node {node_id!r} not found")
+        cur.execute("INSERT INTO tool_link(id,node_id,relation,note,created_tx) "
+                    "VALUES(?,?,?,?,?) ON CONFLICT(id,node_id,relation) DO UPDATE SET note=?",
+                    (tool_id, node_id, relation, note, tx.tx_id, note))
+    return {"tool_id": tool_id, "node_id": node_id, "relation": relation}
+
+
+def for_node(db: Database, node_id: str) -> list:
+    with db.read() as cur:
+        rows = cur.execute(
+            "SELECT tl.id, tl.relation, tl.note, t.latest_version, tv.manifest FROM tool_link tl "
+            "JOIN tool t ON t.id=tl.id LEFT JOIN tool_version tv "
+            "ON tv.id=t.id AND tv.version=t.latest_version WHERE tl.node_id=? "
+            "ORDER BY tl.created_tx DESC LIMIT 10", (node_id,)).fetchall()
+    out = []
+    for r in rows:
+        m = json.loads(r["manifest"]) if r["manifest"] else {}
+        out.append({"id": r["id"], "version": r["latest_version"],
+                    "description": m.get("description", ""), "relation": r["relation"],
+                    "note": r["note"]})
+    return out
+
+
+def reindex_all(db: Database) -> int:
+    """Backfill tool_fts for tools published before the index existed."""
+    with db.write("reindex", "tool_fts_reindex") as tx:
+        cur = tx.cur
+        cur.execute("DELETE FROM tool_fts")
+        rows = cur.execute(
+            "SELECT t.id, tv.manifest FROM tool t JOIN tool_version tv "
+            "ON tv.id=t.id AND tv.version=t.latest_version").fetchall()
+        for r in rows:
+            _index(cur, r["id"], json.loads(r["manifest"]))
+    return len(rows)
+
+
+# ── hybrid retrieval: lexical (FTS/BM25) + semantic (embeddings), fused by RRF ───────
+_RRF_K = 60
+
+
+def _rrf(*ranked_lists) -> dict:
+    """Reciprocal-rank fusion: robust, tuning-free, and it does not need the two scorers to be
+    on comparable scales (BM25 ranks and cosine similarities are not)."""
+    scores: dict = {}
+    for lst in ranked_lists:
+        for i, item_id in enumerate(lst):
+            scores[item_id] = scores.get(item_id, 0.0) + 1.0 / (_RRF_K + i)
+    return scores

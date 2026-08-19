@@ -118,6 +118,14 @@ and evidence here **as you go**, not just at the end.
 - **No fitting type?** `schema_propose` an additive one rather than falling back to a local file.
 
 
+## Check before you build
+
+Before building a tool or working out a procedure: `tool_search` / `tool_catalog`,
+`skill_search` / `skill_catalog`, `trap_search`, and `graph_get` on the thing you are working on
+(it returns the tools, skills and traps attached to it). Build only if all come back empty, then
+publish what you built. If something is almost right, publish a NEW VERSION of it rather than a
+near-duplicate — the registries refuse look-alike new ids.
+
 ## Procedures and dead-ends
 
 - `skill_search` / `skill_get` before working out a non-obvious procedure; `skill_publish` it once

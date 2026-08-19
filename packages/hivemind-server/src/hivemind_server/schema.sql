@@ -250,3 +250,26 @@ CREATE TABLE IF NOT EXISTS skill_link (
   PRIMARY KEY (id, node_id, relation)
 );
 CREATE INDEX IF NOT EXISTS ix_skill_link_node ON skill_link(node_id);
+
+-- ── tool discovery: FTS + graph links (mirrors the mini-skill library) ───────────
+CREATE VIRTUAL TABLE IF NOT EXISTS tool_fts USING fts5(id UNINDEXED, body, tokenize='unicode61');
+CREATE TABLE IF NOT EXISTS tool_link (
+  id         TEXT NOT NULL REFERENCES tool(id),
+  node_id    TEXT NOT NULL REFERENCES node(node_id),
+  relation   TEXT NOT NULL DEFAULT 'about',        -- about | analyses | produces
+  note       TEXT,
+  created_tx INTEGER NOT NULL REFERENCES tx(tx_id),
+  PRIMARY KEY (id, node_id, relation)
+);
+CREATE INDEX IF NOT EXISTS ix_tool_link_node ON tool_link(node_id);
+
+-- ── embeddings for semantic search over skills and tools ─────────────────────────
+CREATE TABLE IF NOT EXISTS embedding (
+  kind       TEXT NOT NULL,                        -- 'skill' | 'tool'
+  item_id    TEXT NOT NULL,
+  model      TEXT NOT NULL,                        -- which backend produced it
+  dim        INTEGER NOT NULL,
+  vec        BLOB NOT NULL,                        -- float32 little-endian, L2-normalised
+  updated_tx INTEGER NOT NULL REFERENCES tx(tx_id),
+  PRIMARY KEY (kind, item_id)
+);

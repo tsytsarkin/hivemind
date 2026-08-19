@@ -170,3 +170,56 @@ def test_catalog_counts_are_not_the_page_size(db):
     assert last["returned"] == 1 and last["next_offset"] is None
     ops = skills.catalog(db, topic="ops", limit=100)
     assert ops["matched"] == 4 and ops["total_skills"] == 7
+
+
+# ── tools: catalog, dedup, linking, hybrid search ──────────────────────────────
+def _blob(db, digest="sha256:" + "b" * 64):
+    with db.write("t", "blob") as tx:
+        tx.cur.execute("INSERT INTO blob(digest,size,created_tx) VALUES(?,?,?) "
+                       "ON CONFLICT(digest) DO NOTHING", (digest, 1, tx.tx_id))
+    return digest
+
+
+def _tool(db, tid, desc, tags=None, force=False, version="1.0.0"):
+    from hivemind_server import registry
+    return registry.publish(db, "a", {"id": tid, "version": version, "runtime": "python",
+                                      "entrypoint": "x.py", "description": desc,
+                                      "tags": tags or []}, _blob(db), force=force)
+
+
+def test_tool_catalog_and_dedup_and_link(db):
+    from hivemind_server import registry
+    _tool(db, "re/unpack-cache", "Unpack a shared cache into raw images.", ["re"])
+    _tool(db, "ops/rotate-logs", "Trim and archive server logs.", ["ops"])
+    cat = registry.catalog(db)
+    assert cat["total_tools"] == 2
+    assert {t["topic"] for t in cat["topics"]} == {"re", "ops"}
+    assert registry.catalog(db, topic="ops")["matched"] == 1
+
+    # near-duplicate new id refused; revision of the existing tool allowed
+    with pytest.raises(Invalid) as e:
+        _tool(db, "re/unpack-the-cache", "Unpack a shared cache into raw images.")
+    assert "re/unpack-cache@1.0.0" in str(e.value)
+    assert _tool(db, "re/unpack-cache", "Unpack a shared cache, faster.", version="1.1.0")
+
+    # linking surfaces the tool from the node
+    n = graph.upsert_node(db, "a", "thing", {"n": "cache"})["node_id"]
+    registry.link(db, "a", "re/unpack-cache", n, relation="analyses")
+    assert [t["id"] for t in registry.for_node(db, n)] == ["re/unpack-cache"]
+    assert registry.catalog(db)["tools"][0]["linked_nodes"] in (0, 1)
+
+
+def test_hybrid_search_reports_backend_and_modes(db):
+    from hivemind_server import registry
+    _pub(db, "ops/restart-server", "Restart the server", "How to restart the server safely.")
+    _tool(db, "ops/bounce-daemon", "Restart the server daemon process.", ["ops"])
+    for mode in ("hybrid", "lexical", "semantic"):
+        sk = skills.search(db, "restart server", mode=mode)
+        tl = registry.search(db, "restart server", mode=mode)
+        assert sk["mode"] == mode and tl["mode"] == mode
+        assert sk["semantic_backend"] and tl["semantic_backend"]
+        assert sk["count"] >= 1 and tl["count"] >= 1
+    # embeddings were written on publish, without deadlocking inside the write txn
+    with db.read() as cur:
+        kinds = {r[0] for r in cur.execute("SELECT DISTINCT kind FROM embedding")}
+    assert kinds == {"skill", "tool"}

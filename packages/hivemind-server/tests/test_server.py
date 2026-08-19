@@ -155,6 +155,7 @@ EXPECTED_TOOLS = {
     "trap_search", "trap_get", "trap_record", "trap_status",
     "artifact_ref", "artifact_attach", "artifact_refs",
     "tool_publish", "tool_resolve", "tool_search", "tool_yank",
+    "tool_catalog", "tool_link",
 }
 
 

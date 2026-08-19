@@ -57,6 +57,7 @@ def main(argv=None) -> int:
     rg.add_argument("--reason", default="")
     gc = sub.add_parser("gc"); gc.add_argument("--yes", action="store_true")
     sub.add_parser("reindex")
+    sub.add_parser("embed")
 
     args = ap.parse_args(argv)
     reg = _registry()
@@ -94,6 +95,27 @@ def main(argv=None) -> int:
         _out(guide.retire_section(p.db, "admin", args.section, args.reason))
     elif args.cmd == "gc":
         _out(p.blobs.gc(dry_run=not args.yes))
+    elif args.cmd == "embed":
+        import json as _json
+        from . import embeddings, registry as _reg
+        with p.db.read() as cur:
+            sk = [(r["id"], " ".join(filter(None, [r["id"], r["title"], r["description"],
+                                                    r["when_to_use"] or "", r["body"]])))
+                  for r in cur.execute(
+                      "SELECT sv.id, sv.title, sv.description, sv.when_to_use, sv.body "
+                      "FROM skill s JOIN skill_version sv ON sv.id=s.id "
+                      "AND sv.version=s.latest_version")]
+            tl = []
+            for r in cur.execute("SELECT t.id, tv.manifest FROM tool t JOIN tool_version tv "
+                                 "ON tv.id=t.id AND tv.version=t.latest_version"):
+                mm = _json.loads(r["manifest"])
+                tl.append((r["id"], " ".join(filter(None, [
+                    r["id"], mm.get("description", ""), " ".join(mm.get("tags") or []),
+                    mm.get("runtime", "")]))))
+        res = {"skills": embeddings.backfill(p.db, "skill", sk),
+               "tools": embeddings.backfill(p.db, "tool", tl),
+               "tool_fts_reindexed": _reg.reindex_all(p.db)}
+        _out(res)
     elif args.cmd == "reindex":
         _out({"reindexed_nodes": search.reindex_all(p.db)})
     return 0

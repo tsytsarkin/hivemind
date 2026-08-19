@@ -23,8 +23,10 @@ INSTRUCTIONS = (
     "thing, e.g. an OS build — pass subject_key/subject_version). Large binaries go through the "
     "REST /blobs endpoints (hivemind CLI), never inline. Nodes flagged 'disputed' have an open "
     "assertive edge — resolve before relying on them. Before working out a non-obvious procedure, "
-    "search skill_search and trap_search; when you solve one, skill_publish it, and when you "
-    "abandon an approach, trap_record it."
+    "ALWAYS search first — tool_search/tool_catalog, skill_search/skill_catalog and "
+    "trap_search — before building a tool or working out a procedure; build only if they come "
+    "back empty. Publish what you build (tool_publish/skill_publish) and trap_record an "
+    "approach the moment you abandon it. Search is hybrid lexical+semantic."
 )
 
 RO = ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True)
@@ -85,6 +87,10 @@ def build_mcp(project: Project, *, instructions: str = INSTRUCTIONS) -> MCPServe
         sk = skills.for_node(db, out["node_id"])
         if sk:                          # ...nor the procedures written about it
             out["skills"] = sk
+        from . import registry as _reg
+        tl = _reg.for_node(db, out["node_id"])
+        if tl:                          # ...nor the tools built for it
+            out["tools"] = tl
         return out
 
     @mcp.tool(annotations=RO,
@@ -191,11 +197,11 @@ def build_mcp(project: Project, *, instructions: str = INSTRUCTIONS) -> MCPServe
     @mcp.tool(annotations=RO,
               description="Search the mini-skill registry — procedures other agents wrote down "
                           "(how to do a complex action, with the gotchas). ALWAYS search here "
-                          "before working out a non-obvious procedure from scratch.")
+                          "before working out a non-obvious procedure from scratch. mode: hybrid (default, lexical+semantic fused), lexical, or semantic.")
     @_envelope
     def skill_search(query: str = "", tags: Optional[list[str]] = None, limit: int = 20,
-                     response_format: str = "concise") -> dict:
-        return skills.search(db, query, tags=tags, limit=limit, format=response_format)
+                     response_format: str = "concise", mode: str = "hybrid") -> dict:
+        return skills.search(db, query, tags=tags, limit=limit, format=response_format, mode=mode)
 
     @mcp.tool(annotations=RO,
               description="Browse the whole mini-skill library: topics with counts plus a one-line "
