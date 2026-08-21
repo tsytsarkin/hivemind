@@ -92,3 +92,29 @@ Semantic search is optional and degrades safely: without `sentence-transformers`
 server uses a built-in hashed TF-IDF vectoriser, and every search reports which backend answered.
 Installing a neural backend later requires re-running `embed` — until then searches say so
 explicitly rather than quietly returning lexical-only results.
+
+## Backups
+
+`deploy/backup.sh` writes a daily backup to a **second physical disk** (so it survives a root-disk
+failure, not just an accidental delete). Installed on the lab box as:
+
+```
+30 3 * * * /bin/bash $HOME/hivemind/deploy/backup.sh
+```
+
+What it does, per project:
+
+- **Database** — SQLite's **online backup API**, not a file copy. A live WAL-mode database cannot
+  be safely `cp`/`rsync`ed: the `.db` file alone is an inconsistent snapshot. Each copy is then
+  verified with `PRAGMA integrity_check` and only counts as a backup if it passes.
+- **Blobs** — incremental `rsync`, **without `--delete`**: artifacts are content-addressed and
+  immutable, so anything GC'd on the live side stays recoverable in the backup.
+- **Tokens** — copied at mode 0600.
+- **Rotation** — keeps `HIVEMIND_BACKUP_KEEP` (default 7) dated database snapshots; blobs are a
+  single mirror.
+
+Tunables: `HIVEMIND_BACKUP_DIR` (default `/mnt/fuzz/hivemind-backup`), `HIVEMIND_BACKUP_KEEP`,
+`HIVEMIND_DATA_DIR`. Log: `<backup dir>/backup.log`.
+
+Measured on the live project (1.7 GB database, 9,475 blobs / 9.7 GB): **23 s** for the first run,
+**17 s** incrementally with zero blobs transferred. Restore procedure: [restore.md](restore.md).

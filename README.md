@@ -25,7 +25,7 @@ live guide). Meaning is data — shipped as a swappable **domain pack** (`packs/
 | `packages/hivemind-client/` | The client library + `hivemind` CLI. Python ≥3.9, only dep is `httpx`. |
 | `plugin/` | The Claude Code plugin (MCP config + self-updating bootstrap skill). |
 | `packs/` | Optional, swappable, **layerable** domain packs (schema + guide). Ships `security-research` and `ios-macos-attack-surface`. See [docs/packs.md](docs/packs.md). |
-| `deploy/` | Deploy docs, systemd unit, Litestream backup, bootstrap + relock scripts. |
+| `deploy/` | Deploy docs, systemd unit, daily backup + restore, bootstrap + relock scripts. |
 | `docs/` | Data model, API, guide authoring, security notes. |
 
 ## Two versioning axes (core concept)
