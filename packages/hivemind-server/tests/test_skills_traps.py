@@ -286,3 +286,37 @@ def test_stale_semantic_backend_is_reported_not_silent(db):
     assert "INACTIVE" in out["semantic_warning"] and "hivemind-admin" in out["semantic_warning"]
     # lexical mode makes no semantic claim, so it does not warn
     assert "semantic_warning" not in skills.search(db, "thing", mode="lexical")
+
+
+def test_gc_does_not_delete_blobs_referenced_by_digest_in_props(db, tmp_path):
+    """A digest recorded inside node props is a real reference; GC must treat it as a root."""
+    from hivemind_server.blobs import BlobStore
+    store = BlobStore(tmp_path / "b", db, max_bytes=1 << 20, grace_seconds=0)
+    attached = store.put_stream([b"attached"], agent_id="a")["digest"]
+    in_props = store.put_stream([b"mentioned-only"], agent_id="a")["digest"]
+    orphan = store.put_stream([b"nobody wants me"], agent_id="a")["digest"]
+
+    n = graph.upsert_node(db, "a", "thing", {"evidence": in_props})   # digest as plain text
+    store.attach("a", attached, n["version_id"], role="binary")
+
+    plan = store.gc(dry_run=True)
+    assert plan["kept_referenced_in_props"] == 1
+    assert plan["unreferenced"] == 1                                  # only the true orphan
+    store.gc(dry_run=False)
+    assert store.exists(attached) and store.exists(in_props), "live blobs must survive"
+    assert not store.exists(orphan)
+
+
+def test_gc_never_orphans_a_file_when_a_reference_blocks_deletion(db, tmp_path):
+    """A blob referenced only by tool_version must survive, and its bytes must stay on disk even
+    though blob_ref knows nothing about it."""
+    from hivemind_server.blobs import BlobStore
+    from hivemind_server import registry
+    store = BlobStore(tmp_path / "b2", db, max_bytes=1 << 20, grace_seconds=0)
+    dg = store.put_stream([b"#!/usr/bin/env python\n"], agent_id="a")["digest"]
+    registry.publish(db, "a", {"id": "x/y", "version": "1.0.0", "runtime": "python",
+                               "entrypoint": "y.py", "description": "A tool."}, dg)
+    out = store.gc(dry_run=True)
+    assert out["unreferenced"] == 0, "a tool's artifact is referenced, not garbage"
+    store.gc(dry_run=False)
+    assert store.exists(dg), "tool artifact bytes must remain on disk"

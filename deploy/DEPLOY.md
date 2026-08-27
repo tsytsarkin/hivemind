@@ -118,3 +118,21 @@ Tunables: `HIVEMIND_BACKUP_DIR` (default `/mnt/fuzz/hivemind-backup`), `HIVEMIND
 
 Measured on the live project (1.7 GB database, 9,475 blobs / 9.7 GB): **23 s** for the first run,
 **17 s** incrementally with zero blobs transferred. Restore procedure: [restore.md](restore.md).
+
+## Maintenance (daily, automatic)
+
+`deploy/maintenance.sh` runs at 03:45, **after** the 03:30 backup — so anything it collects is
+already captured in the backup mirror (which never deletes) and stays recoverable.
+
+```
+30 3 * * * backup.sh        # verified DB snapshot + incremental blob mirror
+45 3 * * * maintenance.sh   # orphan report, then garbage collection
+```
+
+It reports which agents uploaded blobs they never attached, then collects garbage. Roots are
+`blob_ref` rows, digests written into node/edge props, tool artifacts (`tool_version`), and pins;
+`HIVEMIND_BLOB_GRACE` (default **72h**) gives an agent time to attach what it uploaded before its
+bytes are eligible.
+
+Left unattended this leak reached **94 GB — 80% of the blob store**. Scheduling collection is the
+structural fix; the one-step `?attach_to=` upload is what stops it being created.

@@ -56,6 +56,7 @@ def main(argv=None) -> int:
     rg = sub.add_parser("retire-guide"); rg.add_argument("section")
     rg.add_argument("--reason", default="")
     gc = sub.add_parser("gc"); gc.add_argument("--yes", action="store_true")
+    orp = sub.add_parser("orphans"); orp.add_argument("--older-than-hours", type=int, default=0)
     sub.add_parser("reindex")
     sub.add_parser("embed")
     sub.add_parser("autolink")
@@ -94,6 +95,8 @@ def main(argv=None) -> int:
         _out(guide.set_section(p.db, "admin", args.section, Path(args.file).read_text()))
     elif args.cmd == "retire-guide":
         _out(guide.retire_section(p.db, "admin", args.section, args.reason))
+    elif args.cmd == "orphans":
+        _out(p.blobs.orphans(older_than_hours=args.older_than_hours))
     elif args.cmd == "gc":
         _out(p.blobs.gc(dry_run=not args.yes))
     elif args.cmd == "embed":

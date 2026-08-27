@@ -15,14 +15,17 @@ from .db import Conflict, Invalid, NotFound
 from .project import Project
 
 INSTRUCTIONS = (
-    "Hivemind is a shared, versioned knowledge graph + artifact store + tool registry for an "
-    "agent fleet. It is domain-agnostic: node and edge TYPES are defined at runtime in the schema. "
+    "Hivemind REPLACES local memory for this fleet: read it before doing any work, and persist "
+    "all work into it rather than into local memory files or scratch notes, which no other agent "
+    "can see. It is a shared, versioned knowledge graph + artifact store + tool registry. It is domain-agnostic: node and edge TYPES are defined at runtime in the schema. "
     "Before writing, call schema_get to see the types this project defines, and read the live "
     "guide via guide_get(section='core'). Two versioning axes: revision (supersession — pass "
     "expected_head for safe concurrent edits) and subject-version (the version of the described "
     "thing, e.g. an OS build — pass subject_key/subject_version). Large binaries go through the "
     "REST /blobs endpoints (hivemind CLI), never inline. Nodes flagged 'disputed' have an open "
-    "assertive edge — resolve before relying on them. Before working out a non-obvious procedure, "
+    "assertive edge — resolve before relying on them. graph_get returns a node together with the "
+    "mini-skills associated with it, the tools built for it and its traps, so one call tells you "
+    "what is already known. Before working out a non-obvious procedure, "
     "ALWAYS search first — tool_search/tool_catalog, skill_search/skill_catalog and "
     "trap_search — before building a tool or working out a procedure; build only if they come "
     "back empty. Publish what you build (tool_publish/skill_publish) and trap_record an "
@@ -71,7 +74,7 @@ def build_mcp(project: Project, *, instructions: str = INSTRUCTIONS) -> MCPServe
         return out
 
     @mcp.tool(annotations=RO,
-              description="Fetch a node by node_id OR (subject_key+subject_version). "
+              description="Fetch a node by node_id OR (subject_key+subject_version). Returns the node plus everything recorded about it: the mini-skills associated with it (with descriptions), the tools built for it, and any traps. "
                           "history=true returns the full revision chain (newest first); "
                           "as_of=<tx_id|ISO time> returns the revision current then.")
     @_envelope
@@ -87,6 +90,9 @@ def build_mcp(project: Project, *, instructions: str = INSTRUCTIONS) -> MCPServe
         sk = skills.for_node(db, out["node_id"])
         if sk:                          # ...nor the procedures written about it
             out["skills"] = sk
+            out["skills_count"] = len(sk)
+            out["skills_hint"] = ("mini-skills associated with this node — read the relevant one "
+                                  "with skill_get(id) BEFORE working out your own procedure")
         from . import registry as _reg
         tl = _reg.for_node(db, out["node_id"])
         if tl:                          # ...nor the tools built for it

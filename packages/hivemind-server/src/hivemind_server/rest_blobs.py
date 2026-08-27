@@ -39,7 +39,10 @@ def register_blob_routes(mcp, project) -> None:
         except Invalid as e:
             return JSONResponse({"error": str(e)}, status_code=400)
         if store.exists(declared):
-            return JSONResponse({"digest": declared, "deduplicated": True}, status_code=200)
+            return JSONResponse({"digest": declared, "deduplicated": True,
+                                 "next": ("already stored — still attach it with "
+                                          "artifact_attach(digest, version_id, role=...)")},
+                                status_code=200)
         tmp = await run_in_threadpool(store.new_tmp)
         h = hashlib.sha256()
         size = 0
@@ -59,10 +62,27 @@ def register_blob_routes(mcp, project) -> None:
             res = await run_in_threadpool(
                 store.finalize_written, tmp, computed, size, media, _agent(req),
             )
+            # Attach in the same request when the caller says what it belongs to. The leak that
+            # produced 94GB of garbage was upload-then-forget, so the fix is to make attaching
+            # part of the upload rather than a second call somebody has to remember.
+            attach_to = req.query_params.get("attach_to")
+            if attach_to:
+                try:
+                    await run_in_threadpool(
+                        store.attach, _agent(req), computed, attach_to,
+                        role=req.query_params.get("role", "attachment"),
+                        filename=req.query_params.get("filename"))
+                    res["attached_to"] = attach_to
+                except (Invalid, NotFound) as e:
+                    res["attach_error"] = str(e)
             if computed != declared:
                 return JSONResponse(
                     {"error": f"digest mismatch: url {declared}, body {computed}"},
                     status_code=400)
+            if not res.get("attached_to"):
+                res["next"] = ("attach it: artifact_attach(digest, version_id, role=...), or pass "
+                               "?attach_to=<version_id> on the upload — an unattached upload is "
+                               "invisible to other agents and is eventually garbage-collected")
             return JSONResponse(res, status_code=201)
         except Invalid as e:
             return JSONResponse({"error": str(e)}, status_code=400)

@@ -42,12 +42,21 @@ class Artifacts:
     def _url(self, digest: str) -> str:
         return f"/blobs/{digest.replace(':', '/', 1)}"
 
-    def put(self, path: str, *, media_type: Optional[str] = None) -> dict:
-        """Upload a file; returns {digest,size,deduplicated}. Idempotent (digest-addressed)."""
+    def put(self, path: str, *, media_type: Optional[str] = None,
+            attach_to: Optional[str] = None, role: str = "attachment") -> dict:
+        """Upload a file; returns {digest,size,deduplicated}. Idempotent (digest-addressed).
+
+        Pass attach_to=<version_id> to attach in the same request — an upload that is never
+        attached is invisible to other agents and is garbage-collected.
+        """
         digest, size = sha256_file(path)
         url = self._url(digest)
+        if attach_to:
+            import urllib.parse as _u
+            url += "?" + _u.urlencode({"attach_to": attach_to, "role": role,
+                                       "filename": os.path.basename(path)})
         # HEAD first: skip the upload if the server already has these bytes
-        head = self._c._request("HEAD", url)
+        head = self._c._request("HEAD", self._url(digest))
         if head.status_code == 200:
             return {"digest": digest, "size": size, "deduplicated": True, "skipped_upload": True}
         headers = {"Content-Type": media_type or "application/octet-stream",

@@ -17,7 +17,7 @@ class Config:
         self.public_url = _env("HIVEMIND_PUBLIC_URL", f"http://{self.host}:{self.port}")
         self.tokens_path = Path(_env("HIVEMIND_TOKENS", str(self.data_dir / "tokens.json")))
         self.max_blob_bytes = int(_env("HIVEMIND_MAX_BLOB", str(2 * 1024 * 1024 * 1024)))  # 2 GiB
-        self.blob_grace_seconds = int(_env("HIVEMIND_BLOB_GRACE", "86400"))                # 24h GC grace
+        self.blob_grace_seconds = int(_env("HIVEMIND_BLOB_GRACE", "259200"))               # 72h: time to attach
         # DNS-rebinding host allowlist for the MCP transport. '*' disables the check (LAN/mesh).
         hosts = _env("HIVEMIND_ALLOWED_HOSTS", "*")
         self.allowed_hosts = [h.strip() for h in hosts.split(",") if h.strip()]

@@ -118,6 +118,18 @@ and evidence here **as you go**, not just at the end.
 - **No fitting type?** `schema_propose` an additive one rather than falling back to a local file.
 
 
+## Hivemind replaces local memory
+
+Hivemind is the memory; local files and scratch notes are not — they are invisible to every other
+agent and to your own future sessions. Read it before any work: `graph_get` on the thing you are
+touching returns its current state plus the mini-skills associated with it, the tools built for
+it, and the traps recorded against it. Persist all work here as you go: results via
+`graph_upsert`, evidence uploaded AND `artifact_attach`ed (an unattached upload is invisible and
+is garbage-collected), procedures via `skill_publish`, abandoned approaches via `trap_record`.
+Keep locally only secrets, machine-specific config, throwaway scratch, and anything explicitly
+private. If the server is unreachable, treat a local note as a temporary buffer and write it in
+when it returns.
+
 ## Check before you build
 
 Before building a tool or working out a procedure: `tool_search` / `tool_catalog`,

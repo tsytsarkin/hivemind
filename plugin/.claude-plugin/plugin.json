@@ -2,8 +2,8 @@
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "hivemind",
   "displayName": "Hivemind",
-  "version": "0.5.0",
-  "description": "Shared, versioned knowledge graph + artifact store + tool registry for an agent fleet. Connects to a self-hosted Hivemind server over MCP (HTTP) and adds a skill that teaches agents to use it.",
+  "version": "0.6.0",
+  "description": "Shared, versioned knowledge graph + artifact store + tool registry that REPLACES local agent memory: read it before any work, persist all work into it.",
   "author": {
     "name": "Nik Tsytsarkin"
   },

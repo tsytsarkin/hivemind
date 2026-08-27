@@ -292,18 +292,36 @@ def link(db: Database, agent_id: str, skill_id: str, node_id: str, *, relation: 
             "source": source}
 
 
-def for_node(db: Database, node_id: str) -> list:
-    """Skills attached to a node — so an agent reading a thing sees the procedures about it."""
+def for_node(db: Database, node_id: str, *, limit: int = 50) -> list:
+    """Every mini-skill associated with a node, each with a short description.
+
+    Confirmed links first, then best-scoring, so the most trustworthy procedures lead. This is the
+    payoff of linking: an agent that opens a node is handed the procedures for it without having
+    to think of a search query.
+    """
     with db.read() as cur:
         rows = cur.execute(
-            "SELECT sl.id, sl.relation, sl.note, sl.source, sl.score, s.latest_version, sv.title, sv.description "
+            "SELECT sl.id, sl.relation, sl.note, sl.source, sl.score, s.latest_version, "
+            "sv.title, sv.description, sv.when_to_use "
             "FROM skill_link sl JOIN skill s ON s.id=sl.id "
             "LEFT JOIN skill_version sv ON sv.id=s.id AND sv.version=s.latest_version "
-            "WHERE sl.node_id=? ORDER BY sl.created_tx DESC LIMIT 10", (node_id,)).fetchall()
+            "WHERE sl.node_id=? "
+            "ORDER BY (sl.source='confirmed') DESC, sl.score DESC, sl.created_tx DESC "
+            "LIMIT ?", (node_id, limit)).fetchall()
     return [{"id": r["id"], "version": r["latest_version"], "title": r["title"],
-             "description": r["description"], "relation": r["relation"], "note": r["note"],
+             # a one-line summary so the list is usable without a follow-up skill_get
+             "description": _summary(r["description"], r["when_to_use"]),
+             "relation": r["relation"], "note": r["note"],
              "source": r["source"], "score": r["score"]}
             for r in rows]
+
+
+def _summary(description: Optional[str], when_to_use: Optional[str], width: int = 200) -> str:
+    text = (description or "").strip()
+    if when_to_use and len(text) < width // 2:
+        text = f"{text} Use when: {when_to_use.strip()}"
+    text = " ".join(text.split())
+    return text if len(text) <= width else text[:width - 1].rstrip() + "…"
 
 
 # ── hybrid retrieval: lexical (FTS/BM25) + semantic (embeddings), fused by RRF ───────

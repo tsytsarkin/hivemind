@@ -79,6 +79,7 @@ def build_parser() -> argparse.ArgumentParser:
     schema.add_parser("apply").add_argument("pack_file")
 
     art = sub.add_parser("artifact").add_subparsers(dest="art_cmd", required=True)
+    aor = art.add_parser("orphans"); aor.add_argument("--older-than-hours", type=int, default=0)
     ap = art.add_parser("put"); ap.add_argument("file"); ap.add_argument("--media-type")
     ap.add_argument("--attach-to"); ap.add_argument("--role", default="attachment")
     ag = art.add_parser("get"); ag.add_argument("digest"); ag.add_argument("dest")
@@ -162,11 +163,11 @@ def main(argv=None) -> int:
             pack = json.loads(open(args.pack_file).read())
             _out(c.call("schema_apply", {"pack": pack}))
         elif args.cmd == "artifact" and args.art_cmd == "put":
-            res = c.artifacts.put(args.file, media_type=args.media_type)
-            if args.attach_to:
-                c.call("artifact_attach", {"digest": res["digest"], "version_id": args.attach_to,
-                                           "role": args.role, "filename": os.path.basename(args.file)})
+            res = c.artifacts.put(args.file, media_type=args.media_type,
+                                  attach_to=args.attach_to, role=args.role)
             _out(res)
+        elif args.cmd == "artifact" and args.art_cmd == "orphans":
+            _out(c.call("artifact_orphans", {"older_than_hours": args.older_than_hours}))
         elif args.cmd == "artifact" and args.art_cmd == "get":
             _out(c.artifacts.get(args.digest, args.dest))
         elif args.cmd == "tool" and args.tool_cmd == "publish":

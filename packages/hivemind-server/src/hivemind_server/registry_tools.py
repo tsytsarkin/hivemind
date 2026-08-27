@@ -66,6 +66,15 @@ def attach(mcp, project) -> None:
         return store.attach(agent, digest, version_id, role=role, filename=filename)
 
     @mcp.tool(annotations=RO,
+              description="Report uploads that were never attached to anything, by agent. "
+                          "Uploading is not recording — unattached bytes are invisible to other "
+                          "agents and are garbage-collected. Check this for your own agent id "
+                          "after uploading a batch.")
+    @_envelope
+    def artifact_orphans(older_than_hours: int = 0, limit: int = 20) -> dict:
+        return store.orphans(older_than_hours=older_than_hours, limit=limit)
+
+    @mcp.tool(annotations=RO,
               description="List the node/edge versions that reference an artifact digest.")
     @_envelope
     def artifact_refs(digest: str) -> dict:

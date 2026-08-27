@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
+import sqlite3
 import time
 from pathlib import Path
 from typing import BinaryIO, Iterable, Optional
@@ -164,34 +166,135 @@ class BlobStore:
                            (digest, reason))
         return {"digest": digest, "pinned": True}
 
+    # ── orphan accounting: the upstream cause of a bloated blob store ────────────────
+    def orphans(self, *, by_agent: bool = True, older_than_hours: int = 0,
+                limit: int = 20) -> dict:
+        """Blobs that were uploaded and never attached to anything.
+
+        Uploading is not recording: bytes with no blob_ref, no digest in props and no tool
+        pointing at them are invisible to every other agent and are what the GC eventually
+        reclaims. 94 GB (80% of the store) accumulated this way before anyone noticed, so this
+        makes the leak visible — and attributable — while it is small.
+        """
+        mentioned = self._digests_mentioned_in_graph()
+        cutoff = time.time() - older_than_hours * 3600
+        with self.db.read() as cur:
+            rows = cur.execute(
+                "SELECT b.digest, b.size, t.tx_time, t.agent_id FROM blob b "
+                "JOIN tx t ON t.tx_id = b.created_tx "
+                "WHERE b.digest NOT IN (SELECT digest FROM blob_ref)").fetchall()
+        per_agent: dict = {}
+        total_n = total_b = 0
+        for r in rows:
+            if r["digest"] in mentioned:
+                continue
+            if older_than_hours and _iso_epoch(r["tx_time"]) > cutoff:
+                continue
+            a = per_agent.setdefault(r["agent_id"], {"agent": r["agent_id"], "blobs": 0,
+                                                     "bytes": 0})
+            a["blobs"] += 1
+            a["bytes"] += r["size"] or 0
+            total_n += 1
+            total_b += r["size"] or 0
+        ranked = sorted(per_agent.values(), key=lambda d: d["bytes"], reverse=True)[:limit]
+        for a in ranked:
+            a["gb"] = round(a["bytes"] / 1073741824, 2)
+        return {"unattached_blobs": total_n, "bytes": total_b,
+                "gb": round(total_b / 1073741824, 2),
+                "by_agent": ranked if by_agent else [],
+                "hint": ("attach uploads with artifact_attach(digest, version_id, role) or record "
+                         "the digest in the node's props; unattached bytes are garbage-collected")}
+
     # ── garbage collection (mark-and-sweep with a grace window + pins) ──────────────
+    _DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
+
+    def _digests_mentioned_in_graph(self) -> set:
+        """Every digest something still points at, other than via blob_ref.
+
+        blob_ref is the intended way to attach an artifact, but nothing stops an agent recording
+        a digest inside props instead — and 282 blobs (1.8 GB) on the live graph were reachable
+        only that way. Those bytes are referenced in practice, so they are GC roots too; treating
+        only blob_ref as a root silently deletes live data. All versions are scanned, not just
+        heads, because superseded versions keep their evidence.
+        """
+        found: set = set()
+        with self.db.read() as cur:
+            for table in ("node_version", "edge_version"):
+                for (props,) in cur.execute(
+                        f"SELECT props FROM {table} WHERE props LIKE '%sha256:%'"):
+                    if props:
+                        found.update(self._DIGEST_RE.findall(props))
+            # published tools point at their bytes via tool_version.artifact_digest, which is a
+            # foreign key and NOT a blob_ref row. Missing this deleted a live tool artifact.
+            for (d,) in cur.execute("SELECT DISTINCT artifact_digest FROM tool_version "
+                                    "WHERE artifact_digest IS NOT NULL"):
+                found.add(d)
+        return found
+
     def gc(self, *, dry_run: bool = True) -> dict:
         cutoff = time.time() - self.grace_seconds
+        mentioned = self._digests_mentioned_in_graph()
         with self.db.read() as cur:
             rows = cur.execute(
                 "SELECT b.digest, t.tx_time FROM blob b JOIN tx t ON t.tx_id=b.created_tx "
                 "WHERE b.digest NOT IN (SELECT digest FROM blob_ref) "
                 "AND b.digest NOT IN (SELECT digest FROM blob_pin)"
             ).fetchall()
-        collected, kept_young = [], 0
+        collected, kept_young, kept_mentioned, kept_referenced = [], 0, 0, 0
         for r in rows:
+            if r["digest"] in mentioned:                  # referenced by digest in props → root
+                kept_mentioned += 1
+                continue
             created = _iso_epoch(r["tx_time"])
             if created > cutoff:                          # inside the grace window → keep
                 kept_young += 1
                 continue
             collected.append(r["digest"])
+        freed_planned = 0
+        if collected:
+            with self.db.read() as cur:
+                for i in range(0, len(collected), 900):
+                    chunk = collected[i:i + 900]
+                    freed_planned += cur.execute(
+                        f"SELECT COALESCE(SUM(size),0) FROM blob WHERE digest IN "
+                        f"({','.join('?' * len(chunk))})", chunk).fetchone()[0]
+        deleted = 0
         if not dry_run:
             for digest in collected:
-                p = self.path_for(digest)
-                if not self.refs(digest):                 # re-check under no lock
-                    with _suppress():
-                        if p.exists():
-                            os.chmod(p, 0o644)
-                            os.unlink(p)
+                if self.refs(digest) or digest in mentioned:   # re-check without holding a lock
+                    continue
+                # Delete the row FIRST. If anything still references the blob, the foreign key
+                # rejects it and the bytes stay on disk; unlinking first would orphan a live file
+                # (it did: one tool artifact, recovered from backup).
+                try:
                     with self.db.write("gc", "blob_gc") as tx:
                         tx.cur.execute("DELETE FROM blob WHERE digest=?", (digest,))
+                except sqlite3.IntegrityError:
+                    kept_referenced += 1
+                    continue
+                p = self.path_for(digest)
+                with _suppress():
+                    if p.exists():
+                        os.chmod(p, 0o644)
+                        os.unlink(p)
+                deleted += 1
+        # stale upload temporaries: interrupted PUTs leave files in blobs/tmp forever
+        stale_tmp = 0
+        if self.tmp.exists():
+            for f in self.tmp.iterdir():
+                try:
+                    if f.is_file() and f.stat().st_mtime < cutoff:
+                        stale_tmp += 1
+                        if not dry_run:
+                            f.unlink()
+                except OSError:
+                    pass
+        freed = freed_planned
         return {"unreferenced": len(collected), "kept_within_grace": kept_young,
-                "deleted": 0 if dry_run else len(collected), "dry_run": dry_run}
+                "kept_referenced_in_props": kept_mentioned,
+                "kept_fk_referenced": kept_referenced, "stale_tmp_files": stale_tmp,
+                "bytes": freed, "gb": round(freed / 1073741824, 2),
+                "deleted": 0 if dry_run else deleted, "dry_run": dry_run}
 
 
 # ── small fs/util helpers ────────────────────────────────────────────────────────────
