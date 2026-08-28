@@ -119,6 +119,13 @@ Tunables: `HIVEMIND_BACKUP_DIR` (default `/mnt/fuzz/hivemind-backup`), `HIVEMIND
 Measured on the live project (1.7 GB database, 9,475 blobs / 9.7 GB): **23 s** for the first run,
 **17 s** incrementally with zero blobs transferred. Restore procedure: [restore.md](restore.md).
 
+## Restarting
+
+Use `deploy/restart.sh`. Killing and immediately relaunching loses the bind race: the new
+instance exits with *address already in use* while a wrapper process lingers, so `pgrep` reports
+"running" while nothing is listening. The script kills by pattern **and** by port, waits for the
+port to free, then verifies the server is actually serving.
+
 ## Maintenance (daily, automatic)
 
 `deploy/maintenance.sh` runs at 03:45, **after** the 03:30 backup — so anything it collects is

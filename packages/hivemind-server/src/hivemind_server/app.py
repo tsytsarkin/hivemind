@@ -46,10 +46,14 @@ class ProjectAuthMiddleware:
             return await self.app(scope, receive, send)
         parts = path.split("/", 3)  # ['', 'p', '<name>', 'rest...']
         name = parts[2] if len(parts) > 2 else ""
+        tail = parts[3] if len(parts) > 3 else ""
+        # A health probe and the endpoint index must work without a token, or a healthy server
+        # looks dead to anyone holding only the project base URL. They expose no project data.
+        open_path = tail in ("", "healthz")
         project = self.registry.get(name)
         if project is None:
             return await self._json(send, 404, {"error": f"unknown project {name!r}"})
-        if self.cfg.require_auth:
+        if self.cfg.require_auth and not open_path:
             headers = {k.decode().lower(): v.decode() for k, v in scope.get("headers", [])}
             token = bearer_from_headers(headers)
             access = project.tokens.verify(token) if token else None
@@ -96,6 +100,18 @@ def build_app(cfg: Optional[Config] = None) -> Starlette:
     async def list_projects(_req: Request) -> Response:
         return JSONResponse({"projects": [p.name for p in registry.all()]})
 
+    async def index(req: Request) -> Response:
+        root = str(req.base_url).rstrip("/")
+        return JSONResponse({
+            "service": "hivemind",
+            "health": f"{root}/healthz",
+            "projects": [{"name": p.name, "base": f"{root}/p/{p.name}",
+                          "mcp": f"{root}/p/{p.name}/mcp",
+                          "health": f"{root}/p/{p.name}/healthz"}
+                         for p in registry.all()],
+            "note": "point clients at a PROJECT base URL, not this root",
+        })
+
     @contextlib.asynccontextmanager
     async def lifespan(_app):
         async with contextlib.AsyncExitStack() as stack:
@@ -103,7 +119,8 @@ def build_app(cfg: Optional[Config] = None) -> Starlette:
                 await stack.enter_async_context(mcp.session_manager.run())
             yield
 
-    routes = [Route("/healthz", healthz), Route("/projects", list_projects), *mounts]
+    routes = [Route("/", index), Route("/healthz", healthz),
+              Route("/projects", list_projects), *mounts]
     app = Starlette(routes=routes, lifespan=lifespan)
     app.add_middleware(ProjectAuthMiddleware, registry=registry, cfg=cfg)
     app.state.registry = registry

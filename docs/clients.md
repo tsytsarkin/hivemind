@@ -14,8 +14,12 @@ HIVEMIND_PORT=8787
 ```
 (That's what `deploy/hivemind.env` does.) Verify from another machine:
 ```sh
-curl http://<server-ip>:8787/healthz     # -> {"ok":true,"projects":["default"]}
+curl http://<server-ip>:8787/healthz              # server root
+curl http://<server-ip>:8787/p/default/healthz    # the project base your clients use
+curl http://<server-ip>:8787/p/default/           # index of every endpoint for that project
 ```
+Both health paths and both indexes are **open** (no token) so a probe works with only a URL;
+everything else returns `401` without a bearer token.
 **Being on the LAN is not authorization** — every `/p/<project>` request still needs a bearer
 token; unauthenticated requests get `401`. `HIVEMIND_ALLOWED_HOSTS=*` disables the DNS-rebinding
 host check (fine on a trusted private network); set explicit hostnames to enable it.

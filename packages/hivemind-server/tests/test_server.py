@@ -173,3 +173,25 @@ async def test_every_expected_tool_is_registered(env):
         names = {t["name"] for t in _parse(r)["result"]["tools"]}
         missing = EXPECTED_TOOLS - names
         assert not missing, f"tools missing from the MCP surface: {sorted(missing)}"
+
+
+@pytest.mark.anyio
+async def test_health_and_index_work_on_both_bases_without_a_token(env):
+    """Clients hold the PROJECT base URL, so <base>/healthz must answer — it used to 404 and make
+    a healthy server look dead. Data endpoints stay authenticated."""
+    application, proj, tok = env
+    transport = httpx.ASGITransport(app=application)
+    async with Lifespan(application), httpx.AsyncClient(transport=transport,
+                                                        base_url="http://t", timeout=30) as c:
+        for path in ("/healthz", f"/p/{proj.name}/healthz"):
+            r = await c.get(path)
+            assert r.status_code == 200, f"{path} -> {r.status_code}"
+            assert r.json()["ok"] is True
+        for path in ("/", f"/p/{proj.name}/"):
+            r = await c.get(path)
+            assert r.status_code == 200, f"{path} -> {r.status_code}"
+            assert "mcp" in r.text
+        # data endpoints still require a token
+        assert (await c.get(f"/p/{proj.name}/skills")).status_code == 401
+        ok = await c.get(f"/p/{proj.name}/skills", headers={"Authorization": f"Bearer {tok}"})
+        assert ok.status_code == 200

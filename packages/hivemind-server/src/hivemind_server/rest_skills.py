@@ -46,6 +46,41 @@ def _links_for(db, skill_id: str) -> list:
     return [dict(r) for r in rows]
 
 
+def register_index_routes(mcp, project) -> None:
+    """Health and an endpoint index UNDER the project prefix.
+
+    Clients are configured with the project base URL (…/p/<project>), so `<base>/healthz` is the
+    natural probe — it used to 404 and make a healthy server look dead. Both this and the
+    server-root /healthz now answer.
+    """
+    db = project.db
+
+    @mcp.custom_route("/healthz", methods=["GET"])
+    async def project_health(_req: Request) -> Response:
+        return JSONResponse({"ok": True, "project": project.name})
+
+    @mcp.custom_route("/", methods=["GET"])
+    async def project_index(req: Request) -> Response:
+        base = str(req.url).rstrip("/")
+        return JSONResponse({
+            "project": project.name,
+            "mcp": f"{base}/mcp",
+            "endpoints": {
+                "health": f"{base}/healthz",
+                "guide": f"{base}/guide",
+                "guide_section": f"{base}/guide/{{section}}",
+                "skills": f"{base}/skills?topic=&limit=&offset=",
+                "skill": f"{base}/skills/{{id}}?constraint=",
+                "tools": f"{base}/tools?topic=&limit=&offset=",
+                "tool": f"{base}/tools/{{id}}?constraint=",
+                "blob": f"{base}/blobs/{{algo}}/{{hex}}",
+                "blob_upload": f"PUT {base}/blobs/{{algo}}/{{hex}}?attach_to=&role=",
+                "blob_batch": f"POST {base}/blobs/batch",
+            },
+            "note": "all endpoints except health require Authorization: Bearer <token>",
+        })
+
+
 def register_tool_routes(mcp, project) -> None:
     """GET /tools[?topic=] and GET /tools/{id}[?constraint=] — browse the tool registry."""
     db = project.db

@@ -3,7 +3,7 @@
 ## MCP tools (over `/p/<project>/mcp`, 2026-07-28 streamable HTTP, Bearer auth)
 Graph: `graph_search`, `graph_get`, `graph_subjects`, `graph_neighbors`, `graph_upsert`,
 `graph_link`, `graph_bulk_load`. Schema: `schema_get`, `schema_propose`, `schema_promote`,
-`schema_apply` (returns `{created, unchanged}`; idempotent). Artifacts: `artifact_ref`, `artifact_attach`, `artifact_refs`, `artifact_orphans`. Tools:
+`schema_apply` (returns `{created, unchanged}`; idempotent), `schema_changes`. Artifacts: `artifact_ref`, `artifact_attach`, `artifact_refs`, `artifact_orphans`. Tools:
 `tool_catalog`, `tool_publish`, `tool_resolve`, `tool_search`, `tool_link`, `tool_unlink`, `tool_autolink`, `tool_suggest_links`, `tool_yank`. Mini-skills: `skill_catalog`, `skill_search`, `skill_get`, `skill_publish`, `skill_link`, `skill_unlink`, `skill_autolink`, `skill_suggest_links`, `skill_yank`. Traps:
 `trap_search`, `trap_get`, `trap_record`, `trap_status`. Guide: `guide_get`, `guide_propose`.
 Read tools are annotated `readOnlyHint`; all return `{ok, …}` or `{ok:false, error, error_kind}`.
@@ -13,14 +13,32 @@ Two reads carry extra, unrequested context so recorded dead-ends can't be missed
 `graph_search` adds `related_traps` + a `trap_warning` when the query matches one; `graph_get` also returns linked `skills` and `tools`. See
 [skills-and-traps.md](skills-and-traps.md).
 
-## REST (same prefix, same Bearer auth)
-- `PUT/GET/HEAD /blobs/{algo}/{hex}` (streaming, Range, immutable); PUT accepts
-  `?attach_to=<version_id>&role=` to upload and attach in one request ·
-  `POST /blobs/batch` (LFS).
-- `GET /guide` · `GET /guide/{section}` (ETag = guide_version).
-- `GET /skills[?topic=&limit=&offset=]` · `GET /skills/{id}[?constraint=]` — skill catalog.
-- `GET /tools[?topic=&limit=&offset=]` · `GET /tools/{id}[?constraint=]` — tool catalog.
-- `GET /healthz`, `GET /projects` (server root, /healthz open).
+## REST
+
+Clients are configured with a **project base URL** — `http://<host>:8787/p/<project>` — and every
+path below is relative to it. `GET /` on either the server root or a project base returns an index
+of these endpoints, so a wrong base URL tells you so instead of 404ing.
+
+**Open (no token)** — so a probe works with only the base URL:
+
+| Path | Returns |
+|---|---|
+| `GET /healthz` (server root) | `{"ok":true,"projects":[…]}` |
+| `GET /p/<project>/healthz` | `{"ok":true,"project":"<name>"}` |
+| `GET /` and `GET /p/<project>/` | endpoint index |
+| `GET /projects` (server root) | project list |
+
+**Authenticated** (`Authorization: Bearer <token>`; anything else returns `401`):
+
+| Path | Notes |
+|---|---|
+| `POST /p/<project>/mcp` | the MCP endpoint (streamable HTTP, `2026-07-28`) |
+| `GET /guide` · `GET /guide/{section}` | ETag = `guide_version` |
+| `GET /skills[?topic=&limit=&offset=]` · `GET /skills/{id}[?constraint=]` | skill catalog |
+| `GET /tools[?topic=&limit=&offset=]` · `GET /tools/{id}[?constraint=]` | tool catalog |
+| `PUT /blobs/{algo}/{hex}[?attach_to=<version_id>&role=&filename=]` | streaming upload; **`attach_to` attaches in the same request** — an unattached upload is invisible and is garbage-collected |
+| `GET`/`HEAD /blobs/{algo}/{hex}` | Range-capable, `Cache-Control: immutable` |
+| `POST /blobs/batch` | Git-LFS style: `{"objects":[{"oid","size"}]}` → which are missing |
 
 ## Clients
 - `hivemind` CLI (`node/edge/search/neighbors/schema/artifact/tool/skill/trap/guide`; incl.
