@@ -68,3 +68,60 @@ def test_tool_publish_immutable_and_resolve(db):
     assert registry.resolve(db, "org.x/unpack", constraint="^1.0")["version"] == "1.0.0"
     # search finds it
     assert any(t["id"] == "org.x/unpack" for t in registry.search(db)["tools"])
+
+
+def test_search_cursor_pages_do_not_repeat_or_skip(db):
+    """graph_search accepted a cursor and silently ignored it: every page returned page 1, so an
+    agent paginating looped forever. Pages must partition the result set exactly."""
+    ids = [graph.upsert_node(db, "a", "component",
+                             {"title": f"paginated widget {i}", "note": "walkable corpus"}
+                             )["node_id"] for i in range(12)]
+
+    seen, cursor, pages = [], 0, 0
+    while True:
+        page = search.search(db, "paginated", limit=5, cursor=cursor)
+        assert page["cursor"] == cursor
+        seen.extend(r["node_id"] for r in page["results"])
+        pages += 1
+        if not page["has_more"]:
+            assert page["next_cursor"] is None
+            break
+        assert page["next_cursor"] == cursor + len(page["results"])
+        cursor = page["next_cursor"]
+        assert pages < 10, "pagination did not terminate"
+
+    assert len(seen) == len(set(seen)), "a node appeared on two pages"
+    assert set(seen) == set(ids), "pagination lost rows"
+    assert pages == 3                                    # 12 rows at 5 per page
+
+    # page 2 must differ from page 1 (the exact symptom reported)
+    p1 = search.search(db, "paginated", limit=5, cursor=0)["results"]
+    p2 = search.search(db, "paginated", limit=5, cursor=5)["results"]
+    assert [r["node_id"] for r in p1] != [r["node_id"] for r in p2]
+
+    # cursor survives the graph_search entry point too, not just the search module
+    g1 = graph.search_nodes(db, "paginated", limit=5, cursor=0)
+    g2 = graph.search_nodes(db, "paginated", limit=5, cursor=5)
+    assert [r["node_id"] for r in g1["results"]] != [r["node_id"] for r in g2["results"]]
+
+    # a cursor past the end is empty, not an error or a wrapped-around page
+    tail = search.search(db, "paginated", limit=5, cursor=99)
+    assert tail["results"] == [] and tail["has_more"] is False
+
+
+def test_search_cursor_respects_type_filter(db):
+    """The cursor indexes the FILTERED list, so paging with a type filter stays consistent."""
+    with db.write("t", "seed finding type") as tx:
+        schemas.define_type(tx.cur, tx, "node", "finding", {"type": "object"}, status="active")
+    for i in range(6):
+        graph.upsert_node(db, "a", "component", {"title": f"mixed corpus component {i}"})
+        graph.upsert_node(db, "a", "finding", {"title": f"mixed corpus finding {i}"})
+    seen, cursor = [], 0
+    while True:
+        p = search.search(db, "mixed corpus", types=["finding"], limit=2, cursor=cursor)
+        assert all(r["node_type"] == "finding" for r in p["results"])
+        seen.extend(r["node_id"] for r in p["results"])
+        if not p["has_more"]:
+            break
+        cursor = p["next_cursor"]
+    assert len(seen) == len(set(seen)) == 6

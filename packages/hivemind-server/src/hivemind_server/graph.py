@@ -448,7 +448,7 @@ def search_nodes(db: Database, query: str, *, types: Optional[list[str]] = None,
                  limit: int = 25, cursor: int = 0) -> dict:
     """Search current node versions via FTS5 (unicode61 + trigram, RRF-fused)."""
     from . import search as _search
-    return _search.search(db, query, types=types, limit=limit)
+    return _search.search(db, query, types=types, limit=limit, cursor=cursor)
     limit = max(1, min(limit, 200))
     with db.read() as cur:
         params: list = []

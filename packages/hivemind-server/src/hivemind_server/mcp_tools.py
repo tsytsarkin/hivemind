@@ -60,7 +60,7 @@ def build_mcp(project: Project, *, instructions: str = INSTRUCTIONS) -> MCPServe
     mcp = MCPServer(name=f"hivemind:{project.name}", instructions=instructions, version="0.1.0")
 
     # ── graph reads ──────────────────────────────────────────────────────────────
-    @mcp.tool(annotations=RO, description="Search nodes by text; flags disputed nodes. Paginated.")
+    @mcp.tool(annotations=RO, description="Search nodes by text; flags disputed nodes. Paginated: pass the `next_cursor` from the previous reply as `cursor` for the next page; `has_more` tells you when to stop.")
     @_envelope
     def graph_search(query: str = "", types: Optional[list[str]] = None,
                      limit: int = 25, cursor: int = 0) -> dict:

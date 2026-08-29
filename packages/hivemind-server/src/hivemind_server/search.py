@@ -53,10 +53,17 @@ def _fts_query(q: str) -> str:
 
 
 def search(db: Database, query: str, *, types: Optional[List[str]] = None,
-           limit: int = 25) -> dict:
+           limit: int = 25, cursor: int = 0) -> dict:
     """Hybrid FTS: BM25 over prose + trigram over symbols, fused by RRF. Falls back to listing
-    recent nodes when query is empty."""
+    recent nodes when query is empty.
+
+    `cursor` is an offset into the FILTERED result list (results that survive type/redirect/head
+    filtering), so paging never repeats or skips a row. The candidate pool is widened to cover
+    cursor+limit, because a fixed pool would silently truncate deep pages.
+    """
     limit = max(1, min(limit, 200))
+    cursor = max(0, int(cursor or 0))
+    pool = min(max(200, (cursor + limit) * 3), 2000)
     match = _fts_query(query)
     with db.read() as cur:
         from .graph import node_flags, _current_node_version, _node_row  # local import
@@ -65,14 +72,18 @@ def search(db: Database, query: str, *, types: Optional[List[str]] = None,
             for tbl in ("node_fts", "sym_fts"):
                 rows = cur.execute(
                     f"SELECT node_id, rank FROM {tbl} WHERE {tbl} MATCH ? "
-                    f"ORDER BY rank LIMIT 200", (match,)).fetchall()
+                    f"ORDER BY rank LIMIT ?", (match, pool)).fetchall()
                 for i, r in enumerate(rows):
                     ranks[r["node_id"]] = ranks.get(r["node_id"], 0.0) + 1.0 / (_RRF_K + i)
-            ordered = sorted(ranks, key=lambda n: ranks[n], reverse=True)
+            # tie-break on node_id so the order is total and stable across calls — otherwise
+            # equal-scoring rows could swap between pages and be shown twice or skipped
+            ordered = sorted(ranks, key=lambda n: (-ranks[n], n))
         else:
             ordered = [r["node_id"] for r in cur.execute(
-                "SELECT node_id FROM node ORDER BY created_tx DESC LIMIT 200")]
+                "SELECT node_id FROM node ORDER BY created_tx DESC LIMIT ?", (pool,))]
         results = []
+        skipped = 0
+        has_more = False
         for nid in ordered:
             nrow = _node_row(cur, nid)
             if nrow is None or nrow["redirect_to"] is not None:
@@ -82,6 +93,12 @@ def search(db: Database, query: str, *, types: Optional[List[str]] = None,
             head = _current_node_version(cur, nid)
             if head is None:
                 continue
+            if skipped < cursor:          # advance to the requested page, counting only
+                skipped += 1               # rows that actually pass the filters
+                continue
+            if len(results) >= limit:      # one extra qualifying row proves there is a next page
+                has_more = True
+                break
             props = json.loads(head["props"])
             results.append({"node_id": nid, "node_type": nrow["node_type"],
                             "subject_key": nrow["subject_key"],
@@ -90,9 +107,10 @@ def search(db: Database, query: str, *, types: Optional[List[str]] = None,
                             "score": round(ranks.get(nid, 0.0), 5),
                             "snippet": json.dumps(props)[:200],
                             "flags": node_flags(cur, nid)})
-            if len(results) >= limit:
-                break
     return {"results": results, "count": len(results),
+            "cursor": cursor,
+            "next_cursor": (cursor + len(results)) if has_more else None,
+            "has_more": has_more,
             "backend": "fts5+rrf" if match else "recent"}
 
 
