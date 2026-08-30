@@ -65,24 +65,36 @@ def search(db: Database, query: str, *, types: Optional[List[str]] = None,
     cursor = max(0, int(cursor or 0))
     pool = min(max(200, (cursor + limit) * 3), 2000)
     match = _fts_query(query)
+    type_sql, type_args = "", []
+    if types:
+        type_sql = " AND n.node_type IN (%s)" % ",".join("?" * len(types))
+        type_args = list(types)
     with db.read() as cur:
         from .graph import node_flags, _current_node_version, _node_row  # local import
         ranks: dict = {}
         if match:
             for tbl in ("node_fts", "sym_fts"):
+                # the type filter belongs in SQL: applied afterwards it silently drops matches
+                # that fell outside the candidate pool, so a rare type looked empty
                 rows = cur.execute(
-                    f"SELECT node_id, rank FROM {tbl} WHERE {tbl} MATCH ? "
-                    f"ORDER BY rank LIMIT ?", (match, pool)).fetchall()
+                    f"SELECT f.node_id AS node_id, f.rank AS rank FROM {tbl} f "
+                    f"JOIN node n ON n.node_id = f.node_id "
+                    f"WHERE {tbl} MATCH ? AND n.redirect_to IS NULL{type_sql} "
+                    f"ORDER BY f.rank LIMIT ?", (match, *type_args, pool)).fetchall()
                 for i, r in enumerate(rows):
                     ranks[r["node_id"]] = ranks.get(r["node_id"], 0.0) + 1.0 / (_RRF_K + i)
             # tie-break on node_id so the order is total and stable across calls — otherwise
             # equal-scoring rows could swap between pages and be shown twice or skipped
             ordered = sorted(ranks, key=lambda n: (-ranks[n], n))
         else:
+            # no query = browse. Page the node table directly so listing a type works even when
+            # none of its nodes are recent, and so the total is the real one.
             ordered = [r["node_id"] for r in cur.execute(
-                "SELECT node_id FROM node ORDER BY created_tx DESC LIMIT ?", (pool,))]
+                f"SELECT n.node_id FROM node n WHERE n.redirect_to IS NULL{type_sql} "
+                f"ORDER BY n.created_tx DESC, n.node_id LIMIT ? OFFSET ?",
+                (*type_args, limit + 1, cursor))]
         results = []
-        skipped = 0
+        skipped = 0 if query else cursor       # browse paged in SQL; search pages in the loop
         has_more = False
         for nid in ordered:
             nrow = _node_row(cur, nid)
@@ -107,7 +119,14 @@ def search(db: Database, query: str, *, types: Optional[List[str]] = None,
                             "score": round(ranks.get(nid, 0.0), 5),
                             "snippet": json.dumps(props)[:200],
                             "flags": node_flags(cur, nid)})
+    total = None
+    if types or not query:
+        with db.read() as cur:
+            total = cur.execute(
+                f"SELECT COUNT(*) c FROM node n WHERE n.redirect_to IS NULL{type_sql}",
+                type_args).fetchone()["c"]
     return {"results": results, "count": len(results),
+            **({"total_of_type": total} if total is not None else {}),
             "cursor": cursor,
             "next_cursor": (cursor + len(results)) if has_more else None,
             "has_more": has_more,

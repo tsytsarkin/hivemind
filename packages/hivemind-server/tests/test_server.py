@@ -147,7 +147,7 @@ def _call(r):
 
 
 EXPECTED_TOOLS = {
-    "graph_search", "graph_get", "graph_subjects", "graph_neighbors", "graph_upsert",
+    "graph_search", "graph_get", "graph_subjects", "graph_types", "graph_neighbors", "graph_upsert",
     "graph_link", "graph_bulk_load", "schema_get", "schema_propose", "schema_changes",
     "schema_promote", "schema_apply", "guide_get", "guide_propose",
     "skill_search", "skill_get", "skill_publish", "skill_yank",

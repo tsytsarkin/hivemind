@@ -125,3 +125,37 @@ def test_search_cursor_respects_type_filter(db):
             break
         cursor = p["next_cursor"]
     assert len(seen) == len(set(seen)) == 6
+
+
+def test_browse_by_type_finds_nodes_that_are_not_recent(db):
+    """Type filtering used to be a post-filter over a pool of RECENT nodes, so a type with no
+    recent nodes looked empty even when it had hundreds."""
+    with db.write("t", "seed") as tx:
+        schemas.define_type(tx.cur, tx, "node", "report", {"type": "object"}, status="active")
+    old = [graph.upsert_node(db, "a", "report", {"title": f"report {i}"})["node_id"]
+           for i in range(4)]
+    # bury them under newer nodes of another type
+    for i in range(300):
+        graph.upsert_node(db, "a", "component", {"title": f"noise {i}"})
+
+    listed = search.search(db, "", types=["report"], limit=10)
+    assert listed["count"] == 4, "browsing a type must not depend on it being recent"
+    assert set(r["node_id"] for r in listed["results"]) == set(old)
+    assert listed["total_of_type"] == 4
+    assert all(r["node_type"] == "report" for r in listed["results"])
+
+    # and it paginates
+    p1 = search.search(db, "", types=["report"], limit=2, cursor=0)
+    p2 = search.search(db, "", types=["report"], limit=2, cursor=p1["next_cursor"])
+    assert p1["has_more"] and not p2["has_more"]
+    assert set(r["node_id"] for r in p1["results"] + p2["results"]) == set(old)
+
+    # a query restricted to a type is filtered in SQL, so deep matches are not lost
+    q = search.search(db, "report", types=["report"], limit=10)
+    assert q["count"] == 4 and all(r["node_type"] == "report" for r in q["results"])
+
+    # the facet reports what exists
+    facet = graph.node_types(db)
+    counts = {t["type"]: t["nodes"] for t in facet["types"]}
+    assert counts["report"] == 4 and counts["component"] >= 300
+    assert facet["total_nodes"] == sum(counts.values())

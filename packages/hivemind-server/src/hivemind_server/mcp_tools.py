@@ -60,7 +60,7 @@ def build_mcp(project: Project, *, instructions: str = INSTRUCTIONS) -> MCPServe
     mcp = MCPServer(name=f"hivemind:{project.name}", instructions=instructions, version="0.1.0")
 
     # ── graph reads ──────────────────────────────────────────────────────────────
-    @mcp.tool(annotations=RO, description="Search nodes by text; flags disputed nodes. Paginated: pass the `next_cursor` from the previous reply as `cursor` for the next page; `has_more` tells you when to stop.")
+    @mcp.tool(annotations=RO, description="Search nodes by text and/or BY TYPE. Pass types=[...] to restrict, and an EMPTY query with types to browse every node of that type (returns total_of_type). graph_types() lists the types that have data. Paginated: pass the next_cursor from a reply back as cursor; has_more says when to stop.")
     @_envelope
     def graph_search(query: str = "", types: Optional[list[str]] = None,
                      limit: int = 25, cursor: int = 0) -> dict:
@@ -72,6 +72,13 @@ def build_mcp(project: Project, *, instructions: str = INSTRUCTIONS) -> MCPServe
                 out["trap_warning"] = ("Known dead-ends match this query — read them before "
                                        "spending time; see trap_get(trap_id).")
         return out
+
+    @mcp.tool(annotations=RO,
+              description="Which node types actually hold data, with counts. Use this to pick a "
+                          "type to browse; schema_get says what is DEFINED, this says what EXISTS.")
+    @_envelope
+    def graph_types(subject_key: Optional[str] = None) -> dict:
+        return graph.node_types(db, subject_key=subject_key)
 
     @mcp.tool(annotations=RO,
               description="Fetch a node by node_id OR (subject_key+subject_version). Returns the node plus everything recorded about it: the mini-skills associated with it (with descriptions), the tools built for it, and any traps. "

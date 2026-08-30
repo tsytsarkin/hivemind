@@ -9,7 +9,7 @@ description: >-
   Hivemind REPLACES local memory: read it before any work and persist all work into it. Domain-agnostic — call schema_get and guide_get first to learn this project's vocabulary.
 allowed-tools: Bash(${CLAUDE_SKILL_DIR}/scripts/guide.sh *) Read
 metadata:
-  version: "0.6.0"
+  version: "0.7.0"
 ---
 
 # Hivemind
@@ -27,7 +27,7 @@ another machine. Treat the graph as the only durable store.
 
 **Before doing any work — every time, not just when you feel stuck:**
 
-1. `graph_search` / `graph_get` the thing you are about to work on. `graph_get` hands you, in one
+1. `graph_search` / `graph_get` the thing you are about to work on — and `graph_types()` then `graph_search(query="", types=[…])` to browse everything of a kind (all reports, all findings) rather than guessing search words. `graph_get` hands you, in one
    call, the node's current state **plus the mini-skills associated with it (with descriptions),
    the tools built for it, and the traps recorded against it.**
 2. `skill_search` / `skill_catalog` for the procedure, `tool_search` / `tool_catalog` for an
@@ -121,18 +121,47 @@ Always call `schema_get` + `guide_get` before writing, so you use the right type
 
 ## What you can do (MCP tools)
 
-- **Record / update knowledge:** `graph_upsert(type, props, …)`. Supersede the same item by
-  passing its `node_id`; version the *described thing* (e.g. an OS build) with
-  `subject_key`+`subject_version`. Use `expected_head` for safe concurrent edits (409 = retry).
-- **Relate:** `graph_link(edge_type, src, dst, props)`. For dispute/`assertive` edge types set
-  `status:"open"|"resolved"`; nodes with an open assertive edge are flagged `disputed`.
-- **Find / read:** `graph_search(query)`, `graph_get(node_id, history=true)`,
-  `graph_subjects(subject_key)`, `graph_neighbors(node_id, edge_types=[…], depth=1..4)`.
-- **Extend the schema (additively):** `schema_propose(kind, name, json_schema, traits=…)` — reuse
-  an existing type before inventing a near-duplicate; a human promotes proposals.
-- **Artifacts:** attach an uploaded blob with `artifact_attach(digest, version_id, role=…)`; look
-  up with `artifact_ref(digest)`. Upload the bytes with the CLI (below).
-- **Tools:** `tool_search(query)` to discover, `tool_resolve(id, constraint)` for the run command.
+Complete surface. Read tools are safe to call freely; write tools record provenance under `agent`.
+
+**Graph — read**
+
+| Tool | Use |
+|---|---|
+| `graph_types()` | which node types actually hold data, with counts — pick one to browse |
+| `graph_search(query, types=[…], limit, cursor)` | text search, **and/or by type**. An EMPTY query with `types` browses every node of that type (`total_of_type`). Paginate: pass the reply's `next_cursor` back as `cursor` until `has_more` is false |
+| `graph_get(node_id \| subject_key+subject_version, history, as_of)` | the node **plus its mini-skills (described), tools and traps** |
+| `graph_subjects(subject_key, as_of_subject)` | every version-cell of one thing |
+| `graph_neighbors(node_id, edge_types, depth≤4, direction)` | traversal |
+
+**Graph — write**
+
+| Tool | Use |
+|---|---|
+| `graph_upsert(type, props, …)` | create, or supersede by passing `node_id` / `subject_key`+`subject_version`. Pass `expected_head` for safe concurrent edits |
+| `graph_link(edge_type, src, dst, props)` | typed edge; `status:"open"` on an assertive type flags a dispute |
+| `graph_bulk_load(edge_type, source_tag, edges)` | replace a whole imported edge set (call graphs etc.) |
+
+**Schema** — `schema_get()` · `schema_changes(since_cursor)` (what changed, who, why) ·
+`schema_propose(kind, name, json_schema, traits)` (additive only) · `schema_promote` ·
+`schema_apply(pack)` (operator).
+
+**Mini-skills** — `skill_catalog(topic)` · `skill_search(query, mode=hybrid|lexical|semantic)` ·
+`skill_get(id, constraint)` · `skill_publish(id, version, title, description, body, verified_how)`
+· `skill_yank` · `skill_link` / `skill_unlink` / `skill_autolink` / `skill_suggest_links`
+(publishing auto-links to relevant nodes; correct a wrong one with `skill_unlink`).
+
+**Tools** — `tool_catalog(topic)` · `tool_search(query, os, arch, mode)` ·
+`tool_resolve(id, constraint)` (returns a ready-to-run command) · `tool_publish(manifest,
+artifact_digest)` · `tool_yank` · `tool_link` / `tool_unlink` / `tool_autolink` /
+`tool_suggest_links`.
+
+**Traps** — `trap_search(query, node_id)` · `trap_get(trap_id)` ·
+`trap_record(title, what_failed, symptom, …)` · `trap_status(trap_id, retired|disputed, reason)`.
+
+**Artifacts** — `artifact_ref(digest)` · `artifact_attach(digest, version_id, role)` ·
+`artifact_refs(digest)` · `artifact_orphans()` (uploads nobody attached — check yours).
+
+**Guide** — `guide_get(section)` · `guide_propose(section, body, why)` (human-merged).
 
 ## The `hivemind` CLI (bulk + large files)
 

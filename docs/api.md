@@ -1,12 +1,12 @@
 # API surface
 
 ## MCP tools (over `/p/<project>/mcp`, 2026-07-28 streamable HTTP, Bearer auth)
-Graph: `graph_search`, `graph_get`, `graph_subjects`, `graph_neighbors`, `graph_upsert`,
+Graph: `graph_types`, `graph_search`, `graph_get`, `graph_subjects`, `graph_neighbors`, `graph_upsert`,
 `graph_link`, `graph_bulk_load`. Schema: `schema_get`, `schema_propose`, `schema_promote`,
 `schema_apply` (returns `{created, unchanged}`; idempotent), `schema_changes`. Artifacts: `artifact_ref`, `artifact_attach`, `artifact_refs`, `artifact_orphans`. Tools:
 `tool_catalog`, `tool_publish`, `tool_resolve`, `tool_search`, `tool_link`, `tool_unlink`, `tool_autolink`, `tool_suggest_links`, `tool_yank`. Mini-skills: `skill_catalog`, `skill_search`, `skill_get`, `skill_publish`, `skill_link`, `skill_unlink`, `skill_autolink`, `skill_suggest_links`, `skill_yank`. Traps:
 `trap_search`, `trap_get`, `trap_record`, `trap_status`. Guide: `guide_get`, `guide_propose`.
-`graph_search` paginates: pass the `next_cursor` from a reply back as `cursor`, and stop when `has_more` is false. Read tools are annotated `readOnlyHint`; all return `{ok, …}` or `{ok:false, error, error_kind}`.
+`graph_search` searches by text and/or by type: pass `types=[…]`, and an empty query with `types` browses every node of that type (returns `total_of_type`); `graph_types()` lists the types that hold data. It paginates: pass the `next_cursor` from a reply back as `cursor`, and stop when `has_more` is false. Read tools are annotated `readOnlyHint`; all return `{ok, …}` or `{ok:false, error, error_kind}`.
 
 Two reads carry extra, unrequested context so recorded dead-ends can't be missed:
 `graph_get` includes a `traps` list for the node (and traps scoped to its subject), and

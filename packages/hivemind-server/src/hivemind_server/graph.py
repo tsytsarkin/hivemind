@@ -480,3 +480,24 @@ def search_nodes(db: Database, query: str, *, types: Optional[list[str]] = None,
             })
     return {"results": results, "next_cursor": (cursor + limit) if has_more else None,
             "has_more": has_more}
+
+
+def node_types(db: Database, *, subject_key: Optional[str] = None) -> dict:
+    """Node types actually present, with counts — the discovery half of searching by type.
+
+    schema_get says which types are DEFINED; this says which have data and how much, so an agent
+    can pick a type to browse instead of guessing. Optionally scoped to one subject_key.
+    """
+    where, args = "n.redirect_to IS NULL", []
+    if subject_key:
+        where += " AND n.subject_key = ?"
+        args.append(subject_key)
+    with db.read() as cur:
+        rows = cur.execute(
+            f"SELECT n.node_type AS t, COUNT(*) AS c FROM node n WHERE {where} "
+            f"GROUP BY n.node_type ORDER BY c DESC, t", args).fetchall()
+        total = sum(r["c"] for r in rows)
+    return {"types": [{"type": r["t"], "nodes": r["c"]} for r in rows],
+            "distinct_types": len(rows), "total_nodes": total,
+            **({"subject_key": subject_key} if subject_key else {}),
+            "hint": "graph_search(types=[...]) to browse one; empty query lists them all"}

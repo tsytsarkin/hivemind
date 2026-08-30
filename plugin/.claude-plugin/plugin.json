@@ -2,7 +2,7 @@
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "hivemind",
   "displayName": "Hivemind",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Shared, versioned knowledge graph + artifact store + tool registry that REPLACES local agent memory: read it before any work, persist all work into it.",
   "author": {
     "name": "Nik Tsytsarkin"
