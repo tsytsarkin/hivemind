@@ -60,11 +60,13 @@ def build_mcp(project: Project, *, instructions: str = INSTRUCTIONS) -> MCPServe
     mcp = MCPServer(name=f"hivemind:{project.name}", instructions=instructions, version="0.1.0")
 
     # ── graph reads ──────────────────────────────────────────────────────────────
-    @mcp.tool(annotations=RO, description="Search nodes by text and/or BY TYPE. Pass types=[...] to restrict, and an EMPTY query with types to browse every node of that type (returns total_of_type). graph_types() lists the types that have data. Paginated: pass the next_cursor from a reply back as cursor; has_more says when to stop.")
+    @mcp.tool(annotations=RO, description="Search nodes by text and/or BY TYPE. Pass types=[...] to restrict, and an EMPTY query with types to browse every node of that type (returns total_of_type). graph_types() lists the types that have data. props_filter={'gated': true, 'kind': 'mach-service'} filters on exact FIELD VALUES - the only way to match booleans and numbers, since text search cannot tell gated=true from gated=false (null matches absent). Paginated: pass the next_cursor from a reply back as cursor; has_more says when to stop.")
     @_envelope
     def graph_search(query: str = "", types: Optional[list[str]] = None,
-                     limit: int = 25, cursor: int = 0) -> dict:
-        out = graph.search_nodes(db, query, types=types, limit=limit, cursor=cursor)
+                     limit: int = 25, cursor: int = 0,
+                     props_filter: Optional[dict] = None) -> dict:
+        out = graph.search_nodes(db, query, types=types, limit=limit, cursor=cursor,
+                                 props_filter=props_filter)
         if query:                       # surface known dead-ends for this query, unprompted
             rel = traps.search(db, query, limit=3)["traps"]
             if rel:

@@ -127,12 +127,32 @@ def resolve(db: Database, tid: str, *, constraint: str = "", os: Optional[str] =
         matching = [r for r in rows if r["version"] == constraint.strip()]
     if not matching:
         raise NotFound(f"no version of {tid} satisfies {constraint!r}")
+    # os/arch were accepted and ignored, so a caller could be handed a build that cannot run on
+    # its machine. A manifest with no `artifacts` is platform-independent (a PEP 723 script
+    # resolves its own deps on the target) and stays eligible.
+    if os or arch:
+        def _runs_here(row) -> bool:
+            arts = (json.loads(row["manifest"]).get("artifacts") or [])
+            if not arts:
+                return True
+            return any((not os or a.get("os") == os) and (not arch or a.get("arch") == arch)
+                       for a in arts)
+        platform_ok = [r for r in matching if _runs_here(r)]
+        if not platform_ok:
+            seen = sorted({f"{a.get('os')}/{a.get('arch')}"
+                           for r in matching
+                           for a in (json.loads(r["manifest"]).get("artifacts") or [])})
+            raise NotFound(
+                f"no version of {tid} satisfying {constraint!r} builds for "
+                f"{os or 'any'}/{arch or 'any'}; available: {seen or ['none declared']}")
+        matching = platform_ok
     best = max(matching, key=lambda r: semver._key(r["version"])) if include_prerelease else \
         _pick_stable(matching)
     manifest = json.loads(best["manifest"])
     newer = _newer_incompatible(all_versions, best["version"], constraint)
     href = f"/blobs/{best['artifact_digest'].replace(':', '/', 1)}"
     return {"id": tid, "version": best["version"], "manifest": manifest,
+            "requested_platform": (f"{os or 'any'}/{arch or 'any'}" if (os or arch) else None),
             "artifact_digest": best["artifact_digest"], "artifact_url": href,
             "run": _run_command(manifest), "entrypoint": manifest["entrypoint"],
             "yanked": bool(best["yanked"]), "yanked_reason": best["yanked_reason"],

@@ -445,10 +445,12 @@ def neighbors(db: Database, node_id: str, *, edge_types: Optional[list[str]] = N
 
 
 def search_nodes(db: Database, query: str, *, types: Optional[list[str]] = None,
-                 limit: int = 25, cursor: int = 0) -> dict:
+                 limit: int = 25, cursor: int = 0,
+                 props_filter: Optional[dict] = None) -> dict:
     """Search current node versions via FTS5 (unicode61 + trigram, RRF-fused)."""
     from . import search as _search
-    return _search.search(db, query, types=types, limit=limit, cursor=cursor)
+    return _search.search(db, query, types=types, limit=limit, cursor=cursor,
+                          props_filter=props_filter)
     limit = max(1, min(limit, 200))
     with db.read() as cur:
         params: list = []

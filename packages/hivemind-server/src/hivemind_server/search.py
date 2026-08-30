@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 from typing import Any, List, Optional
 
-from .db import SENTINEL, Database
+from .db import SENTINEL, Database, Invalid
 
 _RRF_K = 60
 
@@ -52,8 +52,35 @@ def _fts_query(q: str) -> str:
     return " OR ".join('"' + t.replace('"', '""') + '"' for t in toks)
 
 
+def _props_filter_sql(props_filter: Optional[dict]):
+    """Turn {"gated": true, "kind": "mach-service"} into SQL over the CURRENT version's props.
+
+    Text search cannot answer this: props are flattened to words for FTS, so `{"gated": true}`
+    indexes as "gated True" — you can match the word but not the value, and gated=false looks
+    identical. json_extract gives real typed equality. SQLite returns 1/0 for JSON booleans, so
+    booleans are compared against 1/0; None means "absent or null".
+    """
+    if not props_filter:
+        return "", []
+    sql, args = "", []
+    for key, val in props_filter.items():
+        if not isinstance(key, str) or not key.replace("_", "").replace(".", "").isalnum():
+            raise Invalid(f"invalid props_filter key {key!r}")
+        path = "$." + key
+        if val is None:
+            sql += f" AND json_extract(nv.props, ?) IS NULL"
+            args.append(path)
+        elif isinstance(val, bool):
+            sql += f" AND json_extract(nv.props, ?) = ?"
+            args.extend([path, 1 if val else 0])
+        else:
+            sql += f" AND json_extract(nv.props, ?) = ?"
+            args.extend([path, val])
+    return sql, args
+
+
 def search(db: Database, query: str, *, types: Optional[List[str]] = None,
-           limit: int = 25, cursor: int = 0) -> dict:
+           limit: int = 25, cursor: int = 0, props_filter: Optional[dict] = None) -> dict:
     """Hybrid FTS: BM25 over prose + trigram over symbols, fused by RRF. Falls back to listing
     recent nodes when query is empty.
 
@@ -69,6 +96,10 @@ def search(db: Database, query: str, *, types: Optional[List[str]] = None,
     if types:
         type_sql = " AND n.node_type IN (%s)" % ",".join("?" * len(types))
         type_args = list(types)
+    prop_sql, prop_args = _props_filter_sql(props_filter)
+    # props live on the current version, so filtering on them needs that join
+    prop_join = (" JOIN node_version nv ON nv.node_id = n.node_id AND nv.tx_to = %d"
+                 % SENTINEL) if prop_sql else ""
     with db.read() as cur:
         from .graph import node_flags, _current_node_version, _node_row  # local import
         ranks: dict = {}
@@ -78,9 +109,10 @@ def search(db: Database, query: str, *, types: Optional[List[str]] = None,
                 # that fell outside the candidate pool, so a rare type looked empty
                 rows = cur.execute(
                     f"SELECT f.node_id AS node_id, f.rank AS rank FROM {tbl} f "
-                    f"JOIN node n ON n.node_id = f.node_id "
-                    f"WHERE {tbl} MATCH ? AND n.redirect_to IS NULL{type_sql} "
-                    f"ORDER BY f.rank LIMIT ?", (match, *type_args, pool)).fetchall()
+                    f"JOIN node n ON n.node_id = f.node_id{prop_join} "
+                    f"WHERE {tbl} MATCH ? AND n.redirect_to IS NULL{type_sql}{prop_sql} "
+                    f"ORDER BY f.rank LIMIT ?",
+                    (match, *type_args, *prop_args, pool)).fetchall()
                 for i, r in enumerate(rows):
                     ranks[r["node_id"]] = ranks.get(r["node_id"], 0.0) + 1.0 / (_RRF_K + i)
             # tie-break on node_id so the order is total and stable across calls — otherwise
@@ -90,9 +122,10 @@ def search(db: Database, query: str, *, types: Optional[List[str]] = None,
             # no query = browse. Page the node table directly so listing a type works even when
             # none of its nodes are recent, and so the total is the real one.
             ordered = [r["node_id"] for r in cur.execute(
-                f"SELECT n.node_id FROM node n WHERE n.redirect_to IS NULL{type_sql} "
+                f"SELECT n.node_id FROM node n{prop_join} "
+                f"WHERE n.redirect_to IS NULL{type_sql}{prop_sql} "
                 f"ORDER BY n.created_tx DESC, n.node_id LIMIT ? OFFSET ?",
-                (*type_args, limit + 1, cursor))]
+                (*type_args, *prop_args, limit + 1, cursor))]
         results = []
         skipped = 0 if query else cursor       # browse paged in SQL; search pages in the loop
         has_more = False
@@ -120,11 +153,12 @@ def search(db: Database, query: str, *, types: Optional[List[str]] = None,
                             "snippet": json.dumps(props)[:200],
                             "flags": node_flags(cur, nid)})
     total = None
-    if types or not query:
+    if types or props_filter or not query:
         with db.read() as cur:
             total = cur.execute(
-                f"SELECT COUNT(*) c FROM node n WHERE n.redirect_to IS NULL{type_sql}",
-                type_args).fetchone()["c"]
+                f"SELECT COUNT(*) c FROM node n{prop_join} "
+                f"WHERE n.redirect_to IS NULL{type_sql}{prop_sql}",
+                (*type_args, *prop_args)).fetchone()["c"]
     return {"results": results, "count": len(results),
             **({"total_of_type": total} if total is not None else {}),
             "cursor": cursor,

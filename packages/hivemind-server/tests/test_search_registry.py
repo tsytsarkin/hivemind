@@ -159,3 +159,46 @@ def test_browse_by_type_finds_nodes_that_are_not_recent(db):
     counts = {t["type"]: t["nodes"] for t in facet["types"]}
     assert counts["report"] == 4 and counts["component"] >= 300
     assert facet["total_nodes"] == sum(counts.values())
+
+
+def test_props_filter_matches_field_values_including_booleans(db):
+    """Text search flattens props to words, so it cannot tell gated=true from gated=false.
+    props_filter does typed equality via json_extract."""
+    with db.write("t", "seed") as tx:
+        schemas.define_type(tx.cur, tx, "node", "entry_point", {"type": "object"}, status="active")
+    on = graph.upsert_node(db, "a", "entry_point",
+                           {"name": "svc-a", "gated": True, "kind": "mach-service",
+                            "hits": 7})["node_id"]
+    off = graph.upsert_node(db, "a", "entry_point",
+                            {"name": "svc-b", "gated": False, "kind": "mach-service",
+                             "hits": 3})["node_id"]
+    graph.upsert_node(db, "a", "entry_point", {"name": "svc-c", "kind": "xpc"})   # no `gated`
+
+    # text search cannot distinguish them — this is the gap props_filter closes
+    txt = search.search(db, "gated", limit=10)
+    assert {r["node_id"] for r in txt["results"]} >= {on, off}
+
+    t = search.search(db, "", props_filter={"gated": True})
+    assert [r["node_id"] for r in t["results"]] == [on]
+    f = search.search(db, "", props_filter={"gated": False})
+    assert [r["node_id"] for r in f["results"]] == [off]
+    assert t["total_of_type"] == 1 and f["total_of_type"] == 1
+
+    # strings and numbers too, and filters combine (AND)
+    assert search.search(db, "", props_filter={"kind": "xpc"})["count"] == 1
+    assert search.search(db, "", props_filter={"hits": 7})["count"] == 1
+    assert search.search(db, "", props_filter={"gated": True, "kind": "mach-service"})["count"] == 1
+    assert search.search(db, "", props_filter={"gated": True, "kind": "xpc"})["count"] == 0
+
+    # null means absent-or-null
+    assert search.search(db, "", props_filter={"gated": None})["count"] == 1
+
+    # composes with a text query and with types
+    assert search.search(db, "svc", props_filter={"gated": True})["count"] == 1
+    assert search.search(db, "", types=["entry_point"], props_filter={"gated": False})["count"] == 1
+
+    # and it reaches through graph.search_nodes, not just the search module
+    assert graph.search_nodes(db, "", props_filter={"gated": True})["count"] == 1
+
+    with pytest.raises(Invalid):
+        search.search(db, "", props_filter={"bad key; DROP": 1})

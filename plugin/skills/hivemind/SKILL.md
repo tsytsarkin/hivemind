@@ -9,7 +9,7 @@ description: >-
   Hivemind REPLACES local memory: read it before any work and persist all work into it. Domain-agnostic — call schema_get and guide_get first to learn this project's vocabulary.
 allowed-tools: Bash(${CLAUDE_SKILL_DIR}/scripts/guide.sh *) Read
 metadata:
-  version: "0.7.0"
+  version: "0.8.0"
 ---
 
 # Hivemind
@@ -128,7 +128,7 @@ Complete surface. Read tools are safe to call freely; write tools record provena
 | Tool | Use |
 |---|---|
 | `graph_types()` | which node types actually hold data, with counts — pick one to browse |
-| `graph_search(query, types=[…], limit, cursor)` | text search, **and/or by type**. An EMPTY query with `types` browses every node of that type (`total_of_type`). Paginate: pass the reply's `next_cursor` back as `cursor` until `has_more` is false |
+| `graph_search(query, types=[…], props_filter={…}, limit, cursor)` | text search, **by type**, and **by field value**. An EMPTY query with `types` browses every node of that type (`total_of_type`). `props_filter={"gated": true}` is the only way to match booleans/numbers — text search cannot tell `gated=true` from `gated=false`; `null` matches absent. Filters AND together. Paginate: pass the reply's `next_cursor` back as `cursor` until `has_more` is false |
 | `graph_get(node_id \| subject_key+subject_version, history, as_of)` | the node **plus its mini-skills (described), tools and traps** |
 | `graph_subjects(subject_key, as_of_subject)` | every version-cell of one thing |
 | `graph_neighbors(node_id, edge_types, depth≤4, direction)` | traversal |

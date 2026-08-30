@@ -320,3 +320,26 @@ def test_gc_never_orphans_a_file_when_a_reference_blocks_deletion(db, tmp_path):
     assert out["unreferenced"] == 0, "a tool's artifact is referenced, not garbage"
     store.gc(dry_run=False)
     assert store.exists(dg), "tool artifact bytes must remain on disk"
+
+
+def test_tool_resolve_honours_os_and_arch(db):
+    """os/arch were accepted and ignored, so a caller could be handed a build for another
+    platform. A manifest with no artifacts is platform-independent and stays eligible."""
+    from hivemind_server import registry
+    dg = _blob(db)
+    registry.publish(db, "a", {"id": "p/mac-only", "version": "1.0.0", "runtime": "binary",
+                               "entrypoint": "t", "description": "Mac build only.",
+                               "artifacts": [{"os": "darwin", "arch": "arm64",
+                                              "url": "u", "sha256": "s"}]}, dg)
+    registry.publish(db, "a", {"id": "p/portable", "version": "1.0.0", "runtime": "python",
+                               "entrypoint": "t.py", "description": "Pure script."}, dg)
+
+    assert registry.resolve(db, "p/mac-only", os="darwin", arch="arm64")["version"] == "1.0.0"
+    with pytest.raises(NotFound) as e:
+        registry.resolve(db, "p/mac-only", os="linux", arch="x86_64")
+    assert "darwin/arm64" in str(e.value)              # error names what IS available
+    # no declared artifacts = runs anywhere
+    assert registry.resolve(db, "p/portable", os="linux", arch="x86_64")["version"] == "1.0.0"
+    # and the reply records what was asked for
+    assert registry.resolve(db, "p/portable", os="linux")["requested_platform"] == "linux/any"
+    assert registry.resolve(db, "p/portable")["requested_platform"] is None

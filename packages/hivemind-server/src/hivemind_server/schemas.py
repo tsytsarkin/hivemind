@@ -72,11 +72,6 @@ def edge_traits(cur, name: str) -> dict:
     }
 
 
-def type_allows(cur, kind: str, name: str, node_type: str) -> bool:
-    """domain/range check helper: is node_type allowed by an edge endpoint's type list?"""
-    return name == "*" or node_type == name
-
-
 # ── writing types (used by schema_apply + tests; additive-only guard in propose_type) ──────
 
 _EDGE_TRAITS = ("src_types", "dst_types", "cardinality", "directed", "symmetric",
