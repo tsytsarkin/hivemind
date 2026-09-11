@@ -14,9 +14,27 @@ cd "$HOME/hivemind"
 export PATH="$HOME/.local/bin:$PATH"
 set -a; . deploy/hivemind.env; set +a
 echo "=== $(date -Is) maintenance ==="
-echo "-- who is uploading without attaching --"
-uv run --package hivemind-server hivemind-admin --project default orphans --older-than-hours 24
-echo "-- garbage collection --"
-uv run --package hivemind-server hivemind-admin --project default gc --yes
+
+# Every project, not just 'default' — a second project otherwise silently never gets collected.
+PROJECTS=$(uv run --package hivemind-server hivemind-admin list-projects \
+  | python3 -c 'import json,sys; print(" ".join(json.load(sys.stdin)["projects"]))')
+echo "projects: $PROJECTS"
+
+for proj in $PROJECTS; do
+  echo "--- project $proj ---"
+  # A failure on one project must not abort maintenance for the rest.
+  echo "-- who is uploading without attaching --"
+  uv run --package hivemind-server hivemind-admin --project "$proj" orphans --older-than-hours 24 \
+    || echo "orphans failed for $proj"
+  echo "-- garbage collection --"
+  uv run --package hivemind-server hivemind-admin --project "$proj" gc --yes \
+    || echo "gc failed for $proj"
+  # Bus reaping: expired sessions, dead claim leases, expired messages. Busy projects reap
+  # themselves on read paths; a quiet one needs this or it never cleans up.
+  echo "-- agent bus reap --"
+  uv run --package hivemind-server hivemind-admin --project "$proj" bus-reap \
+    || echo "bus-reap failed for $proj"
+done
+
 echo "-- disk --"
 df -h / | tail -1

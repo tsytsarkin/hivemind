@@ -267,6 +267,121 @@ CREATE TABLE IF NOT EXISTS tool_link (
 );
 CREATE INDEX IF NOT EXISTS ix_tool_link_node ON tool_link(node_id);
 
+-- ── agent bus: ephemeral coordination that is NOT knowledge ──────────────────────
+-- Deliberately outside the graph. The graph is versioned truth (supersession chains, FTS,
+-- backup, GC); coordination traffic is ephemeral, high-volume, totally ordered and read once.
+-- Nothing here references tx(tx_id): bus rows are written via Database.write_light() and are
+-- reaped on a TTL, so a provenance row per chat message would outlive its own message.
+--
+-- Identity is a per-SESSION id minted by the server, never the bearer token: one token is
+-- reused across many agents on many harnesses whose capabilities differ (see docs/bus.md).
+CREATE TABLE IF NOT EXISTS bus_session (
+  session_id    TEXT PRIMARY KEY,                       -- server-minted ULID
+  label         TEXT NOT NULL,                          -- human-readable, e.g. "opus5@studio"
+  harness       TEXT,                                   -- claude-code | codex | cli | ...
+  interruptible INTEGER NOT NULL DEFAULT 0,             -- can a sidecar actually wake it?
+  client_id     TEXT,                                   -- authenticated token id: attribution only
+  meta          TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(meta)),
+  cursor        INTEGER NOT NULL DEFAULT 0,             -- highest seq this session has drained
+  started_at    TEXT NOT NULL,
+  last_seen     TEXT NOT NULL,
+  expires_at    TEXT NOT NULL,                          -- heartbeat deadline
+  ttl           INTEGER NOT NULL DEFAULT 900,           -- seconds a heartbeat OR a poll extends by
+  ended_at      TEXT                                    -- set by bus_bye; NULL = live
+);
+CREATE INDEX IF NOT EXISTS ix_bus_session_live ON bus_session(expires_at) WHERE ended_at IS NULL;
+
+-- Specific, dotted capability names (device.iphone.attached, browser.cdp) so prefix queries work.
+CREATE TABLE IF NOT EXISTS bus_capability (
+  session_id TEXT NOT NULL REFERENCES bus_session(session_id) ON DELETE CASCADE,
+  name       TEXT NOT NULL,
+  attrs      TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(attrs)),
+  PRIMARY KEY (session_id, name)
+);
+CREATE INDEX IF NOT EXISTS ix_bus_cap_name ON bus_capability(name);
+
+CREATE TABLE IF NOT EXISTS bus_membership (
+  session_id TEXT NOT NULL REFERENCES bus_session(session_id) ON DELETE CASCADE,
+  room       TEXT NOT NULL,
+  joined_at  TEXT NOT NULL,
+  PRIMARY KEY (session_id, room)
+);
+CREATE INDEX IF NOT EXISTS ix_bus_member_room ON bus_membership(room);
+
+-- One global AUTOINCREMENT seq: a single integer cursor covers every room, and total order
+-- across rooms is free. AUTOINCREMENT (not plain rowid) so a reaped tail cannot cause seq reuse,
+-- which would silently rewind every cursor pointing past it.
+CREATE TABLE IF NOT EXISTS bus_message (
+  seq        INTEGER PRIMARY KEY AUTOINCREMENT,
+  room       TEXT NOT NULL DEFAULT 'lobby',
+  sender     TEXT NOT NULL,                             -- session_id, or 'system'
+  to_session TEXT,                                      -- NULL = room broadcast
+  kind       TEXT NOT NULL DEFAULT 'chat',              -- chat|question|request|response|claim|system
+  body       TEXT NOT NULL,
+  data       TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(data)),
+  request_id TEXT,                                      -- correlation for request/response
+  -- Threading, so an answer is attached to its question instead of merely adjacent to it in a
+  -- busy room. SET NULL rather than CASCADE on purpose: TTL is per-message and a question
+  -- expires BEFORE the answers it provoked, so cascading would delete the answers with it.
+  reply_to   INTEGER REFERENCES bus_message(seq) ON DELETE SET NULL,
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_bus_msg_room ON bus_message(room, seq);
+CREATE INDEX IF NOT EXISTS ix_bus_msg_to ON bus_message(to_session, seq);
+CREATE INDEX IF NOT EXISTS ix_bus_msg_expiry ON bus_message(expires_at);
+CREATE INDEX IF NOT EXISTS ix_bus_msg_reply ON bus_message(reply_to) WHERE reply_to IS NOT NULL;
+
+-- Open-claim work distribution: the request is offered to every live session matching `needs`,
+-- and exactly one wins via UPDATE ... WHERE claimed_by IS NULL. A dead advertiser simply never
+-- claims; a claimant that dies is reaped when its lease expires and the request reopens.
+CREATE TABLE IF NOT EXISTS bus_request (
+  request_id       TEXT PRIMARY KEY,
+  requester        TEXT NOT NULL,                       -- session_id
+  needs            TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(needs)),  -- capability patterns
+  to_session       TEXT,                                -- direct address; skips the claim race
+  task             TEXT NOT NULL,
+  payload          TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(payload)),
+  room             TEXT,
+  state            TEXT NOT NULL DEFAULT 'open',        -- open|claimed|done|failed|expired|cancelled
+  claimed_by       TEXT,
+  claimed_at       TEXT,
+  lease_expires_at TEXT,
+  attempts         INTEGER NOT NULL DEFAULT 0,          -- claims that were reaped, for visibility
+  result           TEXT,
+  error            TEXT,
+  created_at       TEXT NOT NULL,
+  updated_at       TEXT NOT NULL,
+  expires_at       TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_bus_req_state ON bus_request(state, expires_at);
+CREATE INDEX IF NOT EXISTS ix_bus_req_lease ON bus_request(state, lease_expires_at);
+CREATE INDEX IF NOT EXISTS ix_bus_req_claim ON bus_request(claimed_by, state);
+
+-- What a message or request POINTS AT in the graph. The bus stays domain-agnostic and holds no
+-- knowledge itself, but "do this to that thing" is useless without the that: a worker needs the
+-- subject of the work, not a prose description of it.
+--
+-- `spec` is the typed reference (node | version | subject | traversal | search); `anchor` is the
+-- node_id denormalised out of it purely so the reverse lookup ("what live traffic points at this
+-- node?") is an index hit. Deliberately one-way: the bus points into the graph and the graph
+-- never points back, so ephemeral traffic can be reaped without leaving the graph dangling.
+CREATE TABLE IF NOT EXISTS bus_ref (
+  ref_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+  message_seq INTEGER REFERENCES bus_message(seq) ON DELETE CASCADE,
+  request_id  TEXT    REFERENCES bus_request(request_id) ON DELETE CASCADE,
+  kind        TEXT NOT NULL,                        -- node|version|subject|traversal|search
+  anchor      TEXT,                                 -- node_id, when the ref has one
+  spec        TEXT NOT NULL CHECK (json_valid(spec)),
+  role        TEXT NOT NULL DEFAULT 'context',      -- context|target|evidence|result
+  note        TEXT,
+  created_at  TEXT NOT NULL,
+  CHECK (message_seq IS NOT NULL OR request_id IS NOT NULL)
+);
+CREATE INDEX IF NOT EXISTS ix_bus_ref_anchor ON bus_ref(anchor) WHERE anchor IS NOT NULL;
+CREATE INDEX IF NOT EXISTS ix_bus_ref_msg ON bus_ref(message_seq);
+CREATE INDEX IF NOT EXISTS ix_bus_ref_req ON bus_ref(request_id);
+
 -- ── embeddings for semantic search over skills and tools ─────────────────────────
 CREATE TABLE IF NOT EXISTS embedding (
   kind       TEXT NOT NULL,                        -- 'skill' | 'tool'
