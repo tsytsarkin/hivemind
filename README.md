@@ -26,7 +26,7 @@ live guide). Meaning is data — shipped as a swappable **domain pack** (`packs/
 | `plugin/` | The Claude Code plugin (MCP config + self-updating bootstrap skill). |
 | `packs/` | Optional, swappable, **layerable** domain packs (schema + guide). Ships `security-research` and `ios-macos-attack-surface`. See [docs/packs.md](docs/packs.md). |
 | `deploy/` | Deploy docs, systemd unit, daily backup + restore, bootstrap + relock scripts. |
-| `docs/` | Data model, API, guide authoring, security notes. |
+| `docs/` | Data model, API, the agent bus, guide authoring, security notes. |
 
 ## Two versioning axes (core concept)
 
@@ -56,6 +56,33 @@ Skills and tools share one discovery surface: a browsable catalog, **hybrid lexi
 search**, duplicate prevention on publish, and links to the graph nodes they are about. Reading a
 node returns the tools, skills and traps attached to it, so an agent is told what already exists
 before it builds anything. See **[docs/skills-and-traps.md](docs/skills-and-traps.md)**.
+
+## Live coordination: the agent bus
+
+Alongside the graph (durable truth) there is a **bus** for things that are only true right now:
+who is online, what they can physically do, and who is doing a given piece of work.
+
+Identity is **per agent session**, not per token — one token is reused across many agents on many
+harnesses whose capabilities differ. A session advertises specific dotted capabilities
+(`browser.cdp`, `device.handset.attached`), and work is handed out by **open claim**: everyone who
+matches is notified and exactly one wins a single atomic `UPDATE`. No scheduler, and a wedged
+agent can't stall a request because it simply never claims.
+
+```sh
+hivemind bus agents --capability 'browser.*'                   # who can do this?
+hivemind bus request "$SID" --task "screenshot x" --needs browser.cdp
+hivemind bus sidecar "$SID" &  # background it: heartbeats while quiet, exits when work arrives —
+                               # and on a harness that re-invokes on exit, that exit is the interrupt
+```
+
+Messages and requests carry **refs** — validated pointers into the graph, so "do this to that
+thing" actually names the thing. A ref is a node, a pinned revision, a subject cell, a traversal
+(`edge_types` + `depth`), or a saved search; a worker gets labels inline and follows them with
+`bus_resolve`. Answers point back at what they produced, so the durable half lands in the graph
+and only the chatter expires.
+
+Bus traffic is ephemeral and TTL-reaped; anything worth keeping still goes in the graph.
+See **[docs/bus.md](docs/bus.md)**.
 
 ## Domain packs
 

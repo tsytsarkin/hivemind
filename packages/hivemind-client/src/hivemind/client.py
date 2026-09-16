@@ -111,6 +111,36 @@ class Client:
         root = self.base_url.rsplit("/p/", 1)[0]
         return self._http.get(root + "/healthz").json()
 
+    def bus_wait(self, session_id: str, *, after: Optional[int] = None, wait: float = 25.0,
+                 rooms: Optional[list] = None, limit: int = 50, interval: float = 1.0,
+                 include_self: bool = False) -> dict:
+        """Block until this session has a message, then return it WITHOUT consuming it.
+
+        REST rather than an MCP tool because it blocks: this is what a watcher process sits on so
+        it can EXIT the moment something lands. Peek semantics on purpose — the watcher is not the
+        reader, so a watcher that dies here must not have eaten the message. Drain with bus_poll.
+        """
+        params: Dict[str, Any] = {"session": session_id, "wait": wait, "limit": limit,
+                                  "interval": interval}
+        if after is not None:
+            params["after"] = after
+        if rooms:
+            params["rooms"] = ",".join(rooms)
+        if include_self:
+            params["include_self"] = "1"
+        # Read timeout must outlast the server-side block or httpx kills our own long-poll.
+        r = self._request("GET", "/bus/wait", params=params, timeout=wait + 30)
+        if r.status_code == 401:
+            raise HivemindError("unauthorized (bad token)", kind="auth")
+        if r.status_code >= 400:
+            try:
+                body = r.json()
+            except ValueError:
+                raise HivemindError(f"HTTP {r.status_code}: {r.text[:300]}")
+            raise HivemindError(body.get("error", f"HTTP {r.status_code}"),
+                                kind=body.get("error_kind"))
+        return r.json()
+
     def tool_publish(self, path, *, id, version, **kw):
         return self._tools.publish(self, path, id=id, version=version, **kw)
 

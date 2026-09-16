@@ -60,6 +60,7 @@ def main(argv=None) -> int:
     sub.add_parser("reindex")
     sub.add_parser("embed")
     sub.add_parser("autolink")
+    sub.add_parser("bus-reap")
 
     args = ap.parse_args(argv)
     reg = _registry()
@@ -125,6 +126,12 @@ def main(argv=None) -> int:
         _out({"skills": _sk.autolink_all(p.db), "tools": _reg.autolink_all(p.db)})
     elif args.cmd == "reindex":
         _out({"reindexed_nodes": search.reindex_all(p.db)})
+    elif args.cmd == "bus-reap":
+        # The bus reaps opportunistically on read paths, so a BUSY project needs nothing here.
+        # A quiet one does: nobody is reading, so expired messages and dead leases would sit
+        # forever on a server that looks idle.
+        from . import bus
+        _out({"project": p.name, **bus.reap(p.db)})
     return 0
 
 

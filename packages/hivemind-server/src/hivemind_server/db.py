@@ -91,12 +91,27 @@ class Database:
         ("skill_link", "score", "REAL"),
         ("tool_link", "source", "TEXT NOT NULL DEFAULT 'auto'"),
         ("tool_link", "score", "REAL"),
+        # Threading, added after bus_message shipped. SQLite allows ADD COLUMN with a REFERENCES
+        # clause as long as the default is NULL, and the ON DELETE SET NULL then behaves the same
+        # as on a freshly-created table (verified on 3.51.0), so a migrated database and a new
+        # one end up identical.
+        ("bus_message", "reply_to",
+         "INTEGER REFERENCES bus_message(seq) ON DELETE SET NULL"),
+        # A session now stays alive by working as well as by pinging (see bus.poll), and poll has
+        # to know how far to extend. It must be the session's OWN ttl: reaching for a global
+        # default would silently downgrade a session that asked for an hour to 15 minutes the
+        # first time it polled.
+        ("bus_session", "ttl", "INTEGER NOT NULL DEFAULT 900"),
     )
 
     def apply_schema(self) -> None:
         con = self.conn()
         with self._write_lock:
-            con.executescript(_SCHEMA_PATH.read_text())
+            # Migrations run BEFORE the schema script, not after. schema.sql may contain an index
+            # over a migrated column, and on an already-created table CREATE TABLE IF NOT EXISTS
+            # is a silent no-op while CREATE INDEX is not — it fails with "no such column". This
+            # order is safe both ways: on a fresh database every PRAGMA below returns empty, so
+            # every migration is skipped and the script creates the columns itself.
             for table, column, decl in self._MIGRATIONS:
                 try:
                     cols = {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
@@ -104,6 +119,7 @@ class Database:
                     continue                      # table not created yet on this database
                 if cols and column not in cols:
                     con.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+            con.executescript(_SCHEMA_PATH.read_text())
 
     # ── reads (autocommit; WAL lets readers run concurrently with the writer) ────
     @contextmanager
@@ -149,6 +165,48 @@ class Database:
                     pass
                 raise
             finally:
+                self._write_lock.release()
+
+    # ── writes without provenance (the bus) ──────────────────────────────────────
+    @contextmanager
+    def write_light(self) -> Iterator[sqlite3.Cursor]:
+        """Same locking/retry discipline as write(), but no `tx` row.
+
+        For ephemeral, TTL-reaped data (the agent bus) where a provenance row per chat message
+        would outlive the message it describes and defeat the reaper. Anything that belongs to
+        the revision axis must use write() instead — provenance is not optional there.
+        """
+        con = self.conn()
+        attempts = 0
+        while True:
+            attempts += 1
+            self._write_lock.acquire()
+            began = False
+            try:
+                con.execute("BEGIN IMMEDIATE")
+                began = True
+            except sqlite3.OperationalError as e:
+                msg = str(e).lower()
+                if ("busy" in msg or "locked" in msg) and attempts <= 6:
+                    self._write_lock.release()
+                    time.sleep(min(0.05 * 2 ** attempts, 1.0) * (0.5 + random.random()))
+                    continue
+                self._write_lock.release()
+                raise
+            cur = con.cursor()
+            try:
+                yield cur
+                con.execute("COMMIT")
+                return
+            except Exception:
+                if began:
+                    try:
+                        con.execute("ROLLBACK")
+                    except sqlite3.OperationalError:
+                        pass
+                raise
+            finally:
+                cur.close()
                 self._write_lock.release()
 
     # ── small helpers ────────────────────────────────────────────────────────────

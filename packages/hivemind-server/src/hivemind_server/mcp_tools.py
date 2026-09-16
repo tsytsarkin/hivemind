@@ -29,7 +29,12 @@ INSTRUCTIONS = (
     "ALWAYS search first — tool_search/tool_catalog, skill_search/skill_catalog and "
     "trap_search — before building a tool or working out a procedure; build only if they come "
     "back empty. Publish what you build (tool_publish/skill_publish) and trap_record an "
-    "approach the moment you abandon it. Search is hybrid lexical+semantic."
+    "approach the moment you abandon it. Search is hybrid lexical+semantic. "
+    "Separately from the graph there is an AGENT BUS for live coordination: bus_hello registers "
+    "THIS session and advertises what it can physically do (browser.cdp, device.handset.attached), "
+    "bus_agents/bus_capabilities discover who else is on, and bus_request hands work to whoever "
+    "matches — the first to bus_claim wins. Bus traffic is ephemeral and expires; anything worth "
+    "keeping still goes in the graph."
 )
 
 RO = ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True)
@@ -348,4 +353,7 @@ def build_mcp(project: Project, *, instructions: str = INSTRUCTIONS) -> MCPServe
 
     from . import registry_tools  # attach artifact + tool-registry tools (added incrementally)
     registry_tools.attach(mcp, project)
+    from . import bus_tools       # agent bus: live coordination, deliberately outside the graph
+    from .config import config as _config
+    bus_tools.attach(mcp, project, _config())
     return mcp

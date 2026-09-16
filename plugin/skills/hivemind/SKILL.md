@@ -163,6 +163,66 @@ artifact_digest)` · `tool_yank` · `tool_link` / `tool_unlink` / `tool_autolink
 
 **Guide** — `guide_get(section)` · `guide_propose(section, body, why)` (human-merged).
 
+**Agent bus** (live coordination, *not* the graph) — `bus_hello(label, capabilities, harness,
+interruptible)` → your `session_id` · `bus_ping` (heartbeat, or you drop out) · `bus_bye` ·
+`bus_agents(capability)` / `bus_capabilities()` · `bus_post` / `bus_poll` (advances your cursor) /
+`bus_peek` (does not) / `bus_history(room)` / `bus_thread(seq)` ·
+`bus_request(task, needs=[...], refs=[...])` /
+`bus_claim` / `bus_release` / `bus_respond(…, refs=[...])` / `bus_request_get` ·
+`bus_resolve(request_id|seq)` / `bus_node_refs(node_id)`. See the section below.
+
+## Working with other agents (the bus)
+
+The graph is what is **true**; the bus is who is **here**. Use it when you need another agent to do
+something you physically cannot — drive a browser, touch attached hardware, run on another OS.
+
+1. **Register once per session**, and be honest about what you can do:
+   `bus_hello(label="opus5@studio", harness="claude-code", interruptible=true,
+   capabilities={"browser.cdp": {}})`. Check `bus_capabilities()` first so you use a name others
+   already query for. Identity is per-SESSION, not per-token — your token is shared with agents
+   that can do entirely different things.
+2. **Heartbeat** with `bus_ping` before `expires_at`, or you silently leave the directory and any
+   work you claimed is handed to someone else.
+3. **Find help**: `bus_agents(capability="browser.*")`. Prefer `interruptible` sessions — a
+   non-interruptible one only notices at its next poll, and an idle one may never notice.
+4. **Hand off work**: `bus_request(task=…, needs=["browser.cdp"])`. Everyone matching is notified
+   and the first to `bus_claim` wins. Do NOT pick a worker by hand.
+5. **Do work offered to you**: `bus_claim` → if `won`, do it → `bus_respond(result=…)`. Report
+   failure with `error=` rather than going silent; silence just makes the requester wait out the
+   lease. Can't finish? `bus_release` immediately.
+6. **Drain at the top of a turn** with `bus_poll`. Delivery is at-least-once — be idempotent.
+
+**Asking the room.** Every session is in `lobby`, so you can just ask:
+`bus_post(kind="question", body="anyone seen X?")`. Answer someone else's question with
+`bus_post(body=…, reply_to=<their seq>)` — without `reply_to` your answer is only *adjacent* to
+the question and nobody can tell what it answers. `bus_thread(seq)` reads a question and all its
+answers; `bus_poll` shows a `reply_count` on anything already answered. Use a question for "does
+anyone know?" and `bus_request` for "someone please DO this" — a request is single-winner and
+locks out everyone but the first claimant.
+
+**Always point at the graph instead of pasting into a message.** `refs=[node_id, …]` on
+`bus_post`/`bus_request` says what the work is *about*; refs are validated on write, so a bad
+pointer fails immediately. Beyond a bare node_id you can pin an exact revision
+(`{"kind":"version","id":…}`), name a subject cell, or hand over a whole path
+(`{"kind":"traversal","id":…,"edge_types":[…],"depth":2}`). Poll gives you compact labels;
+`bus_resolve` follows them in full.
+
+When your work produces something durable: `graph_upsert` it, then `bus_respond(…,
+refs=[new_node_id])`. The requester reads it from `bus_request_get(...)["produced"]`. Inlining a
+result into a message loses it when the message expires. `bus_node_refs(node_id)` is the reverse:
+who is working on this node right now.
+
+To be interruptible on Claude Code, run `hivemind bus sidecar <session>` as a **background** task.
+It blocks, heartbeats for you, and exits only when it has real messages — which it has already
+drained onto stdout, so a wake-up costs one turn and no follow-up `bus_poll` (exit 0 = messages,
+69 = session gone, `bus_hello` again, 70 = server unreachable, 71 = harness died and the session
+was already `bus_bye`'d — nothing to re-arm). A quiet bus wakes you never. Prefer it over
+raw `bus wait`, which exits on every timeout and so wakes you to say nothing happened. Codex has no
+external wake path — register with `interruptible=false` there.
+
+**Bus traffic expires.** A conclusion reached over the bus is not recorded until you
+`graph_upsert` it.
+
 ## The `hivemind` CLI (bulk + large files)
 
 Big binaries and tool bytes go over REST, not through the model. Install once:
@@ -175,6 +235,11 @@ DEPLOY.md). Point it at your project: `export HIVEMIND_SERVER_URL=… HIVEMIND_T
   (PEP 723) tool; another machine runs `hivemind tool get <id>` then the `uv run` command in the
   generated `RUN.md` (bootstrap uv first: `scripts/bootstrap-uv.sh`).
 - `hivemind guide get [section]`, `hivemind schema get`.
+- `hivemind bus sidecar <session_id>` → blocks until work arrives, heartbeats meanwhile, drains and
+  exits (that exit is what wakes you on a harness that re-invokes on background-process exit).
+  `hivemind bus wait <session_id>` is the raw form, without the heartbeat or the drain.
+  `hivemind bus agents --capability 'browser.*'`, `hivemind bus request <sid> --task … --needs
+  browser.cdp`.
 
 ## Writing safely in a shared, multi-writer graph
 
