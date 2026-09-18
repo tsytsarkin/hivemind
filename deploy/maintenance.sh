@@ -6,11 +6,11 @@
 # alone they reached 94 GB (80% of the store) before anyone looked. Bounded, automatic collection
 # is the structural fix; the grace window gives an agent time to attach what it uploaded.
 set -euo pipefail
-DEST="${HIVEMIND_BACKUP_DIR:-/mnt/fuzz/hivemind-backup}"
+DEST="${HIVEMIND_BACKUP_DIR:-$HOME/hivemind-backup}"
 LOG="$DEST/maintenance.log"
 mkdir -p "$DEST"
 exec >>"$LOG" 2>&1
-cd "$HOME/hivemind"
+cd "$(dirname "$0")/.."          # the repo this script lives in
 export PATH="$HOME/.local/bin:$PATH"
 set -a; . deploy/hivemind.env; set +a
 echo "=== $(date -Is) maintenance ==="

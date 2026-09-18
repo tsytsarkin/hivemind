@@ -1,12 +1,12 @@
 # Restoring a Hivemind backup
 
-Backups live on a second physical disk (default `/mnt/fuzz/hivemind-backup/<project>/`):
+Backups live on a second physical disk (default `$HIVEMIND_BACKUP_DIR/<project>/`):
 dated `db/hivemind-<stamp>.db` snapshots, a `blobs/sha256/` mirror, and `tokens.json`.
 
 ```sh
 sudo systemctl stop hivemind   ||  pkill -f hivemind-server      # stop writers first
-P=/home/nik/hivemind-data/projects/default
-B=/mnt/fuzz/hivemind-backup/default
+P=$HIVEMIND_DATA_DIR/projects/default
+B=$HIVEMIND_BACKUP_DIR/default
 
 # 1. database — pick a snapshot and verify it BEFORE overwriting anything
 python3 -c "import sqlite3,sys; print(sqlite3.connect(sys.argv[1]).execute('PRAGMA integrity_check').fetchone()[0])" \

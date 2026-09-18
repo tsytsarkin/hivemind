@@ -113,7 +113,7 @@ What it does, per project:
 - **Rotation** — keeps `HIVEMIND_BACKUP_KEEP` (default 7) dated database snapshots; blobs are a
   single mirror.
 
-Tunables: `HIVEMIND_BACKUP_DIR` (default `/mnt/fuzz/hivemind-backup`), `HIVEMIND_BACKUP_KEEP`,
+Tunables: `HIVEMIND_BACKUP_DIR` (default `$HIVEMIND_BACKUP_DIR`), `HIVEMIND_BACKUP_KEEP`,
 `HIVEMIND_DATA_DIR`. Log: `<backup dir>/backup.log`.
 
 Measured on the live project (1.7 GB database, 9,475 blobs / 9.7 GB): **23 s** for the first run,

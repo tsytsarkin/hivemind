@@ -1,6 +1,12 @@
-# systemd unit for the Hivemind server. Install: see deploy/bootstrap-labbox.sh.
-#   sudo cp deploy/hivemind.service /etc/systemd/system/hivemind.service
-#   sudo systemctl daemon-reload && sudo systemctl enable --now hivemind
+# systemd unit template for the Hivemind server.
+#
+# Placeholders are filled in by `deploy/install-service.sh`, which reads them from the machine it
+# runs on. Nothing here is specific to any host, so the file is safe to commit and to fork.
+#
+#   bash deploy/install-service.sh          # renders this, then installs and enables it
+#
+# To do it by hand instead, replace __USER__ and __REPO__ below and copy to
+# /etc/systemd/system/hivemind.service.
 [Unit]
 Description=Hivemind server (shared agent knowledge graph + artifacts + tools)
 After=network-online.target
@@ -8,11 +14,10 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=nik
-WorkingDirectory=/home/nik/hivemind
-EnvironmentFile=/home/nik/hivemind/deploy/hivemind.env
-# Uses the venv created by bootstrap-labbox.sh. (Swap for `uv run hivemind-server` if preferred.)
-ExecStart=/home/nik/hivemind/.venv/bin/hivemind-server
+User=__USER__
+WorkingDirectory=__REPO__
+EnvironmentFile=__REPO__/deploy/hivemind.env
+ExecStart=__REPO__/.venv/bin/hivemind-server
 Restart=on-failure
 RestartSec=3
 # hardening

@@ -10,7 +10,7 @@
 set -euo pipefail
 
 DATA_DIR="${HIVEMIND_DATA_DIR:-$HOME/hivemind-data}"
-DEST="${HIVEMIND_BACKUP_DIR:-/mnt/fuzz/hivemind-backup}"
+DEST="${HIVEMIND_BACKUP_DIR:-$HOME/hivemind-backup}"
 KEEP="${HIVEMIND_BACKUP_KEEP:-7}"          # dated DB snapshots to retain per project
 STAMP="$(date +%Y%m%d-%H%M%S)"
 LOG="$DEST/backup.log"
