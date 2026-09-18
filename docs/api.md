@@ -5,7 +5,8 @@ Graph: `graph_types`, `graph_search`, `graph_get`, `graph_subjects`, `graph_neig
 `graph_link`, `graph_bulk_load`. Schema: `schema_get`, `schema_propose`, `schema_promote`,
 `schema_apply` (returns `{created, unchanged}`; idempotent), `schema_changes`. Artifacts: `artifact_ref`, `artifact_attach`, `artifact_refs`, `artifact_orphans`. Tools:
 `tool_catalog`, `tool_publish`, `tool_resolve`, `tool_search`, `tool_link`, `tool_unlink`, `tool_autolink`, `tool_suggest_links`, `tool_yank`. Mini-skills: `skill_catalog`, `skill_search`, `skill_get`, `skill_publish`, `skill_link`, `skill_unlink`, `skill_autolink`, `skill_suggest_links`, `skill_yank`. Traps:
-`trap_search`, `trap_get`, `trap_record`, `trap_status`. Guide: `guide_get`, `guide_propose`.
+`trap_search`, `trap_get`, `trap_record`, `trap_status`. Bus: `bus_connect`, `bus_send`, `bus_broadcast`, `bus_message`, `bus_peers`,
+`bus_disconnect` (see [bus.md](bus.md)). Guide: `guide_get`, `guide_propose`.
 Agent bus — *sessions:* `bus_hello`, `bus_ping`, `bus_bye`, `bus_agents`, `bus_capabilities`,
 `bus_stats`, `bus_reap`; *rooms and messages:* `bus_rooms`, `bus_join`, `bus_leave`, `bus_post`,
 `bus_poll`, `bus_peek`, `bus_ack`, `bus_history`, `bus_thread`; *requests:* `bus_request`,
@@ -44,6 +45,7 @@ of these endpoints, so a wrong base URL tells you so instead of 404ing.
 | `GET /tools[?topic=&limit=&offset=]` · `GET /tools/{id}[?constraint=]` | tool catalog |
 | `PUT /blobs/{algo}/{hex}[?attach_to=<version_id>&role=&filename=]` | streaming upload; **`attach_to` attaches in the same request** — an unattached upload is invisible and is garbage-collected |
 | `GET`/`HEAD /blobs/{algo}/{hex}` | Range-capable, `Cache-Control: immutable` |
+| `WS /p/<project>/bus/ws?ticket=` | agent bus; ticket from `bus_connect` |
 | `POST /blobs/batch` | Git-LFS style: `{"objects":[{"oid","size"}]}` → which are missing |
 | `GET /bus/wait?session=&wait=&rooms=&after=&limit=&interval=` | **blocks** until the session has a visible message, then returns it *without consuming it*. The one thing that cannot be an MCP tool: a tool call blocking for 25s blocks the agent's turn. A backgrounded watcher sits here and exits when it returns, and on a harness that re-invokes on process exit that exit is the interrupt. `wait` is clamped to `HIVEMIND_BUS_MAX_WAIT` |
 

@@ -7,7 +7,10 @@ requires-python = ">=3.9"           # MUST run on the Mac Studio's system Python
 license = "Apache-2.0"
 authors = [{ name = "Nik Tsytsarkin" }]
 dependencies = [
-    "httpx>=0.27,<1",               # the ONLY runtime dep — keep the client trivially deployable
+    "httpx>=0.27,<1",               # graph/artifact/tool calls
+    # The bus listener needs a WebSocket client and httpx has none. Pure-Python wheel, no build
+    # step, so the client stays trivially deployable on a stock interpreter.
+    "websockets>=12,<18",
 ]
 
 [project.scripts]

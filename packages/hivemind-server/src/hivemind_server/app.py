@@ -13,7 +13,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
-from starlette.routing import Mount, Route
+from starlette.routing import Mount, Route, WebSocketRoute
 
 from .auth import bearer_from_headers
 from .config import Config, config
@@ -94,6 +94,17 @@ def build_app(cfg: Optional[Config] = None) -> Starlette:
                                        host=cfg.host)
         mounts.append(Mount(f"/p/{project.name}", app=asgi))
 
+        # The bus WebSocket is mounted at the Starlette level: MCPServer.custom_route registers
+        # HTTP methods only, so a ws route cannot go through it. Auth is the connect ticket in the
+        # query string (see bus_ws), not the bearer header, because the listener is launched by
+        # Monitor and cannot set headers.
+        def _ws_route(p=project):
+            async def endpoint(ws):
+                from . import bus_ws as _b
+                await _b.websocket_endpoint(ws, p.name)
+            return endpoint
+        mounts.append(WebSocketRoute(f"/p/{project.name}/bus/ws", _ws_route()))
+
     async def healthz(_req: Request) -> Response:
         return JSONResponse({"ok": True, "projects": [p.name for p in registry.all()]})
 
@@ -114,6 +125,11 @@ def build_app(cfg: Optional[Config] = None) -> Starlette:
 
     @contextlib.asynccontextmanager
     async def lifespan(_app):
+        import asyncio as _asyncio
+
+        from . import bus_ws as _bus_ws
+        # WebSocket sends issued from MCP tool threads are scheduled onto this loop.
+        _bus_ws.set_loop(_asyncio.get_running_loop())
         async with contextlib.AsyncExitStack() as stack:
             for mcp in mcps:
                 await stack.enter_async_context(mcp.session_manager.run())

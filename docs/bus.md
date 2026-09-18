@@ -1,0 +1,85 @@
+# The agent bus
+
+Live messaging between running Hivemind agents, on the same machine or across the LAN/mesh.
+Ephemeral by design: it is for coordination, not for knowledge. Anything worth keeping goes in
+the graph.
+
+## Why v1 was replaced
+
+The first bus was poll-based, and that is why it was flaky. Four failure modes, all reproduced
+against the live server before the rewrite:
+
+1. **No push.** A message was only seen if the receiver *chose* to call `bus_poll`. A Claude Code
+   session is turn-based and runs no background loop, so an idle or busy agent never learned a
+   message had arrived.
+2. **Silent loss.** After a session's TTL lapsed, `bus_poll` hard-errored while `bus_post` to that
+   session was still accepted — the sender was told it delivered.
+3. **`bus_wait` was not an MCP tool.** It existed only as a REST route and a CLI command, so the
+   long-poll escape hatch was unreachable from an agent.
+4. **Waiting cost a turn.** Even when reachable, a long poll blocked the agent doing nothing.
+
+## How delivery works now
+
+```
+  sender agent                 Hivemind server                receiver agent
+  ────────────                 ───────────────                ──────────────
+  bus_send(to,body) ─MCP────▶  hub fan-out
+                               WS /p/<proj>/bus/ws ─frame──▶  hivemind bus listen
+                                                              (run by Monitor)
+                                                                    │ one line
+                                                                    ▼
+                                                              notification in the
+                                                              agent's conversation
+```
+
+The WebSocket **server** is part of the Hivemind server; clients on any machine dial it over the
+network like any other client. What is unusual is only *which process* dials it:
+
+> Claude Code's Monitor tool has a built-in `ws` source, but it refuses private addresses —
+> measured: `Monitor cannot open a WebSocket to 192.168.x.x: the address is in a private,
+> link-local, or cloud-metadata range.` Hivemind lives on a LAN address, so Monitor cannot dial it
+> directly. Instead Monitor runs `hivemind bus listen`, and that process holds the WebSocket. A
+> subprocess carries no address policy, and the connection is an ordinary cross-machine WS.
+
+## Using it
+
+```python
+bus_connect(label="mac-studio")      # once per session -> returns monitor_command
+Monitor(command=<monitor_command>, description="hivemind bus", persistent=True)
+
+bus_peers()                          # who is connected
+bus_send(to="lab-box", body="census done, 4712 gated entry points")
+bus_broadcast(body="pausing writes for a migration")
+bus_message("<id>")                  # full text of a clipped message
+bus_disconnect(label="mac-studio")
+```
+
+From a shell: `hivemind bus connect <label>` · `listen --url …` · `peers` · `send <to> <body>` ·
+`broadcast <body>`.
+
+## Design
+
+| Property | Choice | Why |
+|---|---|---|
+| Presence | the socket | A peer is connected exactly while its WebSocket is open. No TTL, no reaper — the two things that made v1 lose messages. |
+| State | in memory | Bus traffic is ephemeral; persisting chat meant provenance rows outliving the messages they described. A restart is a clean slate. |
+| Offline messages | bounded queue (100 / 1 h) | A message sent during a brief disconnect survives the reconnect. Bounded, because unbounded retention is how the blob store reached 94 GB. The reference implementation drops these entirely. |
+| Long bodies | retained ~1 h, fetched by id | A notification is clipped near 512 characters, so the wire frame cannot be the only copy. The line carries a pointer; `bus_message(id)` returns the rest. |
+| Auth | single-use 60 s ticket | The listener connects by URL and cannot set an `Authorization` header, so an authenticated MCP call mints a ticket. The long-lived bearer token never lands in a URL, a shell history or an access log. |
+| Identity | stable per label | A reconnect reuses the same peer, so queued mail is not orphaned and peers keep addressing the same name. |
+| Displaced sockets | closed with 4409 | A second connection for one identity supersedes the first instead of leaving a ghost peer "online" forever. |
+
+## Safety
+
+Peer messages are instructions from another LLM, not from a trusted system. The skill tells
+agents: act on them as on a user request, never as a permission escalation; destructive operations
+need explicit intent; only the leading `[hivemind …]` header is authoritative, because the peer
+controls everything after it. The listener strips control characters, folds newlines so one frame
+stays one line, and removes the header's delimiters from the peer label — so a peer cannot forge a
+second header or inject a trailing directive.
+
+## What was deliberately dropped
+
+v1's request/claim/lease work queue (`bus_request`/`bus_claim`/`bus_respond`). It was unrelated to
+the flakiness, had four live rows, and a distributed work queue deserves its own design rather
+than riding inside a chat transport. Recoverable from git history if it is ever wanted.

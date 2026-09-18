@@ -45,14 +45,6 @@ def _json_arg(s: Optional[str], what: str) -> dict:
         _die(f"--{what} must be valid JSON: {e}")
 
 
-# `bus wait` exit codes. A watcher is meant to be run backgrounded and re-armed in a loop, so the
-# caller has to be able to tell "drain me" from "nothing yet" without parsing stdout.
-WAIT_MESSAGES, WAIT_TIMEOUT = 0, 75          # 75 = EX_TEMPFAIL: try again
-# `bus sidecar` adds three more, because re-arming is the wrong answer to all of them: the session
-# is gone and must be re-registered, the server cannot be reached at all, or there is no longer an
-# agent to wake.
-SIDECAR_GONE, SIDECAR_UNREACHABLE, SIDECAR_ORPHANED = 69, 70, 71
-
 
 def _caps(items) -> dict:
     """--capability NAME  or  --capability NAME={"attr":1}  ->  {name: attrs}"""
@@ -82,89 +74,6 @@ def _refs(items) -> list:
             out.append(s)
     return out
 
-
-def _bus(c, args) -> int:
-    cmd = args.bus_cmd
-    if cmd == "wait":                      # the two with non-zero exits and their own loops
-        return _bus_wait(c, args)
-    if cmd == "sidecar":
-        return _bus_sidecar(c, args)
-    a = args
-    calls = {
-        "hello": ("bus_hello", lambda: {
-            "label": a.label, "capabilities": _caps(a.capabilities), "harness": a.harness,
-            "interruptible": a.interruptible, "rooms": a.rooms, "ttl": a.ttl}),
-        "ping": ("bus_ping", lambda: {
-            "session_id": a.session_id, "status": a.status, "ttl": a.ttl,
-            "capabilities": _caps(a.capabilities) if a.capabilities else None}),
-        "bye": ("bus_bye", lambda: {"session_id": a.session_id}),
-        "agents": ("bus_agents", lambda: {"capability": a.capability,
-                                          "include_ended": a.include_ended}),
-        "capabilities": ("bus_capabilities", dict),
-        "rooms": ("bus_rooms", dict),
-        "stats": ("bus_stats", dict),
-        "reap": ("bus_reap", dict),
-        "join": ("bus_join", lambda: {"session_id": a.session_id, "room": a.room}),
-        "leave": ("bus_leave", lambda: {"session_id": a.session_id, "room": a.room}),
-        "post": ("bus_post", lambda: {
-            "session_id": a.session_id, "body": a.body, "room": a.room,
-            "to_session": a.to_session, "kind": a.kind, "data": _json_arg(a.data, "data"),
-            "refs": _refs(a.refs), "reply_to": a.reply_to}),
-        "thread": ("bus_thread", lambda: {"seq": a.seq, "limit": a.limit}),
-        "poll": ("bus_poll", lambda: {"session_id": a.session_id, "limit": a.limit,
-                                      "after": a.after, "include_self": a.include_self}),
-        "peek": ("bus_peek", lambda: {"session_id": a.session_id, "limit": a.limit,
-                                      "after": a.after}),
-        "ack": ("bus_ack", lambda: {"session_id": a.session_id, "seq": a.seq}),
-        "history": ("bus_history", lambda: {"room": a.room, "limit": a.limit,
-                                            "before": a.before}),
-        "request": ("bus_request", lambda: {
-            "session_id": a.session_id, "task": a.task, "needs": a.needs,
-            "to_session": a.to_session, "payload": _json_arg(a.payload, "payload"),
-            "room": a.room, "refs": _refs(a.refs), "lease_sec": a.lease_sec, "ttl": a.ttl}),
-        "claim": ("bus_claim", lambda: {"session_id": a.session_id, "request_id": a.request_id,
-                                        "lease_sec": a.lease_sec}),
-        "release": ("bus_release", lambda: {"session_id": a.session_id,
-                                            "request_id": a.request_id, "reason": a.reason}),
-        "respond": ("bus_respond", lambda: {
-            "session_id": a.session_id, "request_id": a.request_id,
-            "result": _json_arg(a.result, "result") if a.result else None, "error": a.error,
-            "refs": _refs(a.refs)}),
-        "request-get": ("bus_request_get", lambda: {"request_id": a.request_id}),
-        "requests": ("bus_requests", lambda: {"session_id": a.session, "state": a.state,
-                                              "claimable_only": a.claimable}),
-        "resolve": ("bus_resolve", lambda: {"request_id": a.request_id, "seq": a.seq,
-                                            "limit": a.limit}),
-        "node-refs": ("bus_node_refs", lambda: {"node_id": a.node_id, "limit": a.limit}),
-    }
-    if cmd not in calls:
-        _die(f"unknown bus command {cmd!r}")
-    tool, build_args = calls[cmd]
-    _out(c.call(tool, build_args()))
-    return 0
-
-
-def _bus_wait(c, args) -> int:
-    """Block until something arrives, print it, exit — that exit is what wakes an agent.
-
-    On a harness that re-invokes an agent when a backgrounded process exits (Claude Code), run
-    this with run_in_background and drain with `bus poll` when it returns. Nothing is consumed
-    here, so if this process dies the message is still waiting for the agent.
-    """
-    rooms = [r for r in (args.rooms or "").split(",") if r]
-    while True:
-        out = c.bus_wait(args.session_id, after=args.after, wait=args.wait, rooms=rooms or None,
-                         limit=args.limit, interval=args.interval)
-        if out.get("messages"):
-            _out(out)
-            if not args.follow:
-                return WAIT_MESSAGES
-            # Advance past what we printed so --follow does not reprint it. This is a display
-            # cursor only; the session cursor is still untouched until the agent polls.
-            args.after = out["head"]
-        elif not args.follow:
-            _out(out)
-            return WAIT_TIMEOUT
 
 
 def _harness_pid(explicit: Optional[int]) -> Optional[int]:
@@ -197,82 +106,37 @@ def _alive(pid: int) -> bool:
     return True
 
 
-def _bus_sidecar(c, args) -> int:
-    """Heartbeat while it is quiet, drain and exit only when there is actually news.
 
-    `bus wait` exits on every timeout. Where process exit IS the interrupt, that spends one of the
-    agent's turns to tell it nothing happened, and the agent then has to spawn a replacement — so
-    the steady state of an idle bus is a stream of empty wake-ups. This absorbs timeouts instead:
-    ping and keep blocking. Two consequences worth the extra loop:
+def _bus(c, args) -> int:
+    """Bus subcommands. `listen` is the one Monitor runs; the rest are ordinary tool calls."""
+    from . import bus as _bus_mod
 
-      - the ping is no longer something the agent has to remember between wake-ups, so a session
-        stops dying of a missed heartbeat while its watcher is healthy;
-      - the exit always carries drained messages, so waking up costs one turn and no follow-up
-        poll, and the cursor has already moved — nothing to pass as --after next time.
+    if args.bus_cmd == "listen":
+        def mint(label):
+            cmd = c.call("bus_connect", {"label": label})["monitor_command"]
+            return cmd.split("--label ", 1)[1].strip().strip("'") if "--label " in cmd else cmd
 
-    Runs until there is news or until there is nobody left to tell. The thing it must never do is
-    outlive its agent while still pinging, because that holds a session in the directory
-    advertising interruptible=true when nothing can wake it — the one lie that flag must not tell.
-    That is enforced by watching the harness process, not by a timer: an idle timer taxes exactly
-    the long-lived sessions this is for, and "an hour has passed" was never evidence that anyone
-    had gone away. --max-idle stays available for harnesses where the pid is not knowable.
-    """
-    rooms = [r for r in (args.rooms or "").split(",") if r]
-    started = time.monotonic()
-    next_ping = 0.0
-    parent = _harness_pid(args.parent_pid)
-    try:
-        while True:
-            now = time.monotonic()
-            if parent is not None and not _alive(parent):
-                # Leave properly rather than decaying: bye reopens anything we claimed at once,
-                # instead of making requesters wait out a lease nobody is serving.
-                try:
-                    c.call("bus_bye", {"session_id": args.session_id})
-                except HivemindError:
-                    pass
-                _out({"session_id": args.session_id, "orphaned": True, "watched_pid": parent,
-                      "hint": "harness gone; session ended rather than left advertising itself"})
-                return SIDECAR_ORPHANED
-            if now >= next_ping:
-                c.call("bus_ping", {"session_id": args.session_id, "ttl": args.ttl})
-                next_ping = now + args.ping_every
-            idle = now - started
-            if args.max_idle and idle >= args.max_idle:
-                _out({"session_id": args.session_id, "messages": [], "count": 0,
-                      "idle_exit": True, "idle_seconds": round(idle),
-                      "hint": "no traffic within --max-idle; re-arm if the agent is still alive"})
-                return WAIT_TIMEOUT
-            budget = args.wait
-            if args.max_idle:                        # never block past the idle deadline
-                budget = min(budget, max(1.0, args.max_idle - idle))
-            out = c.bus_wait(args.session_id, wait=budget, rooms=rooms or None,
-                             limit=args.limit, interval=args.interval)
-            if not out.get("messages"):
-                continue
-            # Peek said there is something; now consume it for real. Deliberately not reusing the
-            # peeked copy: poll is what advances the cursor, and reading it back is what proves
-            # the messages are ours rather than something another reader on this session took.
-            drained = c.call("bus_poll", {"session_id": args.session_id, "limit": args.limit,
-                                          "rooms": rooms or None})
-            if not drained.get("messages"):
-                continue                             # drained elsewhere; not worth a wake-up
-            _out(drained)
-            return WAIT_MESSAGES
-    except HivemindError as e:
-        if e.kind in ("invalid", "not_found"):
-            _out({"session_id": args.session_id, "session_gone": str(e),
-                  "hint": "call bus_hello for a new session; capabilities must be re-advertised"})
-            return SIDECAR_GONE
-        raise
-    except httpx.TransportError as e:
-        # The client already retried with backoff, so reaching here means the server is properly
-        # unreachable — a dropped tunnel, not a blip. Say so and stop: pinging into a closed
-        # socket cannot keep the session alive, and the agent should be told rather than left
-        # with a watcher quietly failing in the background.
-        _out({"session_id": args.session_id, "unreachable": f"{type(e).__name__}: {e}",
-              "hint": "server unreachable; restore the connection, then bus_hello and re-arm"})
-        return SIDECAR_UNREACHABLE
+        def mint_url(label):
+            return c.call("bus_connect", {"label": label})["ws_url"]
+
+        if args.url:
+            # Explicit URL: single ticket, so this cannot survive a reconnect. Supported for
+            # debugging; agents are given a --label command instead.
+            return _bus_mod.run_listen(args.url, retry=not args.once, remint=None)
+        if not args.label:
+            _die("give --label (recommended) or --url")
+        return _bus_mod.run_listen(mint_url(args.label), retry=not args.once,
+                                   remint=lambda: mint_url(args.label))
+
+    if args.bus_cmd == "connect":
+        _out(c.call("bus_connect", {"label": args.label}))
+    elif args.bus_cmd == "send":
+        _out(c.call("bus_send", {"to": args.to, "body": args.body}))
+    elif args.bus_cmd == "broadcast":
+        _out(c.call("bus_broadcast", {"body": args.body, "room": args.room}))
+    elif args.bus_cmd == "peers":
+        _out(c.call("bus_peers", {"online_only": args.online_only}))
+    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -354,107 +218,21 @@ def build_parser() -> argparse.ArgumentParser:
     trt = tr.add_parser("status"); trt.add_argument("trap_id"); trt.add_argument("status")
     trt.add_argument("--reason", default="")
 
-    # ── agent bus ────────────────────────────────────────────────────────────────
-    bs = sub.add_parser("bus", help="live coordination between agent sessions").add_subparsers(
+    # ── agent bus (WebSocket push) ───────────────────────────────────────────────
+    bus = sub.add_parser("bus", help="live messaging between agent sessions").add_subparsers(
         dest="bus_cmd", required=True)
-    bh = bs.add_parser("hello", help="register this session and advertise capabilities")
-    bh.add_argument("--label", required=True)
-    bh.add_argument("--capability", action="append", dest="capabilities", default=[],
-                    metavar="NAME[=JSON]",
-                    help="repeatable, e.g. --capability browser.cdp "
-                         "--capability device.handset.attached='{\"serial\":\"x\"}'")
-    bh.add_argument("--harness"); bh.add_argument("--room", action="append", dest="rooms")
-    bh.add_argument("--interruptible", action="store_true",
-                    help="a watcher can wake this session (true with a backgrounded `bus wait`)")
-    bh.add_argument("--ttl", type=int, default=0)
-    bp = bs.add_parser("ping"); bp.add_argument("session_id")
-    bp.add_argument("--capability", action="append", dest="capabilities")
-    bp.add_argument("--status"); bp.add_argument("--ttl", type=int, default=0)
-    bs.add_parser("bye").add_argument("session_id")
-
-    ba = bs.add_parser("agents"); ba.add_argument("--capability")
-    ba.add_argument("--include-ended", action="store_true")
-    bs.add_parser("capabilities")
-    bs.add_parser("rooms")
-    bs.add_parser("stats")
-    bs.add_parser("reap")
-    bj = bs.add_parser("join"); bj.add_argument("session_id"); bj.add_argument("room")
-    bl = bs.add_parser("leave"); bl.add_argument("session_id"); bl.add_argument("room")
-
-    ref_help = ("repeatable; a bare node_id, or JSON like "
-                "'{\"kind\":\"traversal\",\"id\":\"01M2…\",\"edge_types\":[\"calls\"],\"depth\":2}'")
-    bpo = bs.add_parser("post"); bpo.add_argument("session_id"); bpo.add_argument("body")
-    bpo.add_argument("--room"); bpo.add_argument("--to", dest="to_session")
-    bpo.add_argument("--kind", default="chat", help="chat|question|system")
-    bpo.add_argument("--data")
-    bpo.add_argument("--reply-to", type=int, metavar="SEQ",
-                     help="answer that message; inherits its room")
-    bpo.add_argument("--ref", action="append", dest="refs", metavar="NODE_ID|JSON",
-                     help=ref_help)
-    bpl = bs.add_parser("poll"); bpl.add_argument("session_id")
-    bpl.add_argument("--limit", type=int, default=50); bpl.add_argument("--after", type=int)
-    bpl.add_argument("--include-self", action="store_true")
-    bpk = bs.add_parser("peek"); bpk.add_argument("session_id")
-    bpk.add_argument("--limit", type=int, default=50); bpk.add_argument("--after", type=int)
-    bak = bs.add_parser("ack"); bak.add_argument("session_id"); bak.add_argument("seq", type=int)
-    bhi = bs.add_parser("history"); bhi.add_argument("room")
-    bhi.add_argument("--limit", type=int, default=50); bhi.add_argument("--before", type=int)
-    bth = bs.add_parser("thread", help="a message and every reply to it")
-    bth.add_argument("seq", type=int); bth.add_argument("--limit", type=int, default=200)
-
-    bw = bs.add_parser("wait", help="block until a message arrives, then exit (the interrupt)")
-    bw.add_argument("session_id")
-    bw.add_argument("--wait", type=float, default=25.0, help="seconds to block per call")
-    bw.add_argument("--rooms", help="comma-separated filter")
-    bw.add_argument("--after", type=int); bw.add_argument("--limit", type=int, default=50)
-    bw.add_argument("--interval", type=float, default=1.0)
-    bw.add_argument("--follow", action="store_true",
-                    help="keep waiting and printing instead of exiting on the first batch")
-
-    bsc = bs.add_parser("sidecar",
-                        help="heartbeat + block + drain: wake the agent only for real traffic")
-    bsc.add_argument("session_id")
-    bsc.add_argument("--wait", type=float, default=60.0, help="seconds to block per call")
-    bsc.add_argument("--ping-every", type=float, default=300.0, dest="ping_every",
-                     help="heartbeat interval; keep it comfortably under --ttl")
-    bsc.add_argument("--ttl", type=int, default=900,
-                     help="session lifetime each heartbeat refreshes")
-    bsc.add_argument("--max-idle", type=float, default=0.0, dest="max_idle",
-                     help="exit 75 after this long with no traffic. Default 0 (never): a quiet "
-                          "bus should cost an agent nothing, and outliving the agent is caught by "
-                          "--parent-pid instead. Set it only where no pid can be watched")
-    bsc.add_argument("--parent-pid", type=int, default=None, dest="parent_pid",
-                     help="exit 71 (and bus_bye) when this pid dies — the process that re-invokes "
-                          "the agent. Default: auto-detected as our shell's parent. 0 disables, "
-                          "which risks a dead session advertising interruptible=true")
-    bsc.add_argument("--rooms", help="comma-separated filter")
-    bsc.add_argument("--limit", type=int, default=50)
-    bsc.add_argument("--interval", type=float, default=1.0)
-
-    brq = bs.add_parser("request"); brq.add_argument("session_id")
-    brq.add_argument("--task", required=True)
-    brq.add_argument("--needs", action="append", dest="needs")
-    brq.add_argument("--to", dest="to_session"); brq.add_argument("--payload")
-    brq.add_argument("--room"); brq.add_argument("--lease-sec", type=int, default=0)
-    brq.add_argument("--ttl", type=int, default=3600)
-    brq.add_argument("--ref", action="append", dest="refs", metavar="NODE_ID|JSON",
-                     help="what the work is about; " + ref_help)
-    bc = bs.add_parser("claim"); bc.add_argument("session_id"); bc.add_argument("request_id")
-    bc.add_argument("--lease-sec", type=int, default=0)
-    brl = bs.add_parser("release"); brl.add_argument("session_id"); brl.add_argument("request_id")
-    brl.add_argument("--reason", default="")
-    brs = bs.add_parser("respond"); brs.add_argument("session_id"); brs.add_argument("request_id")
-    brs.add_argument("--result"); brs.add_argument("--error")
-    brs.add_argument("--ref", action="append", dest="refs", metavar="NODE_ID|JSON",
-                     help="what you PRODUCED (graph_upsert it, then point at it); " + ref_help)
-    bs.add_parser("request-get").add_argument("request_id")
-    brl2 = bs.add_parser("requests"); brl2.add_argument("--session"); brl2.add_argument("--state")
-    brl2.add_argument("--claimable", action="store_true")
-    bre = bs.add_parser("resolve", help="follow a message's/request's refs into the graph")
-    bre.add_argument("--request-id"); bre.add_argument("--seq", type=int)
-    bre.add_argument("--limit", type=int, default=25)
-    bnr = bs.add_parser("node-refs", help="what live bus traffic points at this node")
-    bnr.add_argument("node_id"); bnr.add_argument("--limit", type=int, default=50)
+    bl = bus.add_parser("listen", help="stream messages; one line per message (for Monitor)")
+    bl.add_argument("--url", help="ws:// URL from bus_connect (includes the single-use ticket)")
+    bl.add_argument("--label", help="connect as this peer and mint the ticket automatically")
+    bl.add_argument("--once", action="store_true", help="exit on disconnect instead of retrying")
+    bsnd = bus.add_parser("send", help="send a message to one peer")
+    bsnd.add_argument("to"); bsnd.add_argument("body")
+    bbc = bus.add_parser("broadcast", help="send to everyone in a room")
+    bbc.add_argument("body"); bbc.add_argument("--room", default="lobby")
+    bp = bus.add_parser("peers", help="who is connected")
+    bp.add_argument("--online-only", action="store_true")
+    bus.add_parser("connect", help="mint a ticket and print the Monitor command")\
+        .add_argument("label")
 
     guide = sub.add_parser("guide").add_subparsers(dest="guide_cmd", required=True)
     guide.add_parser("get").add_argument("section", nargs="?")

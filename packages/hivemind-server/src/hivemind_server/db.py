@@ -91,18 +91,16 @@ class Database:
         ("skill_link", "score", "REAL"),
         ("tool_link", "source", "TEXT NOT NULL DEFAULT 'auto'"),
         ("tool_link", "score", "REAL"),
-        # Threading, added after bus_message shipped. SQLite allows ADD COLUMN with a REFERENCES
-        # clause as long as the default is NULL, and the ON DELETE SET NULL then behaves the same
-        # as on a freshly-created table (verified on 3.51.0), so a migrated database and a new
-        # one end up identical.
-        ("bus_message", "reply_to",
-         "INTEGER REFERENCES bus_message(seq) ON DELETE SET NULL"),
-        # A session now stays alive by working as well as by pinging (see bus.poll), and poll has
-        # to know how far to extend. It must be the session's OWN ttl: reaching for a global
-        # default would silently downgrade a session that asked for an hour to 15 minutes the
-        # first time it polled.
-        ("bus_session", "ttl", "INTEGER NOT NULL DEFAULT 900"),
+
+
+
     )
+
+    # Tables from a removed feature. Dropped on startup so a database that predates the removal
+    # converges on the same shape as a fresh one. The v1 polling bus was replaced by WebSocket
+    # push (docs/bus.md); its data was ephemeral by design, so there is nothing to migrate.
+    _DROPPED = ("bus_ref", "bus_request", "bus_message", "bus_membership", "bus_capability",
+                "bus_session")
 
     def apply_schema(self) -> None:
         con = self.conn()
@@ -112,6 +110,8 @@ class Database:
             # is a silent no-op while CREATE INDEX is not — it fails with "no such column". This
             # order is safe both ways: on a fresh database every PRAGMA below returns empty, so
             # every migration is skipped and the script creates the columns itself.
+            for table in self._DROPPED:
+                con.execute(f"DROP TABLE IF EXISTS {table}")
             for table, column, decl in self._MIGRATIONS:
                 try:
                     cols = {r[1] for r in con.execute(f"PRAGMA table_info({table})")}

@@ -18,3 +18,5 @@ idna==3.19
     #   httpx
 typing-extensions==4.16.0 ; python_full_version < '3.13'
     # via anyio
+websockets==17.0.1
+    # via hivemind
