@@ -13,6 +13,23 @@ done
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 OFFLINE="$HERE/../references/OFFLINE.md"
+
+# Install the bus listener at a fixed, shell-expandable path.
+#
+# bus_connect hands the agent a Monitor command, and a Monitor command runs in a plain shell where
+# — measured — neither CLAUDE_PLUGIN_ROOT nor CLAUDE_SKILL_DIR is set. So the command cannot name
+# the plugin directory, and the server cannot know it either. Copying the listener to a path built
+# only from $HOME makes one fixed string work on every machine. Refreshed on each skill load, so
+# it tracks the installed plugin version. Silent and best-effort: this must never fail the skill.
+LISTENER_SRC="$HERE/bus-listen.py"
+LISTENER_DST="${HIVEMIND_LISTENER:-$HOME/.hivemind/bus-listen.py}"
+if [ -f "$LISTENER_SRC" ]; then
+  if ! cmp -s "$LISTENER_SRC" "$LISTENER_DST" 2>/dev/null; then
+    mkdir -p "$(dirname "$LISTENER_DST")" 2>/dev/null &&
+      cp "$LISTENER_SRC" "$LISTENER_DST" 2>/dev/null &&
+      chmod +x "$LISTENER_DST" 2>/dev/null
+  fi
+fi
 CACHE_DIR="${HIVEMIND_CACHE_DIR:-$HOME/.cache/hivemind}"
 CACHE="$CACHE_DIR/guide-$SECTION.md"
 ETAG="$CACHE_DIR/guide-$SECTION.etag"

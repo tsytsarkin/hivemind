@@ -18,15 +18,9 @@ class Config:
         self.tokens_path = Path(_env("HIVEMIND_TOKENS", str(self.data_dir / "tokens.json")))
         self.max_blob_bytes = int(_env("HIVEMIND_MAX_BLOB", str(2 * 1024 * 1024 * 1024)))  # 2 GiB
         self.blob_grace_seconds = int(_env("HIVEMIND_BLOB_GRACE", "259200"))               # 72h: time to attach
-        # ── agent bus ────────────────────────────────────────────────────────────
-        # A session is live until its heartbeat deadline; any bus call refreshes it.
-        self.bus_session_ttl = int(_env("HIVEMIND_BUS_SESSION_TTL", "900"))        # 15 min
-        # Messages are ephemeral by construction — anything durable belongs in the graph.
-        self.bus_message_ttl = int(_env("HIVEMIND_BUS_MSG_TTL", "604800"))         # 7 days
-        # How long a claim is held before the request reopens for someone else.
-        self.bus_lease_seconds = int(_env("HIVEMIND_BUS_LEASE", "300"))            # 5 min
-        # Ceiling on a single long-poll; keep under any proxy/client idle timeout.
-        self.bus_max_wait = int(_env("HIVEMIND_BUS_MAX_WAIT", "300"))              # 5 min
+        # The agent bus keeps no configurable state: presence is the WebSocket and the
+        # offline queue is bounded in bus_ws.py. The v1 knobs (session TTL, message TTL, lease,
+        # max long-poll) described a poll/claim design that no longer exists.
         # DNS-rebinding host allowlist for the MCP transport. '*' disables the check (LAN/mesh).
         hosts = _env("HIVEMIND_ALLOWED_HOSTS", "*")
         self.allowed_hosts = [h.strip() for h in hosts.split(",") if h.strip()]

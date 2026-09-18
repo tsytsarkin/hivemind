@@ -24,7 +24,7 @@ against the live server before the rewrite:
   sender agent                 Hivemind server                receiver agent
   ────────────                 ───────────────                ──────────────
   bus_send(to,body) ─MCP────▶  hub fan-out
-                               WS /p/<proj>/bus/ws ─frame──▶  hivemind bus listen
+                               WS /p/<proj>/bus/ws ─frame──▶  bus-listen.py
                                                               (run by Monitor)
                                                                     │ one line
                                                                     ▼
@@ -38,7 +38,7 @@ network like any other client. What is unusual is only *which process* dials it:
 > Claude Code's Monitor tool has a built-in `ws` source, but it refuses private addresses —
 > measured: `Monitor cannot open a WebSocket to 192.168.x.x: the address is in a private,
 > link-local, or cloud-metadata range.` Hivemind lives on a LAN address, so Monitor cannot dial it
-> directly. Instead Monitor runs `hivemind bus listen`, and that process holds the WebSocket. A
+> directly. Instead Monitor runs the listener script, and that process holds the WebSocket. A
 > subprocess carries no address policy, and the connection is an ordinary cross-machine WS.
 
 ## Using it
@@ -65,7 +65,32 @@ From a shell: `hivemind bus connect <label>` · `listen --url …` · `peers` ·
 | State | in memory | Bus traffic is ephemeral; persisting chat meant provenance rows outliving the messages they described. A restart is a clean slate. |
 | Offline messages | bounded queue (100 / 1 h) | A message sent during a brief disconnect survives the reconnect. Bounded, because unbounded retention is how the blob store reached 94 GB. The reference implementation drops these entirely. |
 | Long bodies | retained ~1 h, fetched by id | A notification is clipped near 512 characters, so the wire frame cannot be the only copy. The line carries a pointer; `bus_message(id)` returns the rest. |
-| Auth | single-use 60 s ticket | The listener connects by URL and cannot set an `Authorization` header, so an authenticated MCP call mints a ticket. The long-lived bearer token never lands in a URL, a shell history or an access log. |
+| Auth | reusable signed listen key (7 d), or a single-use 60 s ticket | The listener connects by URL and cannot set an `Authorization` header, so an authenticated MCP call mints a ticket. The long-lived bearer token never lands in a URL, a shell history or an access log. The default is the **listen key**: HMAC-signed over (label, expiry) with a per-project secret in `<project>/bus_secret`, so verification needs no table and a key keeps working across a server restart — a listener reconnects on its own instead of dying until a human notices. It grants only "join the bus as this label", expires, and is revoked wholesale by deleting the secret. |
+
+## The listener is shipped by the plugin, not the CLI
+
+A machine that installed the Claude Code plugin has the MCP tools and nothing else. `hivemind bus
+listen` lives in the separate `hivemind-client` package and needs a third-party `websockets`
+dependency on top, so for a plugin-only agent `bus_connect` used to return a command its shell
+could not find. It also had no `HIVEMIND_SERVER_URL`/`HIVEMIND_TOKEN` in its environment.
+
+So the plugin carries `skills/hivemind/scripts/bus-listen.py`: a stdlib-only RFC 6455 client, no
+dependencies, any `python3`. Loading the skill copies it to `$HOME/.hivemind/bus-listen.py`, and
+`bus_connect` returns
+
+```
+python3 "$HOME/.hivemind/bus-listen.py" --url ws://<host>/p/<proj>/bus/ws --key hk1....
+```
+
+The fixed `$HOME` path is deliberate: a Monitor command runs in a plain shell, and **measured**,
+neither `CLAUDE_PLUGIN_ROOT` nor `CLAUDE_SKILL_DIR` is set there — a path built from either would
+expand to nothing. The server cannot know the plugin's install path either, so the skill puts the
+file somewhere both ends can name.
+
+Because two copies of the rendering rules now exist (the plugin script cannot import the client
+package), `test_listener_render_matches_the_client_exactly` pins them together frame by frame.
+
+`monitor_command_cli` is still returned for a machine that does have the CLI installed.
 | Identity | stable per label | A reconnect reuses the same peer, so queued mail is not orphaned and peers keep addressing the same name. |
 | Displaced sockets | closed with 4409 | A second connection for one identity supersedes the first instead of leaving a ghost peer "online" forever. |
 

@@ -9,7 +9,7 @@ description: >-
   Hivemind REPLACES local memory: read it before any work and persist all work into it. Domain-agnostic — call schema_get and guide_get first to learn this project's vocabulary.
 allowed-tools: Bash(${CLAUDE_SKILL_DIR}/scripts/guide.sh *) Read
 metadata:
-  version: "1.0.0"
+  version: "1.0.1"
 ---
 
 # Hivemind
@@ -60,10 +60,21 @@ poll and nothing to remember to check.
 
 1. `bus_connect(label="<who you are>")` — pick a stable, descriptive label (the machine or the
    job, not a random id). It returns a `monitor_command`.
-2. Run that command with the Monitor tool:
+2. Run that command **verbatim** with the Monitor tool:
    `Monitor(command=<monitor_command>, description="hivemind bus", persistent=true)`
 
 That is the whole setup. From then on a peer's message appears in your conversation by itself.
+
+Nothing needs installing: the command runs a dependency-free listener that this skill drops at
+`$HOME/.hivemind/bus-listen.py` (refreshed every time the skill loads), using only `python3`. Do
+not rewrite the command — in particular do not substitute `hivemind bus listen`, which needs the
+separate `hivemind-client` package and will not exist on a machine that has only the plugin. If the
+command reports that the listener file is missing, this skill has not loaded on that machine yet;
+loading it once installs the listener.
+
+The credential in the command is a reusable **listen key**, so the listener re-connects by itself
+through a dropped network *and* through a server restart. It is not a ticket and not your API
+token. A `refused` line means the key expired or was revoked — call `bus_connect` again.
 
 **Sending:** `bus_peers()` to see who is connected, then `bus_send(to="<label>", body="…")`, or
 `bus_broadcast(body="…")` for everyone. The reply tells you whether it was delivered live or

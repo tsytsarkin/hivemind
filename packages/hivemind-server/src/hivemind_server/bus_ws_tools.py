@@ -11,7 +11,7 @@ from typing import Optional
 
 from mcp.types import ToolAnnotations
 
-from .bus_ws import BusError, MAX_BODY, hub_for
+from .bus_ws import BusError, MAX_BODY, hub_for, register_secret
 
 RO = ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True)
 WRITE = ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=False)
@@ -30,8 +30,15 @@ def _envelope(fn):
     return wrap
 
 
+# Where the skill installs the dependency-free listener. It must be an absolute path that any
+# shell expands, because a Monitor command runs in a plain shell: measured, neither
+# CLAUDE_PLUGIN_ROOT nor CLAUDE_SKILL_DIR is set there, so a path built from either is empty.
+LISTENER = "$HOME/.hivemind/bus-listen.py"
+
+
 def attach(mcp, project, cfg) -> None:
     hub = hub_for(project.name)
+    register_secret(project.name, project.dir / "bus_secret")
     # The listener needs a URL it can reach. cfg.public_url is what the deployment advertises;
     # it is only ever used to build the string handed back to the agent.
     base = getattr(cfg, "public_url", "").rstrip("/")
@@ -47,21 +54,31 @@ def attach(mcp, project, cfg) -> None:
                           "stable and descriptive (the machine or the job, not a random id).")
     @_envelope
     def bus_connect(label: str, meta: Optional[dict] = None) -> dict:
+        k = hub.mint_listen_key(label, meta)
         t = hub.mint_ticket(label, meta)
         return {
-            "peer": t["label"],
-            # The command carries the LABEL, not the ticket. The listener mints its own ticket on
-            # start and again on every reconnect, so a dropped network does not end the session —
-            # a single-use ticket baked into argv would make the first blip terminal, which is
-            # how the previous design failed. It also keeps the ticket out of the process list.
-            "monitor_command": f"hivemind bus listen --label {t['label']}",
+            "peer": k["label"],
+            # The default command runs the listener the SKILL installs, with python3 and nothing
+            # else. It deliberately does not name the `hivemind` CLI: that ships in
+            # hivemind-client, which a machine holding only the plugin does not have, and it needs
+            # a third-party websockets package on top. A plugin-only agent could not connect at
+            # all. The listener under $HOME is dependency-free and always present once the skill
+            # has loaded once.
+            "monitor_command": (f'python3 "{LISTENER}" --url {ws_url} '
+                                f'--key {k["listen_key"]}'),
+            # The key is reusable and outlives a restart, so the listener reconnects on its own.
+            # A single-use ticket in argv would make the first network blip terminal.
+            "listen_key": k["listen_key"],
+            "ws_url": ws_url,
+            # For a machine that does have the hivemind CLI installed, with HIVEMIND_SERVER_URL
+            # and HIVEMIND_TOKEN exported. Equivalent, just not available by default.
+            "monitor_command_cli": f"hivemind bus listen --label {k['label']}",
             "ticket": t["ticket"],
-            # Advisory only. A server bound to 0.0.0.0 cannot know the address a client used to
-            # reach it, so clients build the ws URL from their own base URL instead.
-            "ws_url_hint": f"{ws_url}?ticket={t['ticket']}",
             "next": ("run monitor_command with the Monitor tool now: "
                      "Monitor(command=<monitor_command>, description='hivemind bus', "
-                     "persistent=true). It reconnects by itself if the connection drops."),
+                     "persistent=true). It reconnects by itself if the connection drops. "
+                     f"If it reports that {LISTENER} does not exist, load the hivemind skill "
+                     "once — it installs the listener — then run it again."),
         }
 
     @mcp.tool(annotations=WRITE,

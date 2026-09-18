@@ -240,7 +240,7 @@ wheels = [
 
 [[package]]
 name = "hivemind"
-version = "1.0.0"
+version = "1.0.1"
 source = { editable = "packages/hivemind-client" }
 dependencies = [
     { name = "httpx" },
@@ -255,7 +255,7 @@ requires-dist = [
 
 [[package]]
 name = "hivemind-server"
-version = "1.0.0"
+version = "1.0.1"
 source = { editable = "packages/hivemind-server" }
 dependencies = [
     { name = "httpx" },

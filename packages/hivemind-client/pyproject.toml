@@ -1,6 +1,6 @@
 [project]
 name = "hivemind"
-version = "1.0.0"
+version = "1.0.1"
 description = "Hivemind client + CLI: talk to a hivemind server (graph, artifacts, tools, guide)"
 readme = "README.md"
 requires-python = ">=3.9"           # MUST run on the Mac Studio's system Python 3.9.6

@@ -36,10 +36,15 @@ Design notes that are load-bearing:
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
+import hmac
 import json
+import os
 import secrets
 import threading
 import time
+from pathlib import Path
 from collections import deque
 from typing import Any, Dict, Iterable, Optional
 
@@ -56,6 +61,50 @@ RECENT_MAX = 500             # recent frames kept retrievable by id
 RECENT_TTL = 3600.0          # ...and for how long
 RECENT_BYTES = 32 * 1024 * 1024   # ...and never more than this in total
 QUEUE_BYTES = 8 * 1024 * 1024     # per-peer offline queue byte ceiling
+LISTEN_KEY_TTL = 7 * 86400   # a listener's own credential: long-lived, reusable, revocable
+
+# Per-project HMAC secret for listen keys, loaded from the project directory at startup.
+_SECRETS: Dict[str, bytes] = {}
+
+
+def register_secret(project_name: str, path: Path) -> bytes:
+    """Load (or create) the secret that signs this project's listen keys.
+
+    It lives on disk rather than in memory so a key stays valid across a server restart. That is
+    the whole point of the key: a listener that reconnects after the server bounced must get back
+    in on its own, without an agent noticing and re-running bus_connect.
+    """
+    try:
+        secret = path.read_bytes()
+        if len(secret) >= 32:
+            _SECRETS[project_name] = secret
+            return secret
+    except FileNotFoundError:
+        pass
+    secret = secrets.token_bytes(32)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_bytes(secret)
+    os.chmod(tmp, 0o600)          # the signing key for bus access: owner-only
+    tmp.replace(path)
+    _SECRETS[project_name] = secret
+    return secret
+
+
+def _secret(project_name: str) -> bytes:
+    """Fall back to a process-lifetime secret when no project dir was registered (unit tests)."""
+    got = _SECRETS.get(project_name)
+    if got is None:
+        got = _SECRETS[project_name] = secrets.token_bytes(32)
+    return got
+
+
+def _b64(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def _unb64(txt: str) -> bytes:
+    return base64.urlsafe_b64decode(txt + "=" * (-len(txt) % 4))
 
 
 class BusError(Exception):
@@ -101,7 +150,8 @@ class _Peer:
 class Hub:
     """In-process registry of connected agents and the fan-out that feeds them."""
 
-    def __init__(self) -> None:
+    def __init__(self, name: str = "default") -> None:
+        self.name = name
         self._peers: Dict[str, _Peer] = {}        # peer_id -> _Peer
         self._by_label: Dict[str, str] = {}       # label -> peer_id (last writer wins)
         self._tickets: Dict[str, tuple] = {}      # ticket -> (peer_id, expires_at)
@@ -146,18 +196,64 @@ class Hub:
         """Create (or re-use) a peer identity and hand back a single-use connect ticket."""
         label = (label or "agent").strip()[:64]
         with self._guard:
-            peer_id = self._by_label.get(label)
-            if peer_id is None or peer_id not in self._peers:
-                peer_id = ulid()
-                self._peers[peer_id] = _Peer(peer_id, label, meta)
-                self._by_label[label] = peer_id
-            elif meta:
-                self._peers[peer_id].meta.update(meta)
+            peer_id = self._ensure_peer(label, meta).peer_id
             ticket = secrets.token_urlsafe(24)
             self._tickets[ticket] = (peer_id, _now() + TICKET_TTL)
             self._sweep_tickets()
         return {"ticket": ticket, "peer_id": peer_id, "label": label,
                 "expires_in": int(TICKET_TTL)}
+
+    def mint_listen_key(self, label: str, meta: Optional[dict] = None) -> dict:
+        """Hand back a reusable credential a listener can reconnect with on its own.
+
+        A ticket is single-use and lasts a minute, which is right for one handshake and wrong for a
+        process that must survive a dropped link or a server restart. This is signed rather than
+        stored: verification needs no table, so it still works after the process that minted it is
+        gone. It carries no authority beyond joining the bus under this label, expires, and is
+        revocable wholesale by deleting the project's bus_secret.
+        """
+        label = (label or "agent").strip()[:64]
+        with self._guard:
+            self._ensure_peer(label, meta)
+        exp = int(_now() + LISTEN_KEY_TTL)
+        body = f"{_b64(label.encode())}.{exp}"
+        sig = hmac.new(_secret(self.name), body.encode(), hashlib.sha256).digest()
+        return {"listen_key": f"hk1.{body}.{_b64(sig)}", "label": label,
+                "expires_in": LISTEN_KEY_TTL}
+
+    def redeem_key(self, key: str) -> Optional[_Peer]:
+        """Verify a listen key and return its peer, creating it if the server has restarted."""
+        try:
+            scheme, label_b64, exp_s, sig_b64 = key.split(".")
+        except (ValueError, AttributeError):
+            return None
+        if scheme != "hk1":
+            return None
+        body = f"{label_b64}.{exp_s}"
+        want = hmac.new(_secret(self.name), body.encode(), hashlib.sha256).digest()
+        try:
+            if not hmac.compare_digest(want, _unb64(sig_b64)):
+                return None
+            if _now() > int(exp_s):
+                return None
+            label = _unb64(label_b64).decode()
+        except (ValueError, UnicodeDecodeError):
+            return None
+        # Re-create on demand: after a restart the registry is empty, and refusing here would mean
+        # every listener stayed dead until a human noticed.
+        with self._guard:
+            return self._ensure_peer(label, None)
+
+    def _ensure_peer(self, label: str, meta: Optional[dict]) -> _Peer:
+        """Get-or-create the peer for a label. Caller holds the guard."""
+        peer_id = self._by_label.get(label)
+        if peer_id is None or peer_id not in self._peers:
+            peer_id = ulid()
+            self._peers[peer_id] = _Peer(peer_id, label, meta)
+            self._by_label[label] = peer_id
+        elif meta:
+            self._peers[peer_id].meta.update(meta)
+        return self._peers[peer_id]
 
     def redeem(self, ticket: str) -> Optional[_Peer]:
         """Burn a ticket and return its peer. Single use: a replayed ticket is refused."""
@@ -327,7 +423,7 @@ def set_loop(loop: Any) -> None:
 def hub_for(project_name: str) -> Hub:
     h = _hubs.get(project_name)
     if h is None:
-        h = _hubs[project_name] = Hub()
+        h = _hubs[project_name] = Hub(project_name)
     return h
 
 
@@ -339,8 +435,10 @@ async def websocket_endpoint(ws: Any, project_name: str) -> None:
     happens to be sent to it.
     """
     hub = hub_for(project_name)
-    ticket = ws.query_params.get("ticket", "")
-    peer = hub.redeem(ticket)
+    # Either credential works: a ticket (single-use, minted per connect) or a listen key (reusable,
+    # so a listener reconnects by itself across drops and restarts).
+    key = ws.query_params.get("key", "")
+    peer = hub.redeem_key(key) if key else hub.redeem(ws.query_params.get("ticket", ""))
     if peer is None:
         # 4401 is in the private range; the close code surfaces to Monitor so the agent sees WHY.
         await ws.close(code=4401)
