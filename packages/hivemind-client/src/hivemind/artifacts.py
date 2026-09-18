@@ -8,7 +8,6 @@ import hashlib
 import os
 from typing import Iterator, Optional
 
-import httpx
 
 _CHUNK = 1024 * 1024
 

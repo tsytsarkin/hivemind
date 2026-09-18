@@ -38,6 +38,7 @@ from __future__ import annotations
 import asyncio
 import json
 import secrets
+import threading
 import time
 from collections import deque
 from typing import Any, Dict, Iterable, Optional
@@ -53,6 +54,8 @@ MAX_BODY = 256 * 1024        # per-frame body cap; big payloads belong in the bl
 HEARTBEAT = 30.0             # server->client ping interval
 RECENT_MAX = 500             # recent frames kept retrievable by id
 RECENT_TTL = 3600.0          # ...and for how long
+RECENT_BYTES = 32 * 1024 * 1024   # ...and never more than this in total
+QUEUE_BYTES = 8 * 1024 * 1024     # per-peer offline queue byte ceiling
 
 
 class BusError(Exception):
@@ -102,14 +105,26 @@ class Hub:
         self._peers: Dict[str, _Peer] = {}        # peer_id -> _Peer
         self._by_label: Dict[str, str] = {}       # label -> peer_id (last writer wins)
         self._tickets: Dict[str, tuple] = {}      # ticket -> (peer_id, expires_at)
+        # MCP tool bodies run on worker threads while the event loop owns the sockets, so the
+        # registry is touched from two threads. An asyncio.Lock would not help — it only
+        # serialises coroutines on one loop. Individual dict ops are atomic under the GIL, but the
+        # compound ones here (check-then-create, check-then-forget) are not, and the second is how
+        # a peer that connects mid-sweep gets its live socket dropped.
+        self._guard = threading.RLock()
         # Sent frames, newest last, so a notification can carry a pointer instead of the text.
         # Claude Code clips a notification at ~512 characters, so anything longer would simply be
         # lost if the wire format were the only copy. Bounded and TTL'd like everything else here.
         self._recent: deque = deque(maxlen=RECENT_MAX)
-        self._lock = asyncio.Lock()
 
     def _remember(self, frame: dict) -> None:
-        self._recent.append({**frame, "_t": _now()})
+        # Bounding the COUNT is not enough: 500 frames at the 256 KB body cap is 128 MB held for
+        # an hour. Trim by bytes as well, oldest first, so retention cannot become a slow leak.
+        with self._guard:
+            self._recent.append({**frame, "_t": _now()})
+            total = sum(len(f.get("body") or "") for f in self._recent)
+            while total > RECENT_BYTES and len(self._recent) > 1:
+                dropped = self._recent.popleft()
+                total -= len(dropped.get("body") or "")
 
     def message(self, message_id: str) -> dict:
         """Full text of a recent message, by id — the out-of-band half of a clipped notification."""
@@ -130,28 +145,30 @@ class Hub:
     def mint_ticket(self, label: str, meta: Optional[dict] = None) -> dict:
         """Create (or re-use) a peer identity and hand back a single-use connect ticket."""
         label = (label or "agent").strip()[:64]
-        peer_id = self._by_label.get(label)
-        if peer_id is None or peer_id not in self._peers:
-            peer_id = ulid()
-            self._peers[peer_id] = _Peer(peer_id, label, meta)
-            self._by_label[label] = peer_id
-        elif meta:
-            self._peers[peer_id].meta.update(meta)
-        ticket = secrets.token_urlsafe(24)
-        self._tickets[ticket] = (peer_id, _now() + TICKET_TTL)
-        self._sweep_tickets()
+        with self._guard:
+            peer_id = self._by_label.get(label)
+            if peer_id is None or peer_id not in self._peers:
+                peer_id = ulid()
+                self._peers[peer_id] = _Peer(peer_id, label, meta)
+                self._by_label[label] = peer_id
+            elif meta:
+                self._peers[peer_id].meta.update(meta)
+            ticket = secrets.token_urlsafe(24)
+            self._tickets[ticket] = (peer_id, _now() + TICKET_TTL)
+            self._sweep_tickets()
         return {"ticket": ticket, "peer_id": peer_id, "label": label,
                 "expires_in": int(TICKET_TTL)}
 
     def redeem(self, ticket: str) -> Optional[_Peer]:
         """Burn a ticket and return its peer. Single use: a replayed ticket is refused."""
-        got = self._tickets.pop(ticket, None)
-        if got is None:
-            return None
-        peer_id, expires = got
-        if _now() > expires:
-            return None
-        return self._peers.get(peer_id)
+        with self._guard:
+            got = self._tickets.pop(ticket, None)
+            if got is None:
+                return None
+            peer_id, expires = got
+            if _now() > expires:
+                return None
+            return self._peers.get(peer_id)
 
     def _sweep_tickets(self) -> None:
         now = _now()
@@ -170,18 +187,20 @@ class Hub:
     def peers(self, *, online_only: bool = False) -> list:
         # Drop ghosts first: a peer that is offline AND has nothing queued is not coming back to
         # anything, and listing it invites a sender to address a label that will never read.
-        for pid, p in list(self._peers.items()):
-            if not p.online and not p.queue:
-                self.forget(p)
-        out = [p.public() for p in self._peers.values() if p.online or not online_only]
+        with self._guard:
+            for _pid, p in list(self._peers.items()):
+                if not p.online and not p.queue:
+                    self._forget_locked(p)
+            out = [p.public() for p in self._peers.values() if p.online or not online_only]
         return sorted(out, key=lambda d: (not d["online"], d["peer"]))
 
     # ── connection lifecycle ─────────────────────────────────────────────────────
     async def attach(self, peer: _Peer, ws: Any) -> list:
         """Bind a live socket, replacing any previous one, and drain queued mail."""
-        old = peer.ws
-        peer.ws = ws
-        peer.connected_at = _now()
+        with self._guard:
+            old = peer.ws
+            peer.ws = ws
+            peer.connected_at = _now()
         if old is not None:
             # A second connection for the same identity supersedes the first; closing the old
             # socket keeps presence honest instead of leaving a ghost peer online forever.
@@ -195,11 +214,24 @@ class Hub:
         return drained
 
     async def detach(self, peer: _Peer, ws: Any) -> None:
-        if peer.ws is ws:
-            peer.ws = None
-            peer.connected_at = None
+        with self._guard:
+            if peer.ws is ws:
+                peer.ws = None
+                peer.connected_at = None
 
-    def forget(self, peer: _Peer) -> None:
+    def forget(self, peer: _Peer, *, force: bool = False) -> None:
+        """Remove a peer. `force` is for an explicit bus_disconnect; without it this is a sweep
+        and must not touch a peer that is live or still holding mail."""
+        with self._guard:
+            self._forget_locked(peer, force=force)
+
+    def _forget_locked(self, peer: _Peer, *, force: bool = False) -> None:
+        # A sweep must never drop a peer holding a live socket: a connection can land between the
+        # liveness check and this call, and forgetting it would orphan the socket — the peer would
+        # look gone while its listener sat there receiving nothing. An explicit disconnect is a
+        # different intent and says so with force=True.
+        if not force and (peer.online or peer.queue):
+            return
         self._peers.pop(peer.peer_id, None)
         if self._by_label.get(peer.label) == peer.peer_id:
             self._by_label.pop(peer.label, None)
@@ -217,6 +249,10 @@ class Hub:
                 peer.ws = None
                 peer.connected_at = None
         peer.queue.append({**frame, "_t": _now()})
+        # Same reasoning per peer: maxlen caps the count, this caps the footprint.
+        qbytes = sum(len(f.get("body") or "") for f in peer.queue)
+        while qbytes > QUEUE_BYTES and len(peer.queue) > 1:
+            qbytes -= len(peer.queue.popleft().get("body") or "")
         return False
 
     async def send(self, sender: str, to: str, body: str,

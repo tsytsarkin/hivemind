@@ -107,7 +107,7 @@ def attach(mcp, project, cfg) -> None:
         p = hub.peer(label)
         if p is None:
             raise BusError(f"no peer {label!r}")
-        hub.forget(p)
+        hub.forget(p, force=True)     # explicit intent, unlike the sweep in bus_peers
         return {"peer": label, "disconnected": True,
                 "next": "stop the Monitor task with TaskStop"}
 

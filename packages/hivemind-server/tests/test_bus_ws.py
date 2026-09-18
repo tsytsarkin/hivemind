@@ -303,3 +303,91 @@ async def test_peers_drops_ghosts_but_keeps_those_with_queued_mail(hub):
     labels = [p["peer"] for p in hub.peers()]
     assert "ghost" not in labels
     assert "waiting" in labels, "a peer with queued mail must not be forgotten"
+
+
+# ── thread safety (MCP tools run on worker threads; the loop owns the sockets) ─
+@pytest.mark.anyio
+async def test_peer_that_connects_mid_sweep_is_not_forgotten(hub):
+    """peers() prunes ghosts. A peer connecting between the liveness check and the removal must
+    not be dropped, or its listener sits there holding an orphaned socket receiving nothing."""
+    p, ws, _ = connect(hub, "racer")
+    assert hub.peer("racer") is not None
+
+    # simulate the interleaving: the peer comes online, then a stale prune decision lands
+    await hub.attach(p, ws)
+    hub.forget(p)                                  # would previously have removed it
+    assert hub.peer("racer") is not None, "a live peer must never be forgotten"
+
+    await hub.send("s", "racer", "still reachable")
+    assert ws.bodies() == ["still reachable"]
+
+
+@pytest.mark.anyio
+async def test_peer_with_queued_mail_is_not_forgotten(hub):
+    p, _, _ = connect(hub, "has-mail")
+    await hub.send("s", "has-mail", "waiting for you")
+    hub.forget(p)
+    assert hub.peer("has-mail") is not None, "dropping it would discard queued mail"
+
+
+def test_concurrent_connects_for_one_label_yield_one_identity(hub):
+    """check-then-create is not atomic under the GIL; two threads must not make two peers."""
+    import threading
+
+    ids, barrier = [], threading.Barrier(8)
+
+    def worker():
+        barrier.wait()
+        ids.append(hub.mint_ticket("same-label")["peer_id"])
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads: t.start()
+    for t in threads: t.join()
+    assert len(set(ids)) == 1, f"one label must map to one peer, got {len(set(ids))}"
+
+
+def test_concurrent_ticket_redemption_yields_one_winner(hub):
+    """A ticket is single-use; two threads racing on it must not both connect."""
+    import threading
+
+    t = hub.mint_ticket("one-shot")["ticket"]
+    results, barrier = [], threading.Barrier(6)
+
+    def worker():
+        barrier.wait()
+        results.append(hub.redeem(t))
+
+    threads = [threading.Thread(target=worker) for _ in range(6)]
+    for th in threads: th.start()
+    for th in threads: th.join()
+    assert sum(r is not None for r in results) == 1, "exactly one redemption may succeed"
+
+
+@pytest.mark.anyio
+async def test_retention_is_bounded_by_bytes_not_just_count(hub):
+    """500 frames at the 256 KB body cap would be 128 MB held for an hour — a count bound alone
+    lets retention become a slow leak."""
+    big = "Z" * (512 * 1024 // 4)          # 128 KB each
+    b, _, _ = connect(hub, "offline-peer")
+    for _ in range(400):
+        await hub.send("s", "offline-peer", big)
+
+    recent_bytes = sum(len(f.get("body") or "") for f in hub._recent)
+    assert recent_bytes <= bus_ws.RECENT_BYTES, f"recent held {recent_bytes} bytes"
+    queue_bytes = sum(len(f.get("body") or "") for f in b.queue)
+    assert queue_bytes <= bus_ws.QUEUE_BYTES, f"queue held {queue_bytes} bytes"
+    assert len(b.queue) >= 1, "trimming must not empty the queue entirely"
+
+
+@pytest.mark.anyio
+async def test_explicit_disconnect_removes_a_live_peer(hub):
+    """The sweep must not drop a live peer, but bus_disconnect is explicit intent and must work —
+    guarding both with one rule silently turned disconnect into a no-op."""
+    p, ws, _ = connect(hub, "leaving")
+    await hub.attach(p, ws)
+
+    hub.forget(p)                       # sweep semantics: refuses, peer is live
+    assert hub.peer("leaving") is not None
+
+    hub.forget(p, force=True)           # explicit disconnect
+    assert hub.peer("leaving") is None

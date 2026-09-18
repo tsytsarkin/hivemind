@@ -21,7 +21,6 @@ import asyncio
 import json
 import random
 import re
-import sys
 from typing import Optional
 
 BODY_CAP = 300            # leaves room for the prefix AND the "fetch the rest" pointer

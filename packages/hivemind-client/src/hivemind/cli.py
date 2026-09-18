@@ -13,7 +13,6 @@ import sys
 import time
 from typing import Optional
 
-import httpx
 
 from .client import Client, HivemindError
 
