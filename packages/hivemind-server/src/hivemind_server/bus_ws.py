@@ -170,6 +170,10 @@ class Hub:
                 return None
             return self._peers.get(peer_id)
 
+    def _has_pending_ticket(self, peer_id: str) -> bool:
+        now = _now()
+        return any(pid == peer_id and now <= exp for pid, exp in self._tickets.values())
+
     def _sweep_tickets(self) -> None:
         now = _now()
         for t, (_, exp) in list(self._tickets.items()):
@@ -230,7 +234,11 @@ class Hub:
         # liveness check and this call, and forgetting it would orphan the socket — the peer would
         # look gone while its listener sat there receiving nothing. An explicit disconnect is a
         # different intent and says so with force=True.
-        if not force and (peer.online or peer.queue):
+        if not force and (peer.online or peer.queue or self._has_pending_ticket(peer.peer_id)):
+            # A peer that has just called bus_connect is offline with an empty queue — exactly
+            # what a ghost looks like — but its listener is about to redeem a ticket. Sweeping it
+            # here made redeem() resolve to a deleted peer and the connection was refused, so a
+            # bus_peers() call between connect and listen broke the connect.
             return
         self._peers.pop(peer.peer_id, None)
         if self._by_label.get(peer.label) == peer.peer_id:

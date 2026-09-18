@@ -391,3 +391,30 @@ async def test_explicit_disconnect_removes_a_live_peer(hub):
 
     hub.forget(p, force=True)           # explicit disconnect
     assert hub.peer("leaving") is None
+
+
+@pytest.mark.anyio
+async def test_connect_then_list_does_not_break_the_pending_connection(hub):
+    """A peer between bus_connect and its listener attaching is offline with an empty queue —
+    indistinguishable from a ghost. Sweeping it made redeem() resolve to a deleted peer and the
+    listener was refused, so any bus_peers() call in between broke the connect."""
+    t = hub.mint_ticket("pending")
+    assert hub.peers() is not None            # the sweep runs here
+    assert hub.peer("pending") is not None, "a peer awaiting its listener must survive a sweep"
+
+    peer = hub.redeem(t["ticket"])
+    assert peer is not None, "the ticket must still resolve after a listing"
+
+    ws = FakeWS()
+    await hub.attach(peer, ws)
+    await hub.send("s", "pending", "made it")
+    assert ws.bodies() == ["made it"]
+
+
+@pytest.mark.anyio
+async def test_a_peer_whose_ticket_expired_unused_is_still_swept(hub, monkeypatch):
+    """The reprieve is only for a live ticket; an abandoned connect must not linger forever."""
+    hub.mint_ticket("abandoned")
+    monkeypatch.setattr(bus_ws, "_now", lambda: bus_ws.time.time() + bus_ws.TICKET_TTL + 1)
+    hub.peers()
+    assert hub.peer("abandoned") is None
