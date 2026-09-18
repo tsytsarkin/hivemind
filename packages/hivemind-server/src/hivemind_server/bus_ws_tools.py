@@ -55,7 +55,10 @@ def attach(mcp, project, cfg) -> None:
             # a single-use ticket baked into argv would make the first blip terminal, which is
             # how the previous design failed. It also keeps the ticket out of the process list.
             "monitor_command": f"hivemind bus listen --label {t['label']}",
-            "ws_url": f"{ws_url}?ticket={t['ticket']}",
+            "ticket": t["ticket"],
+            # Advisory only. A server bound to 0.0.0.0 cannot know the address a client used to
+            # reach it, so clients build the ws URL from their own base URL instead.
+            "ws_url_hint": f"{ws_url}?ticket={t['ticket']}",
             "next": ("run monitor_command with the Monitor tool now: "
                      "Monitor(command=<monitor_command>, description='hivemind bus', "
                      "persistent=true). It reconnects by itself if the connection drops."),

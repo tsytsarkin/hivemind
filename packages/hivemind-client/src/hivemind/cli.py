@@ -117,7 +117,13 @@ def _bus(c, args) -> int:
             return cmd.split("--label ", 1)[1].strip().strip("'") if "--label " in cmd else cmd
 
         def mint_url(label):
-            return c.call("bus_connect", {"label": label})["ws_url"]
+            # Build the ws URL from the base URL this client already uses, NOT from whatever the
+            # server advertises: a server bound to 0.0.0.0 advertises 0.0.0.0, which no client can
+            # dial. The address that reached the server is by definition one that works.
+            ticket = c.call("bus_connect", {"label": label})["ticket"]
+            base = c.base_url
+            ws_base = "ws" + base[4:] if base.startswith("http") else base
+            return f"{ws_base}/bus/ws?ticket={ticket}"
 
         if args.url:
             # Explicit URL: single ticket, so this cannot survive a reconnect. Supported for

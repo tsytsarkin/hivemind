@@ -92,8 +92,6 @@ def build_app(cfg: Optional[Config] = None) -> Starlette:
         asgi = mcp.streamable_http_app(streamable_http_path="/mcp",
                                        transport_security=_transport_security(cfg),
                                        host=cfg.host)
-        mounts.append(Mount(f"/p/{project.name}", app=asgi))
-
         # The bus WebSocket is mounted at the Starlette level: MCPServer.custom_route registers
         # HTTP methods only, so a ws route cannot go through it. Auth is the connect ticket in the
         # query string (see bus_ws), not the bearer header, because the listener is launched by
@@ -103,7 +101,11 @@ def build_app(cfg: Optional[Config] = None) -> Starlette:
                 from . import bus_ws as _b
                 await _b.websocket_endpoint(ws, p.name)
             return endpoint
+        # Registered BEFORE the Mount: Starlette takes the first matching route, and
+        # Mount("/p/<name>") would otherwise swallow this path into the MCP app, which has no
+        # websocket handler and so refuses the connection.
         mounts.append(WebSocketRoute(f"/p/{project.name}/bus/ws", _ws_route()))
+        mounts.append(Mount(f"/p/{project.name}", app=asgi))
 
     async def healthz(_req: Request) -> Response:
         return JSONResponse({"ok": True, "projects": [p.name for p in registry.all()]})

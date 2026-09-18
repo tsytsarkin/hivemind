@@ -168,6 +168,11 @@ class Hub:
         return self._peers.get(pid) if pid else None
 
     def peers(self, *, online_only: bool = False) -> list:
+        # Drop ghosts first: a peer that is offline AND has nothing queued is not coming back to
+        # anything, and listing it invites a sender to address a label that will never read.
+        for pid, p in list(self._peers.items()):
+            if not p.online and not p.queue:
+                self.forget(p)
         out = [p.public() for p in self._peers.values() if p.online or not online_only]
         return sorted(out, key=lambda d: (not d["online"], d["peer"]))
 

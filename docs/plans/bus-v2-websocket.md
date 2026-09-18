@@ -44,7 +44,7 @@ bearer-token model — see Auth below.
 
 | Constraint | Consequence |
 |---|---|
-| **`Monitor.ws` refuses private/RFC1918 addresses** — measured: `Monitor cannot open a WebSocket to 192.168.0.30: the address is in a private, link-local, or cloud-metadata range.` Loopback is allowed; `192.168.0.155` is not. | **The ws source cannot reach our LAN server at all.** Agents connect instead through `Monitor(command: "hivemind bus listen")` — a subprocess carries no address policy. The server still speaks WebSocket; our CLI is the WS client and prints one line per frame. |
+| **`Monitor.ws` refuses private/RFC1918 addresses** — measured: `Monitor cannot open a WebSocket to <private-ip>: the address is in a private, link-local, or cloud-metadata range.` Loopback is allowed; `<server-ip>` is not. | **The ws source cannot reach our LAN server at all.** Agents connect instead through `Monitor(command: "hivemind bus listen")` — a subprocess carries no address policy. The server still speaks WebSocket; our CLI is the WS client and prints one line per frame. |
 | `Monitor.ws` accepts only `url` and `protocols` — **no custom headers** | Bearer token cannot be sent as a header. Auth must ride the URL or the subprotocol. |
 | **Notifications are clipped at ~512 chars** (empirical: reference-impl issue #2, measured on CC 2.1.126 — 511 delivered, 512 truncated; not in any Anthropic doc) | The printed line must fit a ~500-char budget: short prefix, body capped ~380, full text retrievable by id rather than inlined. |
 | `ws` is documented for the Monitor **tool** only, never for plugin `monitors.json` | Do not put a ws monitor in `monitors.json`; the skill calls `Monitor(command: …)`. |

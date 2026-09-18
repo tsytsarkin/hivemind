@@ -195,3 +195,23 @@ async def test_health_and_index_work_on_both_bases_without_a_token(env):
         assert (await c.get(f"/p/{proj.name}/skills")).status_code == 401
         ok = await c.get(f"/p/{proj.name}/skills", headers={"Authorization": f"Bearer {tok}"})
         assert ok.status_code == 200
+
+
+@pytest.mark.anyio
+async def test_bus_websocket_route_is_reachable(env):
+    """Route ORDER matters: Mount("/p/<name>") would otherwise swallow /p/<name>/bus/ws into the
+    MCP app, which has no websocket handler, and every listener would be refused."""
+    application, proj, tok = env
+    ws_paths = []
+    for r in application.routes:
+        path = getattr(r, "path", "")
+        if path.endswith("/bus/ws"):
+            ws_paths.append((path, type(r).__name__))
+    assert ws_paths, "no bus websocket route registered"
+    path, kind = ws_paths[0]
+    assert kind == "WebSocketRoute"
+    # and it must come BEFORE the catch-all mount for the same prefix
+    prefix = f"/p/{proj.name}"
+    order = [getattr(r, "path", "") for r in application.routes]
+    assert order.index(f"{prefix}/bus/ws") < order.index(prefix), \
+        "the websocket route must be matched before the project Mount"

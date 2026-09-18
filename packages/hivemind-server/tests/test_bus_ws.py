@@ -160,12 +160,13 @@ def test_reconnecting_reuses_the_same_identity(hub):
 async def test_presence_reflects_the_socket_not_a_clock(hub):
     """v1 expired sessions on a TTL and then errored on poll. Here liveness IS the connection."""
     b, bws, _ = connect(hub, "peer-a")
-    assert [p["online"] for p in hub.peers()] == [False]
     await hub.attach(b, bws)
     assert [p["online"] for p in hub.peers()] == [True]
     assert hub.peers(online_only=True)[0]["peer"] == "peer-a"
     await hub.detach(b, bws)
     assert hub.peers(online_only=True) == []
+    # and with nothing queued it is forgotten entirely rather than lingering as a ghost
+    assert hub.peers() == []
 
 
 @pytest.mark.anyio
@@ -286,3 +287,19 @@ async def test_listener_without_credentials_stops_instead_of_spinning():
     finally:
         busmod._once = orig
     assert rc == 2, "a refused connection with no credentials must exit, not spin"
+
+
+@pytest.mark.anyio
+async def test_peers_drops_ghosts_but_keeps_those_with_queued_mail(hub):
+    """An offline peer with nothing waiting is not coming back to anything; listing it invites a
+    sender to address a label that will never read. One with queued mail must survive."""
+    ghost, gws, _ = connect(hub, "ghost")
+    await hub.attach(ghost, gws)
+    await hub.detach(ghost, gws)
+
+    waiting, _, _ = connect(hub, "waiting")
+    await hub.send("s", "waiting", "still here for you")
+
+    labels = [p["peer"] for p in hub.peers()]
+    assert "ghost" not in labels
+    assert "waiting" in labels, "a peer with queued mail must not be forgotten"
