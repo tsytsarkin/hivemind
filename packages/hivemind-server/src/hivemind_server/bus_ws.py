@@ -46,6 +46,7 @@ import threading
 import time
 from pathlib import Path
 from collections import deque
+from contextvars import ContextVar
 from typing import Any, Dict, Iterable, Optional
 
 from .ids import ulid
@@ -65,6 +66,24 @@ LISTEN_KEY_TTL = 7 * 86400   # a listener's own credential: long-lived, reusable
 
 # Per-project HMAC secret for listen keys, loaded from the project directory at startup.
 _SECRETS: Dict[str, bytes] = {}
+
+# The address the CURRENT caller used to reach us, captured per request by the ASGI middleware.
+#
+# A listener has to be handed a URL it can actually open, and the server cannot work that out from
+# its own configuration: it binds 0.0.0.0 so that both the LAN and the mesh reach it, and
+# HIVEMIND_PUBLIC_URL therefore reads `http://0.0.0.0:8787` unless a deployment overrides it.
+# Handing that to a listener produced exactly what it says — ConnectionRefusedError against
+# 0.0.0.0. The caller's own Host header is the one address known to work, since the request just
+# arrived over it.
+_ORIGIN: ContextVar = ContextVar("hivemind_origin", default="")
+
+
+def set_origin(origin: str) -> None:
+    _ORIGIN.set(origin)
+
+
+def current_origin() -> str:
+    return _ORIGIN.get()
 
 
 def register_secret(project_name: str, path: Path) -> bytes:

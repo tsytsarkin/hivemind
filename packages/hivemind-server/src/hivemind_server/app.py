@@ -15,6 +15,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Mount, Route, WebSocketRoute
 
+from . import bus_ws as _bus_ws_mod
 from .auth import bearer_from_headers
 from .config import Config, config
 from .mcp_tools import build_mcp
@@ -44,6 +45,13 @@ class ProjectAuthMiddleware:
         path = scope.get("path", "")
         if not path.startswith("/p/"):
             return await self.app(scope, receive, send)
+        # Record the address this caller reached us on, so a tool can hand back a URL that works
+        # from where the caller is (see bus_ws._ORIGIN).
+        hdrs = {k.decode().lower(): v.decode() for k, v in scope.get("headers", [])}
+        host = hdrs.get("x-forwarded-host") or hdrs.get("host") or ""
+        if host:
+            proto = hdrs.get("x-forwarded-proto") or scope.get("scheme") or "http"
+            _bus_ws_mod.set_origin(f"{proto}://{host}")
         parts = path.split("/", 3)  # ['', 'p', '<name>', 'rest...']
         name = parts[2] if len(parts) > 2 else ""
         tail = parts[3] if len(parts) > 3 else ""

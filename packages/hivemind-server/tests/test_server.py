@@ -215,3 +215,21 @@ async def test_bus_websocket_route_is_reachable(env):
     order = [getattr(r, "path", "") for r in application.routes]
     assert order.index(f"{prefix}/bus/ws") < order.index(prefix), \
         "the websocket route must be matched before the project Mount"
+
+
+@pytest.mark.anyio
+async def test_bus_connect_ws_url_uses_the_callers_host_not_the_bind_address(env):
+    """The server binds 0.0.0.0 so both the LAN and the mesh reach it, which makes its configured
+    public_url `http://0.0.0.0:8787`. Handing that to a listener produced a real
+    ConnectionRefusedError against 0.0.0.0. The URL must come from the Host the call arrived on."""
+    application, proj, tok = env
+    transport = httpx.ASGITransport(app=application)
+    async with Lifespan(application), httpx.AsyncClient(transport=transport,
+                                                        base_url="http://box.local:8787",
+                                                        timeout=30) as c:
+        r = await _post(c, f"/p/{proj.name}", tok, "tools/call",
+                        {"name": "bus_connect", "arguments": {"label": "from-elsewhere"}})
+        assert r.status_code == 200, r.text
+        out = json.loads(_parse(r)["result"]["content"][0]["text"])
+        assert "ws://box.local:8787/" in out["ws_url"], out["ws_url"]
+        assert "0.0.0.0" not in out["monitor_command"], out["monitor_command"]

@@ -11,7 +11,7 @@ from typing import Optional
 
 from mcp.types import ToolAnnotations
 
-from .bus_ws import BusError, MAX_BODY, hub_for, register_secret
+from .bus_ws import BusError, MAX_BODY, current_origin, hub_for, register_secret
 
 RO = ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True)
 WRITE = ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=False)
@@ -39,11 +39,18 @@ LISTENER = "$HOME/.hivemind/bus-listen.py"
 def attach(mcp, project, cfg) -> None:
     hub = hub_for(project.name)
     register_secret(project.name, project.dir / "bus_secret")
-    # The listener needs a URL it can reach. cfg.public_url is what the deployment advertises;
-    # it is only ever used to build the string handed back to the agent.
-    base = getattr(cfg, "public_url", "").rstrip("/")
-    ws_base = ("ws://" + base.split("://", 1)[1]) if "://" in base else base
-    ws_url = f"{ws_base}/p/{project.name}/bus/ws"
+    def _ws_url() -> str:
+        """Build a ws:// URL from the address THIS caller used, falling back to config.
+
+        Per call, not once at startup: the server binds 0.0.0.0 for both the LAN and the mesh, so
+        its configured public_url is `http://0.0.0.0:8787` and a listener given that URL fails with
+        ConnectionRefusedError. Whatever Host the request arrived on is reachable by definition.
+        """
+        base = (current_origin() or getattr(cfg, "public_url", "")).rstrip("/")
+        if "://" in base:
+            scheme, _, hostport = base.partition("://")
+            base = ("wss://" if scheme == "https" else "ws://") + hostport
+        return f"{base}/p/{project.name}/bus/ws"
 
     @mcp.tool(annotations=WRITE,
               description="Join the agent bus and start receiving messages from other agents. "
@@ -56,6 +63,7 @@ def attach(mcp, project, cfg) -> None:
     def bus_connect(label: str, meta: Optional[dict] = None) -> dict:
         k = hub.mint_listen_key(label, meta)
         t = hub.mint_ticket(label, meta)
+        ws_url = _ws_url()
         return {
             "peer": k["label"],
             # The default command runs the listener the SKILL installs, with python3 and nothing
