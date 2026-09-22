@@ -233,3 +233,148 @@ async def test_bus_connect_ws_url_uses_the_callers_host_not_the_bind_address(env
         out = json.loads(_parse(r)["result"]["content"][0]["text"])
         assert "ws://box.local:8787/" in out["ws_url"], out["ws_url"]
         assert "0.0.0.0" not in out["monitor_command"], out["monitor_command"]
+
+
+def _identity_probe(monkeypatch):
+    """Capture the identity a TOOL BODY sees, and return the list it accumulates into.
+
+    graph.node_types is what the graph_types tool body calls, so patching it puts the probe exactly
+    where a real tool would read the caller; reading the contextvar from the test's own context
+    would prove nothing about what a tool sees.
+    """
+    from hivemind_server import graph
+    from hivemind_server.identity import current_identity
+    seen = []
+
+    def probe(db, *, subject_key=None):        # same signature as the real graph.node_types
+        seen.append(current_identity())
+        return {"types": []}
+
+    monkeypatch.setattr(graph, "node_types", probe)
+    return seen
+
+
+@pytest.mark.anyio
+async def test_a_tool_body_sees_the_calling_user(env, monkeypatch):
+    """The token is the authority. A tool must be able to read who is calling without being told."""
+    application, proj, tok = env
+    from hivemind_server.identity import IdentityStore
+    server_tok = IdentityStore(application.state.cfg.identities_path).mint("nik", "mac-studio")
+    seen = _identity_probe(monkeypatch)
+
+    transport = httpx.ASGITransport(app=application)
+    async with Lifespan(application), httpx.AsyncClient(transport=transport,
+                                                        base_url="http://t", timeout=30) as c:
+        r = await _post(c, f"/p/{proj.name}", server_tok, "tools/call",
+                        {"name": "graph_types", "arguments": {}})
+        assert r.status_code == 200, r.text
+    assert len(seen) == 1, "the tool body never ran"
+    who = seen[0]
+    assert who is not None, "the tool body could not see the caller"
+    assert (who.user, who.device, who.legacy) == ("nik", "mac-studio", False)
+
+
+@pytest.mark.anyio
+async def test_a_tool_body_sees_a_legacy_token_as_legacy_and_project_scoped(env, monkeypatch):
+    """The bootstrap token the fleet already holds is a legacy project token: it must keep working,
+    and it must arrive marked legacy and pinned to the project whose file holds it."""
+    application, proj, tok = env
+    seen = _identity_probe(monkeypatch)
+
+    transport = httpx.ASGITransport(app=application)
+    async with Lifespan(application), httpx.AsyncClient(transport=transport,
+                                                        base_url="http://t", timeout=30) as c:
+        r = await _post(c, f"/p/{proj.name}", tok, "tools/call",
+                        {"name": "graph_types", "arguments": {}})
+        assert r.status_code == 200, r.text
+    who = seen[0]
+    assert (who.legacy, who.project_scope) == (True, proj.name)
+    assert who.user == f"legacy:{proj.name}-bootstrap"
+
+
+@pytest.mark.anyio
+async def test_a_revoked_token_gets_the_generic_401_and_writes_nothing(env):
+    """Review Focus 1: a token in neither store must be refused, with no side effect."""
+    application, proj, tok = env
+    transport = httpx.ASGITransport(app=application)
+    async with Lifespan(application), httpx.AsyncClient(transport=transport,
+                                                        base_url="http://t", timeout=30) as c:
+        before = await _post(c, f"/p/{proj.name}", tok, "tools/call",
+                             {"name": "graph_types", "arguments": {}})
+        assert before.status_code == 200
+        r = await _post(c, f"/p/{proj.name}", "hm_revoked_never_existed", "tools/call",
+                        {"name": "graph_upsert",
+                         "arguments": {"type": "component", "props": {"title": "should not exist"},
+                                       "reason": "must be refused"}})
+        assert r.status_code == 401
+        assert "invalid or missing bearer token" in r.text
+        # and nothing was written
+        after = await _post(c, f"/p/{proj.name}", tok, "tools/call",
+                            {"name": "graph_search", "arguments": {"query": "should not exist"}})
+        assert json.loads(_parse(after)["result"]["content"][0]["text"])["results"] == []
+
+
+@pytest.mark.anyio
+async def test_a_server_level_token_authenticates(env):
+    application, proj, tok = env
+    from hivemind_server.identity import IdentityStore
+    store = IdentityStore(application.state.cfg.identities_path)
+    server_tok = store.mint("nik", "mac-studio")
+
+    transport = httpx.ASGITransport(app=application)
+    async with Lifespan(application), httpx.AsyncClient(transport=transport,
+                                                        base_url="http://t", timeout=30) as c:
+        r = await _post(c, f"/p/{proj.name}", server_tok, "tools/call",
+                        {"name": "graph_types", "arguments": {}})
+        assert r.status_code == 200, r.text
+
+
+@pytest.mark.anyio
+async def test_a_legacy_token_reaches_only_its_own_project(tmp_path, monkeypatch):
+    """What kept projects apart used to be incidental: each project verified its own tokens.json.
+    Resolving identity centrally must not widen that — a legacy token must still reach exactly the
+    one project whose file holds it. The same token against its own project is the control, so a
+    401 from the other project means "wrong project", not "bad token"."""
+    monkeypatch.setenv("HIVEMIND_DATA_DIR", str(tmp_path / "data"))
+    root = tmp_path / "data" / "projects"
+    for name in ("alpha", "beta"):
+        (root / name).mkdir(parents=True)
+    monkeypatch.setenv("HIVEMIND_PROJECTS_DIR", str(root))
+    monkeypatch.setenv("HIVEMIND_ALLOWED_HOSTS", "*")
+    application = appmod.build_app(Config())
+    reg = application.state.registry
+    assert {p.name for p in reg.all()} == {"alpha", "beta"}
+    alpha_tok = next(iter(json.loads((reg.get("alpha").dir / "tokens.json").read_text())))
+
+    transport = httpx.ASGITransport(app=application)
+    async with Lifespan(application), httpx.AsyncClient(transport=transport,
+                                                        base_url="http://t", timeout=30) as c:
+        control = await _post(c, "/p/alpha", alpha_tok, "tools/call",
+                              {"name": "graph_types", "arguments": {}})
+        assert control.status_code == 200, control.text
+        crossed = await _post(c, "/p/beta", alpha_tok, "tools/call",
+                              {"name": "graph_types", "arguments": {}})
+        assert crossed.status_code == 401, crossed.text
+
+
+@pytest.mark.anyio
+async def test_with_auth_off_a_tool_runs_and_sees_no_caller(tmp_path, monkeypatch):
+    """HIVEMIND_REQUIRE_AUTH=0 is a supported local mode: there is no token, so there is nobody to
+    resolve. The tool must still run, and must see None rather than some earlier caller."""
+    monkeypatch.setenv("HIVEMIND_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("HIVEMIND_PROJECTS_DIR", str(tmp_path / "data" / "projects"))
+    monkeypatch.setenv("HIVEMIND_ALLOWED_HOSTS", "*")
+    monkeypatch.setenv("HIVEMIND_REQUIRE_AUTH", "0")
+    application = appmod.build_app(Config())
+    proj = application.state.registry.all()[0]
+    seen = _identity_probe(monkeypatch)
+    from hivemind_server.identity import Identity, set_identity
+    set_identity(Identity(user="stale", device="earlier-request"))
+
+    transport = httpx.ASGITransport(app=application)
+    async with Lifespan(application), httpx.AsyncClient(transport=transport,
+                                                        base_url="http://t", timeout=30) as c:
+        r = await _post(c, f"/p/{proj.name}", "", "tools/call",
+                        {"name": "graph_types", "arguments": {}})
+        assert r.status_code == 200, r.text
+    assert seen == [None], seen

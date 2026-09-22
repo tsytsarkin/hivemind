@@ -1,6 +1,6 @@
 """ASGI entrypoint. One Starlette app hosts every project under /p/<name>/… (MCP at
 /p/<name>/mcp, REST blob routes under the same prefix). A single auth middleware gates all
-project traffic with that project's bearer tokens; /healthz stays open.
+project traffic and resolves the caller's identity once per request; /healthz stays open.
 """
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ from starlette.routing import Mount, Route, WebSocketRoute
 from . import bus_ws as _bus_ws_mod
 from .auth import bearer_from_headers
 from .config import Config, config
+from .identity import IdentityStore, resolve, set_identity
 from .mcp_tools import build_mcp
 from .project import ProjectRegistry, projects_root_from_env
 
@@ -32,12 +33,18 @@ def _transport_security(cfg: Config) -> TransportSecuritySettings:
 
 
 class ProjectAuthMiddleware:
-    """Bearer-token gate for every /p/<name>/… request, checked against that project's tokens."""
+    """Bearer-token gate for every /p/<name>/… request.
 
-    def __init__(self, app, registry: ProjectRegistry, cfg: Config):
+    This is the one place a token becomes a person: the caller is resolved once, here, and
+    published on the identity contextvar that every tool body reads. Server-level identities are
+    tried first, then the project's own legacy tokens (see identity.resolve).
+    """
+
+    def __init__(self, app, registry: ProjectRegistry, cfg: Config, identities: IdentityStore):
         self.app = app
         self.registry = registry
         self.cfg = cfg
+        self.identities = identities
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
@@ -45,9 +52,9 @@ class ProjectAuthMiddleware:
         path = scope.get("path", "")
         if not path.startswith("/p/"):
             return await self.app(scope, receive, send)
+        hdrs = {k.decode().lower(): v.decode() for k, v in scope.get("headers", [])}
         # Record the address this caller reached us on, so a tool can hand back a URL that works
         # from where the caller is (see bus_ws._ORIGIN).
-        hdrs = {k.decode().lower(): v.decode() for k, v in scope.get("headers", [])}
         host = hdrs.get("x-forwarded-host") or hdrs.get("host") or ""
         if host:
             proto = hdrs.get("x-forwarded-proto") or scope.get("scheme") or "http"
@@ -61,14 +68,17 @@ class ProjectAuthMiddleware:
         project = self.registry.get(name)
         if project is None:
             return await self._json(send, 404, {"error": f"unknown project {name!r}"})
+        who = None
         if self.cfg.require_auth and not open_path:
-            headers = {k.decode().lower(): v.decode() for k, v in scope.get("headers", [])}
-            token = bearer_from_headers(headers)
-            access = project.tokens.verify(token) if token else None
-            if access is None:
+            who = resolve(bearer_from_headers(hdrs), self.identities, project)
+            if who is None:
                 return await self._json(send, 401, {"error": "invalid or missing bearer token"},
                                         extra=[(b"www-authenticate", b"Bearer")])
-            scope.setdefault("state", {})["client_id"] = access.client_id
+            scope.setdefault("state", {})["identity"] = who
+            scope["state"]["client_id"] = who.user
+        # Set on EVERY project path, including the open ones and the auth-off mode: a tool body
+        # must read either this caller or nobody, never whoever the context held before.
+        set_identity(who)
         return await self.app(scope, receive, send)
 
     async def _json(self, send, status, body, extra=None):
@@ -88,6 +98,7 @@ def build_app(cfg: Optional[Config] = None) -> Starlette:
                                max_blob_bytes=cfg.max_blob_bytes,
                                blob_grace_seconds=cfg.blob_grace_seconds)
     registry.discover()
+    identities = IdentityStore(cfg.identities_path)
 
     mounts = []
     mcps = []
@@ -148,8 +159,10 @@ def build_app(cfg: Optional[Config] = None) -> Starlette:
     routes = [Route("/", index), Route("/healthz", healthz),
               Route("/projects", list_projects), *mounts]
     app = Starlette(routes=routes, lifespan=lifespan)
-    app.add_middleware(ProjectAuthMiddleware, registry=registry, cfg=cfg)
+    app.add_middleware(ProjectAuthMiddleware, registry=registry, cfg=cfg, identities=identities)
     app.state.registry = registry
+    app.state.cfg = cfg
+    app.state.identities = identities
     return app
 
 
