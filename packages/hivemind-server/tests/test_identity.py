@@ -1,3 +1,5 @@
+import json
+
 import pytest
 from hivemind_server import identity as ident
 from hivemind_server.db import Invalid
@@ -11,6 +13,15 @@ def test_valid_usernames(name):
 @pytest.mark.parametrize("name", ["nik.x", ".nik", "Nik", "-nik", "", "a" * 33, "nik x", "nik/x"])
 def test_invalid_usernames(name):
     """Dots are excluded so `<user>.` prefix matching can never be ambiguous (nik vs nik.x)."""
+    with pytest.raises(Invalid):
+        ident.validate_username(name)
+
+
+@pytest.mark.parametrize("name", ["nik\n", "nik\t", ("a" * 32) + "\n"])
+def test_invalid_usernames_trailing_whitespace(name):
+    """re.match's `$` matches just before a trailing newline, so match() alone would accept
+    "nik\n" as if it were "nik" — a distinct, invisible username riding a truncated length cap.
+    validate_username must use fullmatch."""
     with pytest.raises(Invalid):
         ident.validate_username(name)
 
@@ -82,3 +93,60 @@ def test_identity_contextvar_round_trips(tmp_path):
         assert ident.current_identity().user == "nik"
     finally:
         ident.set_identity(None)
+
+
+def test_revoking_a_token_denies_immediately(tmp_path):
+    """identities.json is operator-edited by design — that IS the revocation path — so removing a
+    token's entry must deny it with no server restart, same as auth.TokenStore."""
+    path = tmp_path / "identities.json"
+    store = ident.IdentityStore(path)
+    tok = store.mint("nik", "mac-studio")
+    assert store.verify(tok) is not None
+
+    data = json.loads(path.read_text())
+    del data[tok]
+    path.write_text(json.dumps(data))
+
+    assert store.verify(tok) is None
+
+
+def test_malformed_entry_does_not_deny_everyone_else(tmp_path):
+    """identities.json is hand-editable by an operator; one entry missing "user" must not break
+    verify/users/has_user for every OTHER, well-formed entry in the same file."""
+    path = tmp_path / "identities.json"
+    store = ident.IdentityStore(path)
+    good = store.mint("nik", "mac-studio")
+
+    data = json.loads(path.read_text())
+    data["hm_broken"] = {"device": "no-user-field"}   # simulates an operator typo
+    path.write_text(json.dumps(data))
+
+    assert store.verify(good).user == "nik"
+    assert store.verify("hm_broken") is None
+    assert store.users() == ["nik"]
+    assert store.has_user("nik") is True
+
+
+def test_legacy_token_scope_matches_its_own_project_not_another(tmp_path):
+    """A legacy token lives in exactly one project's tokens.json. Resolving it against that
+    project must report THAT project as the scope; resolving the same token against a different
+    project (whose tokens.json never held it) must refuse outright, never attribute it elsewhere."""
+    from hivemind_server.auth import TokenStore
+
+    class ProjectA:
+        name = "proj-a"
+    ProjectA.tokens = TokenStore(tmp_path / "a-tokens.json")
+    legacy = ProjectA.tokens.mint("some-box")
+
+    class ProjectB:
+        name = "proj-b"
+    ProjectB.tokens = TokenStore(tmp_path / "b-tokens.json")
+
+    store = ident.IdentityStore(tmp_path / "identities.json")
+
+    who_a = ident.resolve(legacy, store, ProjectA)
+    assert who_a is not None
+    assert who_a.project_scope == "proj-a"
+
+    who_b = ident.resolve(legacy, store, ProjectB)
+    assert who_b is None

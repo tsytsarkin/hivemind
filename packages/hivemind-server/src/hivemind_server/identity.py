@@ -8,16 +8,14 @@ verbatim).
 """
 from __future__ import annotations
 
-import json
-import os
 import re
 import secrets
 from contextvars import ContextVar
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Optional
 
 from .db import Invalid
+from .jsonstore import JsonFileStore
 
 # No dots: project names are `<user>.<suffix>`, and a dotted username would make the prefix
 # ambiguous between user `nik` owning `nik.x` and a user literally named `nik.x`.
@@ -27,7 +25,9 @@ ROLES = ("member", "admin")
 
 
 def validate_username(name: str) -> str:
-    if not isinstance(name, str) or not USERNAME_RE.match(name):
+    # fullmatch, not match: `$` alone matches just before a trailing newline, so match() would
+    # accept "nik\n" as if it were "nik" — a distinct, invisible username riding a truncated cap.
+    if not isinstance(name, str) or not USERNAME_RE.fullmatch(name):
         raise Invalid(f"invalid username {name!r}: want {USERNAME_RE.pattern} "
                       f"(lowercase, no dots — dots are reserved for project ownership prefixes)")
     return name
@@ -47,61 +47,27 @@ class Identity:
         return self.role == "admin" and not self.legacy
 
 
-class IdentityStore:
+class IdentityStore(JsonFileStore):
     """identities.json: token -> {user, device, role, scopes}.
 
-    Same file discipline as auth.TokenStore — stamp, re-read on change, atomic write — so a token
-    minted by `hivemind-admin` in another process works with no restart, and removing one revokes
-    it immediately.
+    File discipline (re-read on change, atomic write) lives in JsonFileStore, shared with
+    auth.TokenStore, so a token minted by `hivemind-admin` in another process works with no
+    restart, and removing one revokes it immediately.
+
+    identities.json is meant to be hand-editable by an operator (that IS the revocation path), so
+    a single malformed row — e.g. one missing "user" — must not deny service to everyone else: it
+    is dropped rather than raised.
     """
-
-    def __init__(self, path: Path):
-        self.path = path
-        self._tokens: dict[str, dict] = {}
-        self._stamp: Optional[tuple] = None
-        self.reload()
-
-    def _file_stamp(self) -> Optional[tuple]:
-        try:
-            st = self.path.stat()
-        except OSError:
-            return None
-        return (st.st_mtime_ns, st.st_size)
-
-    def reload(self) -> None:
-        stamp = self._file_stamp()
-        if stamp is None:
-            self._tokens, self._stamp = {}, None
-            return
-        try:
-            self._tokens = json.loads(self.path.read_text())
-        except (OSError, json.JSONDecodeError):
-            return                     # keep the last good copy rather than locking everyone out
-        self._stamp = stamp
-
-    def refresh_if_changed(self) -> bool:
-        if self._file_stamp() != self._stamp:
-            self.reload()
-            return True
-        return False
-
-    def save(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix(self.path.suffix + f".tmp{os.getpid()}")
-        tmp.write_text(json.dumps(self._tokens, indent=2))
-        try:
-            tmp.chmod(0o600)
-        except OSError:
-            pass
-        os.replace(tmp, self.path)
-        self._stamp = self._file_stamp()
 
     def verify(self, token: str) -> Optional[Identity]:
         self.refresh_if_changed()
         info = self._tokens.get(token)
         if info is None:
             return None
-        return Identity(user=info["user"], device=info.get("device", "?"),
+        user = info.get("user")
+        if not user:
+            return None                # malformed row (operator typo) — refuse just this token
+        return Identity(user=user, device=info.get("device", "?"),
                         role=info.get("role", "member"), token_id=token[:12])
 
     def mint(self, user: str, device: str = "?", role: str = "member") -> str:
@@ -117,7 +83,7 @@ class IdentityStore:
 
     def users(self) -> list[str]:
         self.refresh_if_changed()
-        return sorted({i["user"] for i in self._tokens.values()})
+        return sorted({i["user"] for i in self._tokens.values() if i.get("user")})
 
     def has_user(self, user: str) -> bool:
         return user in self.users()
@@ -127,7 +93,9 @@ def resolve(token: Optional[str], store: IdentityStore, project: Any) -> Optiona
     """Server-level identity first; fall back to a project's own legacy token store.
 
     A legacy token is deliberately pinned to the project whose file holds it. Without that, moving
-    to a project-neutral endpoint would silently widen every credential already deployed.
+    to a project-neutral endpoint would silently widen every credential already deployed. Note this
+    only ever consults the ONE project passed in — there is no cross-project search — so a token
+    that lives in project A's tokens.json is refused (not mis-scoped) when resolved against B.
     """
     if not token:
         return None
