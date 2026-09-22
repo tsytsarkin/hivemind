@@ -6,28 +6,10 @@ left is: get connected, send, see who is there, leave.
 """
 from __future__ import annotations
 
-import functools
 from typing import Optional
 
-from mcp.types import ToolAnnotations
-
 from .bus_ws import BusError, MAX_BODY, current_origin, hub_for, register_secret
-
-RO = ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True)
-WRITE = ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=False)
-
-
-def _envelope(fn):
-    @functools.wraps(fn)
-    def wrap(*a, **k):
-        try:
-            out = fn(*a, **k)
-            if isinstance(out, dict) and "ok" not in out:
-                out = {"ok": True, **out}
-            return out
-        except BusError as e:
-            return {"ok": False, "error_kind": "bus", "error": str(e)}
-    return wrap
+from .envelope import RO, WRITE, envelope as _envelope
 
 
 # Where the skill installs the dependency-free listener. It must be an absolute path that any

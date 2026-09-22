@@ -4,14 +4,12 @@ returns a uniform envelope so agents get actionable errors instead of opaque fai
 """
 from __future__ import annotations
 
-import functools
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
 from mcp.server import MCPServer
-from mcp.types import ToolAnnotations
 
 from . import graph, guide, schemas, skills, traps
-from .db import Conflict, Invalid, NotFound
+from .envelope import RO, WRITE, envelope as _envelope
 from .project import Project
 
 INSTRUCTIONS = (
@@ -36,28 +34,6 @@ INSTRUCTIONS = (
     "peers, bus_peers lists who is connected. Bus traffic is ephemeral; anything worth keeping "
     "still goes in the graph."
 )
-
-RO = ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True)
-WRITE = ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=False)
-
-
-def _envelope(fn: Callable) -> Callable:
-    """Run a tool body; convert engine exceptions into an actionable, self-correctable result."""
-    @functools.wraps(fn)
-    def wrap(*a, **k):
-        try:
-            out = fn(*a, **k)
-            if isinstance(out, dict) and "ok" not in out:
-                out = {"ok": True, **out}
-            return out
-        except Conflict as e:
-            return {"ok": False, "error_kind": "conflict",
-                    "error": f"{e}. Re-read the node (graph_get) and retry with the current head."}
-        except NotFound as e:
-            return {"ok": False, "error_kind": "not_found", "error": str(e)}
-        except Invalid as e:
-            return {"ok": False, "error_kind": "invalid", "error": str(e)}
-    return wrap
 
 
 def build_mcp(project: Project, *, instructions: str = INSTRUCTIONS) -> MCPServer:

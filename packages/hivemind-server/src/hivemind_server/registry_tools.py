@@ -4,37 +4,14 @@ references, attachment, and (task 6) the tool registry.
 """
 from __future__ import annotations
 
-import functools
 from typing import Optional
 
-from mcp.types import ToolAnnotations
-
 from . import registry as reg
-from .db import Conflict, Invalid, NotFound
+from .envelope import RO, WRITE, envelope as _envelope
 from .rest_blobs import register_blob_routes
 from .rest_guide import register_guide_routes
 from .rest_skills import (register_index_routes, register_skill_routes,
                           register_tool_routes)
-
-RO = ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True)
-WRITE = ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=False)
-
-
-def _envelope(fn):
-    @functools.wraps(fn)
-    def wrap(*a, **k):
-        try:
-            out = fn(*a, **k)
-            if isinstance(out, dict) and "ok" not in out:
-                out = {"ok": True, **out}
-            return out
-        except Conflict as e:
-            return {"ok": False, "error_kind": "conflict", "error": str(e)}
-        except NotFound as e:
-            return {"ok": False, "error_kind": "not_found", "error": str(e)}
-        except Invalid as e:
-            return {"ok": False, "error_kind": "invalid", "error": str(e)}
-    return wrap
 
 
 def attach(mcp, project) -> None:
