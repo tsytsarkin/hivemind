@@ -1,6 +1,6 @@
 import pytest
 from hivemind_server.envelope import RO, WRITE, envelope
-from hivemind_server.errors import Conflict, Invalid, NotFound
+from hivemind_server.db import Conflict, Invalid, NotFound
 
 
 def test_success_gets_an_ok_flag():
@@ -26,6 +26,17 @@ def test_engine_errors_become_actionable_results(exc, kind):
         raise exc
     out = f()
     assert out["ok"] is False and out["error_kind"] == kind and out["error"]
+
+
+def test_the_conflict_hint_is_domain_neutral():
+    """registry.py/skills.py raise Conflict for a duplicate immutable publish; a graph_get
+    pointer would send that caller on a useless detour, so the hint must not name it."""
+    @envelope
+    def f():
+        raise Conflict("tool/x@1.0.0 already published (immutable). Bump the version.")
+    out = f()
+    assert out["ok"] is False and out["error_kind"] == "conflict"
+    assert "graph_get" not in out["error"]
 
 
 def test_bus_errors_are_handled_too():

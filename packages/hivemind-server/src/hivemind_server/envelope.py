@@ -11,7 +11,7 @@ from typing import Callable
 
 from mcp.types import ToolAnnotations
 
-from .errors import Conflict, Invalid, NotFound
+from .db import Conflict, Invalid, NotFound
 
 RO = ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True)
 WRITE = ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=False)
@@ -27,8 +27,11 @@ def envelope(fn: Callable) -> Callable:
                 out = {"ok": True, **out}
             return out
         except Conflict as e:
+            # Deliberately NOT graph-specific: registry.py and skills.py raise Conflict for a
+            # duplicate immutable publish, where advising a graph_get would send the caller on a
+            # useless detour. The raiser's own message carries the specific remedy.
             return {"ok": False, "error_kind": "conflict",
-                    "error": f"{e}. Re-read the node (graph_get) and retry with the current head."}
+                    "error": f"{e} Re-read the current state and retry against the current version."}
         except NotFound as e:
             return {"ok": False, "error_kind": "not_found", "error": str(e)}
         except Invalid as e:
