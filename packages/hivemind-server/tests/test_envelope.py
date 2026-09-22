@@ -39,6 +39,21 @@ def test_the_conflict_hint_is_domain_neutral():
     assert "graph_get" not in out["error"]
 
 
+def test_the_conflict_hint_is_punctuation_aware():
+    """graph.py's Conflict messages (e.g. "head is X, you sent Y") don't end in a period, so the
+    appended hint needs its own separator there — but must not double up when the raiser's
+    message (registry.py/skills.py) already ends in one."""
+    @envelope
+    def no_period():
+        raise Conflict("head is 01ABC, you sent 01XYZ")
+    assert ". Re-read" in no_period()["error"]
+
+    @envelope
+    def has_period():
+        raise Conflict("already published (immutable). Bump the version.")
+    assert ".. " not in has_period()["error"]
+
+
 def test_bus_errors_are_handled_too():
     """bus_ws_tools had its own envelope for this; the consolidated one must keep it."""
     from hivemind_server.bus_ws import BusError
@@ -62,3 +77,11 @@ def test_the_wrapped_signature_is_preserved():
 
 def test_annotations_are_distinguishable():
     assert RO.read_only_hint is True and WRITE.read_only_hint is False
+
+
+def test_an_unrelated_exception_is_not_swallowed():
+    @envelope
+    def f():
+        raise RuntimeError("boom")
+    with pytest.raises(RuntimeError):
+        f()

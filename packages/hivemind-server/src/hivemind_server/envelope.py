@@ -1,8 +1,9 @@
 """The single decorator every MCP tool wears.
 
 It existed three times over (mcp_tools, registry_tools, bus_ws_tools), each handling a different
-subset of engine exceptions. Consolidated here because the per-call project resolution in Task 6
-has to be injected in exactly one place — three copies would mean three chances to miss a tool.
+subset of engine exceptions. Consolidated here because the per-call project argument injected
+into every tool's schema has to be wired in exactly one place — three copies would mean three
+chances to miss a tool.
 """
 from __future__ import annotations
 
@@ -30,15 +31,18 @@ def envelope(fn: Callable) -> Callable:
             # Deliberately NOT graph-specific: registry.py and skills.py raise Conflict for a
             # duplicate immutable publish, where advising a graph_get would send the caller on a
             # useless detour. The raiser's own message carries the specific remedy.
+            msg = str(e)
+            sep = " " if msg.endswith((".", "!", "?")) else ". "
             return {"ok": False, "error_kind": "conflict",
-                    "error": f"{e} Re-read the current state and retry against the current version."}
+                    "error": f"{msg}{sep}Re-read the current state and retry against the "
+                             f"current version."}
         except NotFound as e:
             return {"ok": False, "error_kind": "not_found", "error": str(e)}
         except Invalid as e:
             return {"ok": False, "error_kind": "invalid", "error": str(e)}
         except Exception as e:                       # BusError and friends
-            # Imported lazily: bus_ws imports nothing from here, and a module-level import would
-            # make the dependency circular.
+            # Imported inside the handler so this leaf module stays free of the bus/asyncio
+            # import chain; nothing here depends on bus_ws at import time.
             from .bus_ws import BusError
             if isinstance(e, BusError):
                 return {"ok": False, "error_kind": "bus", "error": str(e)}
