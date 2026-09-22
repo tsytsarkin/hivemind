@@ -80,6 +80,12 @@ class ProjectAuthMiddleware:
                                         extra=[(b"www-authenticate", b"Bearer")])
             scope.setdefault("state", {})["identity"] = who
             scope["state"]["client_id"] = who.user
+            # Tool bodies read this caller off the contextvar, and they run on the MCP transport's
+            # own tasks — safe only because mcp 2.x carries contextvars PER MESSAGE (the transport
+            # snapshots the sender's context on every send and the dispatcher runs each handler
+            # inside that snapshot), so the identity travels with the call even on the
+            # session-based stateful path. We depend on that; an SDK upgrade could remove it.
+            # test_a_handshake_era_request_resolves_identity_per_request is what pins it.
             set_identity(who)
         return await self.app(scope, receive, send)
 
