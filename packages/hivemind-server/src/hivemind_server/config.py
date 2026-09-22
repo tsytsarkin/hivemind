@@ -16,6 +16,9 @@ class Config:
         self.port = int(_env("HIVEMIND_PORT", "8787"))
         self.public_url = _env("HIVEMIND_PUBLIC_URL", f"http://{self.host}:{self.port}")
         self.tokens_path = Path(_env("HIVEMIND_TOKENS", str(self.data_dir / "tokens.json")))
+        self.identities_path = Path(_env("HIVEMIND_IDENTITIES",
+                                        str(self.data_dir / "identities.json")))
+        self.max_projects_per_user = int(_env("HIVEMIND_MAX_PROJECTS_PER_USER", "50"))
         self.max_blob_bytes = int(_env("HIVEMIND_MAX_BLOB", str(2 * 1024 * 1024 * 1024)))  # 2 GiB
         self.blob_grace_seconds = int(_env("HIVEMIND_BLOB_GRACE", "259200"))               # 72h: time to attach
         # The agent bus keeps no configurable state: presence is the WebSocket and the

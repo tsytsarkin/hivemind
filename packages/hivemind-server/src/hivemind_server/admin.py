@@ -40,8 +40,11 @@ def main(argv=None) -> int:
     ap.add_argument("--project", default="default")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    t = sub.add_parser("mint-token"); t.add_argument("--client-id", default="client")
-    t.add_argument("--scope", action="append", dest="scopes")
+    t = sub.add_parser("mint-token")
+    t.add_argument("--user", help="username this token authenticates as (server-level identity)")
+    t.add_argument("--device", default="?", help="machine label, kept beside the identity")
+    t.add_argument("--role", default="member", choices=["member", "admin"])
+    t.add_argument("--client-id", help="legacy: mint into a project's own tokens.json instead")
     sub.add_parser("list-tokens")
     sub.add_parser("list-projects")
     sub.add_parser("create-project")
@@ -63,17 +66,27 @@ def main(argv=None) -> int:
 
     args = ap.parse_args(argv)
     reg = _registry()
+    cfg = config()
 
     if args.cmd == "list-projects":
         _out({"projects": [p.name for p in reg.all()], "root": str(reg.root)}); return 0
 
+    if args.cmd == "mint-token":
+        if args.user:
+            # Server-level identity: does NOT touch/create any project, unlike every other
+            # subcommand below (which resolves --project and creates it if missing).
+            from .identity import IdentityStore
+            store = IdentityStore(cfg.identities_path)
+            print(store.mint(args.user, args.device, args.role))
+            return 0
+        # legacy path, unchanged: a project-scoped token
+        p = _project(reg, args.project)
+        print(p.tokens.mint(args.client_id or "client"))
+        return 0
+
     p = _project(reg, args.project)
 
-    if args.cmd == "mint-token":
-        tok = p.tokens.mint(args.client_id, args.scopes)
-        _out({"project": p.name, "client_id": args.client_id, "token": tok,
-              "note": "store securely; it is shown only once"})
-    elif args.cmd == "list-tokens":
+    if args.cmd == "list-tokens":
         data = json.loads((p.dir / "tokens.json").read_text()) if (p.dir / "tokens.json").exists() else {}
         _out({"project": p.name, "tokens": [{"token_prefix": k[:8] + "…", **v}
                                             for k, v in data.items()]})
