@@ -47,6 +47,11 @@ class ProjectAuthMiddleware:
         self.identities = identities
 
     async def __call__(self, scope, receive, send):
+        # Clear first, before any early return: an in-process ASGI caller (httpx.ASGITransport, or
+        # an embedding) invokes the app in its OWN task, so a request that returns early would
+        # otherwise leave the previous caller's identity readable. A real server hands every
+        # request a fresh context copy, but the invariant must not depend on that.
+        set_identity(None)
         if scope["type"] != "http":
             return await self.app(scope, receive, send)
         path = scope.get("path", "")
@@ -68,7 +73,6 @@ class ProjectAuthMiddleware:
         project = self.registry.get(name)
         if project is None:
             return await self._json(send, 404, {"error": f"unknown project {name!r}"})
-        who = None
         if self.cfg.require_auth and not open_path:
             who = resolve(bearer_from_headers(hdrs), self.identities, project)
             if who is None:
@@ -76,9 +80,7 @@ class ProjectAuthMiddleware:
                                         extra=[(b"www-authenticate", b"Bearer")])
             scope.setdefault("state", {})["identity"] = who
             scope["state"]["client_id"] = who.user
-        # Set on EVERY project path, including the open ones and the auth-off mode: a tool body
-        # must read either this caller or nobody, never whoever the context held before.
-        set_identity(who)
+            set_identity(who)
         return await self.app(scope, receive, send)
 
     async def _json(self, send, status, body, extra=None):

@@ -235,6 +235,24 @@ async def test_bus_connect_ws_url_uses_the_callers_host_not_the_bind_address(env
         assert "0.0.0.0" not in out["monitor_command"], out["monitor_command"]
 
 
+class OneTaskPerRequest:
+    """Drive the app the way a real server does: every request in its own task.
+
+    httpx.ASGITransport calls the app in the CALLER's task, so an identity the middleware set and
+    one left over from an earlier request are indistinguishable, and a tool body that reads the
+    right caller may only be reading the test's own context. uvicorn hands each request a fresh
+    context copy; a test that claims identity is resolved PER REQUEST has to reproduce that.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        await asyncio.create_task(self.app(scope, receive, send))
+
+
 def _identity_probe(monkeypatch):
     """Capture the identity a TOOL BODY sees, and return the list it accumulates into.
 
@@ -262,7 +280,7 @@ async def test_a_tool_body_sees_the_calling_user(env, monkeypatch):
     server_tok = IdentityStore(application.state.cfg.identities_path).mint("nik", "mac-studio")
     seen = _identity_probe(monkeypatch)
 
-    transport = httpx.ASGITransport(app=application)
+    transport = httpx.ASGITransport(app=OneTaskPerRequest(application))
     async with Lifespan(application), httpx.AsyncClient(transport=transport,
                                                         base_url="http://t", timeout=30) as c:
         r = await _post(c, f"/p/{proj.name}", server_tok, "tools/call",
@@ -299,19 +317,32 @@ async def test_a_revoked_token_gets_the_generic_401_and_writes_nothing(env):
     transport = httpx.ASGITransport(app=application)
     async with Lifespan(application), httpx.AsyncClient(transport=transport,
                                                         base_url="http://t", timeout=30) as c:
-        before = await _post(c, f"/p/{proj.name}", tok, "tools/call",
+        base = f"/p/{proj.name}"
+        before = await _post(c, base, tok, "tools/call",
                              {"name": "graph_types", "arguments": {}})
         assert before.status_code == 200
-        r = await _post(c, f"/p/{proj.name}", "hm_revoked_never_existed", "tools/call",
-                        {"name": "graph_upsert",
-                         "arguments": {"type": "component", "props": {"title": "should not exist"},
-                                       "reason": "must be refused"}})
+        # Define the type the refused write uses. A fresh project has no node types, so a write of
+        # an undefined type would be refused by schema validation as well, and "nothing was
+        # written" could not tell an auth refusal from a schema one.
+        _call(await _post(c, base, tok, "tools/call", {"name": "schema_propose", "arguments": {
+            "kind": "node", "name": "note", "json_schema": {"type": "object"},
+            "agent": "test"}}, 2))
+        write = {"name": "graph_upsert",
+                 "arguments": {"type": "note", "props": {"text": "should not exist"},
+                               "reason": "must be refused"}}
+        r = await _post(c, base, "hm_revoked_never_existed", "tools/call", write, 3)
         assert r.status_code == 401
         assert "invalid or missing bearer token" in r.text
         # and nothing was written
-        after = await _post(c, f"/p/{proj.name}", tok, "tools/call",
-                            {"name": "graph_search", "arguments": {"query": "should not exist"}})
+        after = await _post(c, base, tok, "tools/call",
+                            {"name": "graph_search", "arguments": {"query": "should not exist"}}, 4)
         assert json.loads(_parse(after)["result"]["content"][0]["text"])["results"] == []
+        # Control: the identical write lands once the token is valid. Without this, the assertion
+        # above would hold even with the auth gate deleted.
+        assert _call(await _post(c, base, tok, "tools/call", write, 5))["ok"] is True
+        found = await _post(c, base, tok, "tools/call",
+                            {"name": "graph_search", "arguments": {"query": "should not exist"}}, 6)
+        assert len(json.loads(_parse(found)["result"]["content"][0]["text"])["results"]) == 1
 
 
 @pytest.mark.anyio
@@ -360,7 +391,11 @@ async def test_a_legacy_token_reaches_only_its_own_project(tmp_path, monkeypatch
 @pytest.mark.anyio
 async def test_with_auth_off_a_tool_runs_and_sees_no_caller(tmp_path, monkeypatch):
     """HIVEMIND_REQUIRE_AUTH=0 is a supported local mode: there is no token, so there is nobody to
-    resolve. The tool must still run, and must see None rather than some earlier caller."""
+    resolve. The tool must still run, and must see None rather than some earlier caller.
+
+    Deliberately NOT driven through OneTaskPerRequest: this test wants the polluted context that an
+    in-process caller gives it, because that is what can expose a stale identity.
+    """
     monkeypatch.setenv("HIVEMIND_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("HIVEMIND_PROJECTS_DIR", str(tmp_path / "data" / "projects"))
     monkeypatch.setenv("HIVEMIND_ALLOWED_HOSTS", "*")
@@ -378,3 +413,53 @@ async def test_with_auth_off_a_tool_runs_and_sees_no_caller(tmp_path, monkeypatc
                         {"name": "graph_types", "arguments": {}})
         assert r.status_code == 200, r.text
     assert seen == [None], seen
+
+
+HANDSHAKE_PROTO = "2025-11-25"      # a handshake-era version the SDK still routes the old way
+
+
+@pytest.mark.anyio
+async def test_a_handshake_era_request_resolves_identity_per_request(env, monkeypatch):
+    """The transport has two entry paths, and identity must be per-request on both.
+
+    A MODERN protocol version (what the other tests send) is handled inside the request's own task.
+    A handshake-era version, which a client may still negotiate, goes instead through the session
+    manager, where the MCP loop belongs to a SESSION — a task started once, when the session was
+    created. The danger is that a tool body then reads whoever opened the session rather than
+    whoever made the call: the wrong author, and later the wrong subject for an authorization
+    decision. It does not, because the transport snapshots the sender's contextvars per message
+    (mcp.shared._context_streams) and the dispatcher runs each handler in that snapshot — so the
+    identity this middleware sets travels with the message, not with the session. This test is what
+    holds that: alice opens the session, bob calls through it, and the tool must see bob.
+    """
+    application, proj, tok = env
+    from hivemind_server.identity import IdentityStore
+    store = IdentityStore(application.state.cfg.identities_path)
+    tok_a, tok_b = store.mint("alice", "box-a"), store.mint("bob", "box-b")
+    seen = _identity_probe(monkeypatch)
+
+    def hdrs(token, session_id=None):
+        h = {"Authorization": f"Bearer {token}", "Content-Type": "application/json",
+             "Accept": "application/json, text/event-stream",
+             "MCP-Protocol-Version": HANDSHAKE_PROTO}
+        if session_id:
+            h["Mcp-Session-Id"] = session_id
+        return h
+
+    # One task per request, or "the tool body saw bob" would just be the test's own context.
+    transport = httpx.ASGITransport(app=OneTaskPerRequest(application))
+    async with Lifespan(application), httpx.AsyncClient(transport=transport,
+                                                        base_url="http://t", timeout=30) as c:
+        base = f"/p/{proj.name}/mcp"
+        init = await c.post(base, headers=hdrs(tok_a), json={
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"protocolVersion": HANDSHAKE_PROTO, "capabilities": {},
+                       "clientInfo": {"name": "handshake-era", "version": "0"}}})
+        assert init.status_code == 200, init.text
+        # alice opened the conversation; bob makes the call, carrying whatever the server handed back
+        r = await c.post(base, headers=hdrs(tok_b, init.headers.get("mcp-session-id")), json={
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": "graph_types", "arguments": {}}})
+        assert r.status_code == 200, r.text
+        assert "error" not in _parse(r), r.text
+    assert [w.user for w in seen] == ["bob"], seen
