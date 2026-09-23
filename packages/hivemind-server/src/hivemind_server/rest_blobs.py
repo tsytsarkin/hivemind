@@ -17,15 +17,17 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
 
 from .db import Invalid, NotFound
-from .envelope import CurrentBlobs
+from .envelope import CurrentBlobs, CurrentProject
 
 _UPLOAD_CHUNK = 1024 * 1024
 
 
-def register_blob_routes(mcp, project) -> None:
-    # One app serves every project, so both of these resolve per REQUEST: `store` through the
-    # proxy, and `project.name` (in `batch`) through the same proxy handed in by build_mcp.
+def register_blob_routes(mcp) -> None:
+    # One app serves every project, so both of these resolve per REQUEST. Built here rather than
+    # taken as arguments on purpose: a caller passing a real Project would silently re-bind these
+    # routes to one project at attach time, and every request would answer for it.
     store = CurrentBlobs()
+    project = CurrentProject()
 
     def _digest(req: Request) -> str:
         return f"{req.path_params['algo']}:{req.path_params['hex']}"

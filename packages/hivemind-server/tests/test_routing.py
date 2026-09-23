@@ -242,6 +242,55 @@ async def test_an_inaccessible_project_argument_is_refused(two_projects):
 
 
 @pytest.mark.anyio
+async def test_a_write_to_an_inaccessible_project_is_refused(two_projects):
+    """The read path above is the cheap half. This is the one that matters: a caller naming someone
+    else's project on a WRITE must be refused, without the error confirming it exists, and nothing
+    may be written."""
+    application, nik = two_projects
+    ana = IdentityStore(application.state.cfg.identities_path).mint("ana", "laptop")
+    transport = httpx.ASGITransport(app=application)
+    async with Lifespan(application), httpx.AsyncClient(transport=transport,
+                                                        base_url="http://t", timeout=30) as c:
+        r = await _post(c, "", ana, "tools/call",
+                        {"name": "graph_upsert",
+                         "arguments": {"type": "note", "props": {"title": "not hers"},
+                                       "project": "nik.a", "reason": "should be refused"}})
+        out = json.loads(_parse(r)["result"]["content"][0]["text"])
+    assert out["ok"] is False
+    assert "nik.a" not in out["error"], "the error must not confirm that nik.a exists"
+    with application.state.registry.get("nik.a").db.read() as cur:
+        assert cur.execute("SELECT COUNT(*) c FROM node").fetchone()["c"] == 0
+
+
+def test_with_auth_on_a_call_with_no_identity_is_refused(two_projects):
+    """The no-ACL branch must key off auth being OFF, never off an absent identity.
+
+    Today the middleware makes an identity-less tool call unreachable — but only through a tail
+    allowlist in another file, and one more unauthenticated tail there would have turned an inferred
+    "nobody, so no ACL" into a full bypass with nothing here failing. Called directly, because the
+    middleware is exactly what this must not depend on.
+    """
+    from hivemind_server import envelope
+    from hivemind_server.db import Invalid
+    from hivemind_server.identity import set_identity
+
+    application, _ = two_projects
+    registry = application.state.registry
+    set_identity(None)
+    envelope.set_mount_default("nik.a")          # as the middleware would, after its own ACL
+    envelope.set_registry(registry, require_auth=True)
+    with pytest.raises(Invalid):
+        envelope.resolve_project(None, requires=False)
+    with pytest.raises(Invalid):
+        envelope.resolve_project("nik.a", requires=True)
+    # Control: the same two calls in the mode that legitimately has nobody to authorize.
+    envelope.set_registry(registry, require_auth=False)
+    assert envelope.resolve_project(None, requires=False).name == "nik.a"
+    assert envelope.resolve_project("nik.b", requires=True).name == "nik.b"
+    envelope.set_mount_default(None)
+
+
+@pytest.mark.anyio
 async def test_a_missing_project_argument_is_refused_identically(two_projects):
     """Unknown and forbidden must read the same, or the pair is an existence oracle — the same
     property app.PROJECT_DENIED gives the middleware."""
@@ -255,6 +304,42 @@ async def test_a_missing_project_argument_is_refused_identically(two_projects):
                             {"name": "graph_types", "arguments": {"project": project}})
             return json.loads(_parse(r)["result"]["content"][0]["text"])
         assert await err("nik.a") == await err("does.not.exist")
+
+
+@pytest.mark.anyio
+async def test_two_apps_in_one_process_do_not_share_a_registry(tmp_path, monkeypatch):
+    """Nothing enforces one app per process. Held process-wide, the registry would be whichever app
+    was built LAST, and a call on app A would resolve its project name against app B — writing into
+    another deployment's data dir. Both apps hold a shared project of the same name, so the only
+    thing that distinguishes them is which registry answered."""
+    def build(tag):
+        root = tmp_path / tag / "projects"
+        (root / "shared").mkdir(parents=True)
+        monkeypatch.setenv("HIVEMIND_DATA_DIR", str(tmp_path / tag))
+        monkeypatch.setenv("HIVEMIND_PROJECTS_DIR", str(root))
+        monkeypatch.setenv("HIVEMIND_ALLOWED_HOSTS", "*")
+        application = appmod.build_app(Config())
+        with application.state.registry.get("shared").db.write("setup", "seed types") as tx:
+            schemas.define_type(tx.cur, tx, "node", "note",
+                                {"type": "object", "additionalProperties": True}, status="active")
+        return application, IdentityStore(application.state.cfg.identities_path).mint("nik", tag)
+
+    app_a, tok_a = build("a")
+    app_b, _ = build("b")            # built last: a process-wide registry would point here
+    transport = httpx.ASGITransport(app=app_a)
+    async with Lifespan(app_a), httpx.AsyncClient(transport=transport,
+                                                  base_url="http://t", timeout=30) as c:
+        r = await _post(c, "", tok_a, "tools/call",
+                        {"name": "graph_upsert",
+                         "arguments": {"type": "note", "props": {"title": "app A only"},
+                                       "project": "shared", "reason": "two apps"}})
+        out = json.loads(_parse(r)["result"]["content"][0]["text"])
+    assert out["ok"] is True, out
+
+    def nodes(application):
+        with application.state.registry.get("shared").db.read() as cur:
+            return cur.execute("SELECT COUNT(*) c FROM node").fetchone()["c"]
+    assert (nodes(app_a), nodes(app_b)) == (1, 0)
 
 
 @pytest.mark.anyio

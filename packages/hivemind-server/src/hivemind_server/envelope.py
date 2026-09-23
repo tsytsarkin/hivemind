@@ -75,11 +75,16 @@ _PROJECT: ContextVar = ContextVar("hivemind_project", default=None)
 # The project named by the URL this request arrived on (/p/<name>/…), or None on the neutral
 # endpoint. Published per request by app.ProjectAuthMiddleware — after its ACL has passed.
 _MOUNT_DEFAULT: ContextVar = ContextVar("hivemind_mount_default", default=None)
-# Where names are resolved. A module global rather than a contextvar because there is one app per
-# process: build_app -> build_mcp -> set_registry. Two apps built in one process (tests do this)
-# share it, and the last one built wins; harmless there because each points at its own data dir
-# and only one app serves requests at a time.
-_REGISTRY = None
+# The registry names are resolved against, and whether this deployment authenticates at all. Both
+# are published PER REQUEST by app.ProjectAuthMiddleware, which holds both, with build_mcp setting
+# them once as a default for any caller that is not an HTTP request. Per request rather than
+# process-wide because nothing enforces one app per process: two live apps would otherwise share one
+# global and a call could resolve a name against the other deployment's data dir.
+_REGISTRY: ContextVar = ContextVar("hivemind_registry", default=None)
+# True unless a deployment says otherwise, because the branch it unlocks (no identity, therefore no
+# ACL) must never be reached by accident: a caller that forgets to declare the mode gets the strict
+# rule, not the open one.
+_REQUIRE_AUTH: ContextVar = ContextVar("hivemind_require_auth", default=True)
 
 _PROJECT_ARG = Annotated[Optional[str], Field(
     description="Which project to act in. Required for tools that WRITE, unless the URL already "
@@ -87,9 +92,16 @@ _PROJECT_ARG = Annotated[Optional[str], Field(
                 "back from the projects listing.")]
 
 
-def set_registry(registry) -> None:
-    global _REGISTRY
-    _REGISTRY = registry
+def set_registry(registry, *, require_auth: bool = True) -> None:
+    """Publish the registry to resolve names against, and whether authentication is on.
+
+    `require_auth` is passed in rather than inferred from "is there an identity?": the no-ACL branch
+    in resolve_project used to key off an absent identity, which made the write path's security
+    property depend on the middleware's unauthenticated-tail allowlist in another file. One more
+    open tail there would have turned it into an ACL bypass with nothing here failing.
+    """
+    _REGISTRY.set(registry)
+    _REQUIRE_AUTH.set(require_auth)
 
 
 def set_mount_default(name: Optional[str]) -> None:
@@ -109,20 +121,27 @@ def current_project():
     if proj is not None:
         return proj
     name = _MOUNT_DEFAULT.get()
-    return _REGISTRY.get(name) if (name and _REGISTRY is not None) else None
+    registry = _REGISTRY.get()
+    return registry.get(name) if (name and registry is not None) else None
 
 
-def visible_projects(who=None, registry=None) -> list:
+def visible_projects(who=None) -> list:
     """Names the caller may actually use — safe to put in an error message, and the same list
-    `GET /projects` answers with. Both arguments default to the request's own caller and the
-    registry this process serves; a caller that already holds them passes them in rather than
-    trusting process-wide state.
+    `GET /projects` answers with. `who` defaults to the request's own caller; the root /projects
+    route passes it in, because it resolves its own caller and publishes no contextvar.
     """
     from .identity import current_identity
     from .projects_meta import can_access
+    registry = _REGISTRY.get()
+    if registry is None:
+        return []
+    if not _REQUIRE_AUTH.get():
+        # Auth off: there is no identity to compare and every project is reachable. Saying "(none)"
+        # here disagreed with GET /projects, which lists them all in that mode — and two answers to
+        # "projects you can use" that differ is what routing both through this helper prevents.
+        return sorted(p.name for p in registry.all())
     who = who or current_identity()
-    registry = _REGISTRY if registry is None else registry
-    if registry is None or who is None:
+    if who is None:
         return []
     return sorted(p.name for p in registry.all() if can_access(who, p.meta))
 
@@ -140,6 +159,10 @@ def resolve_project(explicit: Optional[str], *, requires: bool):
     There is deliberately no fall-back to the configured default project: an agent working in
     nik.private that forgot the argument would have had its write land in the shared graph, with
     no error to notice. A mount default is not that — the caller's own URL named it.
+
+    `requires` therefore selects the WORDING of that refusal, not whether one happens: with no
+    default for reads either, both kinds refuse when nothing named a project. It is still keyed to
+    RO/WRITE so that the write path refuses by construction if a read default is ever added.
     """
     from .identity import current_identity
     from .projects_meta import can_access
@@ -154,16 +177,16 @@ def resolve_project(explicit: Optional[str], *, requires: bool):
                 f"Projects you can use: {', '.join(visible_projects()) or '(none)'}")
         raise Invalid("no project for this call; pass project=<name> "
                       f"(available: {', '.join(visible_projects()) or 'none'})")
-    project = _REGISTRY.get(name) if _REGISTRY is not None else None
+    registry = _REGISTRY.get()
+    project = registry.get(name) if registry is not None else None
     if project is None:
         raise _denied()
-    if who is None:
+    if not _REQUIRE_AUTH.get() and who is None:
         # HIVEMIND_REQUIRE_AUTH=0, the supported no-auth local mode: with no credential there is
-        # nobody to authorize, so there is no ACL either — by construction, not by omission. Same
-        # rule as ProjectAuthMiddleware._authorize, which is also what makes this branch
-        # unreachable under auth: it 401s an unauthenticated call on the neutral endpoint and never
-        # lets one reach a tool under /p/. test_the_neutral_endpoint_still_demands_a_token and
-        # test_health_open_and_auth_required are what pin that.
+        # nobody to authorize, so there is no ACL either — by construction, not by omission, the
+        # same rule as ProjectAuthMiddleware._authorize. Conditioned on the MODE, not on an absent
+        # identity: under auth a caller with no identity falls through to can_access, which denies.
+        # test_with_auth_on_a_call_with_no_identity_is_refused is what holds that.
         return project
     if not can_access(who, project.meta):
         raise _denied()
@@ -223,8 +246,9 @@ class ProjectAware:
 
     def tool(self, *a, annotations=None, **kw):
         inner = self._mcp.tool(*a, annotations=annotations, **kw)
-        # Unannotated means "treated as a write": a tool added without annotations then demands an
-        # explicit project rather than quietly defaulting one. Loud beats leaky.
+        # Unannotated means "treated as a write": a tool added without annotations gets the write
+        # rule, so it refuses with the write wording rather than the softer read one. Loud beats
+        # leaky. What `requires` actually selects is that wording — see resolve_project.
         requires = annotations is None or not annotations.read_only_hint
 
         def deco(fn):
@@ -254,6 +278,14 @@ class _Current:
 
     def __getattr__(self, name):
         return getattr(self._target(), name)
+
+    def __repr__(self) -> str:
+        # Never raises and never resolves through _target: a proxy that threw from inside a log line
+        # would hide whatever was actually being debugged.
+        proj = current_project()
+        what = f"{self._attr} of project" if self._attr else "project"
+        return (f"<hivemind per-call {what} {proj.name!r}>" if proj is not None
+                else f"<hivemind per-call {what}: no project resolved for this call>")
 
 
 def CurrentProject() -> _Current:

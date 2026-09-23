@@ -1,6 +1,6 @@
 """MCP tool surface. `build_mcp` returns ONE MCPServer for every project the registry holds: each
-tool takes a `project` argument, and the `db`/`project` used in the bodies below are proxies onto
-whatever that resolved to for the call in flight (see envelope). Few powerful, namespaced tools;
+tool takes a `project` argument, and the `db` used in the bodies below is a proxy onto whatever
+that resolved to for the call in flight (see envelope). Few powerful, namespaced tools;
 read tools annotated read-only; every tool returns a uniform envelope so agents get actionable
 errors instead of opaque failures.
 """
@@ -11,8 +11,8 @@ from typing import Any, Optional
 from mcp.server import MCPServer
 
 from . import graph, guide, schemas, skills, traps
-from .envelope import (RO, WRITE, CurrentDb, CurrentProject, ProjectAware,
-                       envelope as _envelope, set_registry)
+from .envelope import (RO, WRITE, CurrentDb, ProjectAware, envelope as _envelope,
+                       set_registry)
 
 INSTRUCTIONS = (
     "Hivemind REPLACES local memory for this fleet: read it before doing any work, and persist "
@@ -43,11 +43,14 @@ INSTRUCTIONS = (
 def build_mcp(registry, identities, *, instructions: str = INSTRUCTIONS) -> MCPServer:
     """One project-neutral MCP server. `identities` is threaded in for the project tools that come
     next (create/share have to check a user exists); nothing here reads it yet."""
+    # A default for any caller that is not an HTTP request. ProjectAuthMiddleware re-publishes both
+    # per request and THAT is the authoritative one; require_auth stays strict here because
+    # build_mcp does not know the deployment's mode.
     set_registry(registry)
     # Resolved per call, so none of the 47 tool bodies below has to know the project exists: the
-    # alternative was editing every one of them to take it as an argument.
+    # alternative was editing every one of them to take it as an argument. A body that needs the
+    # project itself rather than its database adds `project = CurrentProject()` the same way.
     db = CurrentDb()
-    project = CurrentProject()
     real = MCPServer(name="hivemind", instructions=instructions, version="1.1.0")
     # Registration goes through the proxy so a tool cannot be added without project resolution.
     mcp = ProjectAware(real)
@@ -340,7 +343,7 @@ def build_mcp(registry, identities, *, instructions: str = INSTRUCTIONS) -> MCPS
         return guide.propose_section(db, agent, section, body, why=why)
 
     from . import registry_tools  # attach artifact + tool-registry tools (added incrementally)
-    registry_tools.attach(mcp, project)
+    registry_tools.attach(mcp)
     from . import bus_ws_tools    # agent bus: WebSocket push, deliberately outside the graph
     from .config import config as _config
     bus_ws_tools.attach(mcp, _config())

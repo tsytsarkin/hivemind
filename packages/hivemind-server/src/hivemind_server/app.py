@@ -25,7 +25,7 @@ from starlette.routing import Mount, Route, WebSocketRoute
 from . import bus_ws as _bus_ws_mod
 from .auth import bearer_from_headers
 from .config import Config, config
-from .envelope import set_mount_default, visible_projects
+from .envelope import set_mount_default, set_registry, visible_projects
 from .identity import Identity, IdentityStore, resolve, set_identity
 from .mcp_tools import build_mcp
 from .project import ProjectRegistry, projects_root_from_env
@@ -103,6 +103,10 @@ class ProjectAuthMiddleware:
         # request a fresh context copy, but the invariant must not depend on that.
         set_identity(None)
         set_mount_default(None)          # same reason: a stale project must not become the default
+        # Published per request, before any early return, because nothing enforces one app per
+        # process: a module-global registry would let a call in one deployment resolve a name against
+        # another's data dir. This middleware is the one place that holds both.
+        set_registry(self.registry, require_auth=self.cfg.require_auth)
         if scope["type"] != "http":
             # The only non-http route under /p/ is the bus WebSocket, which carries its own
             # credential in the query string (a single-use ticket or a listen key, both minted by
@@ -286,20 +290,16 @@ def build_app(cfg: Optional[Config] = None) -> Starlette:
 
     async def list_projects(req: Request) -> Response:
         who = resolve(bearer_from_headers(req.headers), identities, None)
-        if cfg.require_auth:
-            if who is None:
-                # `resolve(..., None)` only accepts a server-level identity: a legacy project token
-                # is pinned to one project and cannot be recognised without knowing which, so it
-                # uses its own project base URL instead.
-                return JSONResponse(NO_TOKEN, status_code=401,
-                                    headers={"www-authenticate": "Bearer"})
-            # The same list the tool layer names in its refusals, from one helper: two spellings of
-            # "projects you can use" would eventually disagree, and this is the one an agent is told
-            # to trust.
-            names = visible_projects(who, registry)
-        else:
-            names = [p.name for p in registry.all()]
-        return JSONResponse({"projects": names})
+        if cfg.require_auth and who is None:
+            # `resolve(..., None)` only accepts a server-level identity: a legacy project token is
+            # pinned to one project and cannot be recognised without knowing which, so it uses its
+            # own project base URL instead.
+            return JSONResponse(NO_TOKEN, status_code=401,
+                                headers={"www-authenticate": "Bearer"})
+        # The same list the tool layer names in its refusals, from one helper: two spellings of
+        # "projects you can use" would eventually disagree, and this is the one an agent is told to
+        # trust. It answers for the auth-off mode too, where every project is reachable.
+        return JSONResponse({"projects": visible_projects(who)})
 
     async def index(req: Request) -> Response:
         root = str(req.base_url).rstrip("/")

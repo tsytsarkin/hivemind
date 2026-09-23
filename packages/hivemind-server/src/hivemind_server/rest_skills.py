@@ -14,7 +14,7 @@ from starlette.responses import JSONResponse, Response
 
 from . import registry, skills
 from .db import NotFound
-from .envelope import CurrentDb
+from .envelope import CurrentDb, CurrentProject
 
 
 def register_skill_routes(mcp) -> None:
@@ -47,15 +47,17 @@ def _links_for(db, skill_id: str) -> list:
     return [dict(r) for r in rows]
 
 
-def register_index_routes(mcp, project) -> None:
+def register_index_routes(mcp) -> None:
     """Health and an endpoint index UNDER the project prefix.
 
     Clients are configured with the project base URL (…/p/<project>), so `<base>/healthz` is the
     natural probe — it used to 404 and make a healthy server look dead. Both this and the
     server-root /healthz now answer.
 
-    `project` is the per-call proxy, so the name in these bodies is the one in the request's URL.
+    The project is the per-call proxy, so the name in these bodies is the one in the request's URL
+    — built here, not taken as an argument, so a real Project cannot be bound in by mistake.
     """
+    project = CurrentProject()
 
     @mcp.custom_route("/healthz", methods=["GET"])
     async def project_health(_req: Request) -> Response:

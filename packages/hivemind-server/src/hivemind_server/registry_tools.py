@@ -22,12 +22,15 @@ def _base() -> str:
     return f"/p/{current_project().name}"
 
 
-def attach(mcp, project) -> None:
-    register_blob_routes(mcp, project)
+def attach(mcp) -> None:
+    # Every register_* below builds the per-call proxies it needs itself. Uniform on purpose: a
+    # function taking a project as an argument is one a caller can hand a real Project to, which
+    # would bind it at attach time and serve one project's data on every prefix.
+    register_blob_routes(mcp)
     register_guide_routes(mcp)
     register_skill_routes(mcp)
     register_tool_routes(mcp)
-    register_index_routes(mcp, project)
+    register_index_routes(mcp)
     store = CurrentBlobs()        # both resolve per call — see envelope._Current
     db = CurrentDb()
 
