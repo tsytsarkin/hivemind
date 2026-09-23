@@ -393,52 +393,191 @@ def test_a_failed_rotation_never_costs_the_message(listener, tmp_path, monkeypat
     assert (blocked / "occupied").exists(), "a rotation that cannot happen changes nothing"
 
 
-def _worst_case_record():
-    """The largest single line the server can ever make a listener write, built rather than
-    reasoned about.
+# ── the ceiling: derived end to end, because reasoning about it has gone wrong every round ────
+class _RecordingWS:
+    """Minimal stand-in for the socket the hub writes to; keeps the exact text it was given."""
 
-    `MAX_BODY` counts **code points**, so a body of astral characters is server-legal, and
-    `ensure_ascii` writes each one as a surrogate PAIR — twelve bytes, not the six a BMP character
-    costs. Such a body is only 1.00 MiB on the wire under UTF-8, comfortably inside `MAX_FRAME`,
-    so this is reachable traffic and not a construction.
+    def __init__(self):
+        self.text = []
+
+    async def send_text(self, text):
+        self.text.append(text)
+
+    async def close(self, code=1000):
+        pass
+
+
+async def _server_frame(sender, body):
+    """The envelope `Hub.send` really builds — ids, timestamps and all — not a hand-copied
+    literal, and serialised by the server's own encoder. Returns (frame, wire bytes)."""
+    from hivemind_server.bus_ws import Hub
+    hub = Hub()
+    peer, _user = hub.redeem(hub.mint_ticket("\U0001F600" * 64)["ticket"])   # labels: .strip()[:64]
+    ws = _RecordingWS()
+    await hub.attach(peer, ws)
+    out = await hub.send(sender, peer.label, body)        # raises BusError on an illegal body
+    assert out["delivered"] is True
+    return json.loads(ws.text[-1]), len(ws.text[-1].encode("utf-8"))
+
+
+def _line_bytes(listener, tmp_path, frame, name):
+    """What that frame costs in the inbox, written by the listener's own `_record` rather than by
+    a copy of its rules here — so `ensure_ascii`, the newline and the envelope all live in one
+    place, and changing any of them moves this number."""
+    inbox = tmp_path / ("%s.jsonl" % name)
+    assert listener._record(frame, inbox) is True
+    return inbox.stat().st_size
+
+
+def _char_classes():
+    """One representative code point of every width UTF-8 has, keyed by that width.
+
+    Derived from the encoding rather than listed by hand, and the assertion is the point: a
+    ceiling that simply leaves a width out is how this file came to say "six bytes". Someone who
+    believes a narrower character is the worst case has to delete a width here and answer for it.
+    """
+    out = {}
+    for cp in (0x41, 0x80, 0x800, 0x10000):
+        out[len(chr(cp).encode("utf-8"))] = chr(cp)
+    assert sorted(out) == [1, 2, 3, 4], "UTF-8 has four widths; all four must be measured"
+    return out
+
+
+_CLASS_LINES = {}
+_MAX_LINE = {}
+
+
+async def _class_lines(listener, tmp_path):
+    """Per UTF-8 width: what a maximal body of it costs in the inbox, and on the wire."""
+    key = listener.__name__
+    if key not in _CLASS_LINES:
+        from hivemind_server.bus_ws import MAX_BODY
+        out = {}
+        for width, ch in _char_classes().items():
+            frame, wire = await _server_frame("p", ch * MAX_BODY)
+            assert len(frame["body"]) == MAX_BODY, "the server takes all of it: the cap is points"
+            out[width] = (_line_bytes(listener, tmp_path, frame, "%s-w%d" % (key, width)), wire)
+        _CLASS_LINES[key] = out
+    return _CLASS_LINES[key]
+
+
+async def _max_recordable_line(listener, tmp_path):
+    """The largest line a listener can be made to write, derived rather than reasoned about.
+
+    The constraint that binds is NOT `MAX_BODY`: `from` is the `agent` argument of `bus_send` and
+    nothing caps it, so it can carry a payload of its own. What binds is the wire — a frame over
+    `MAX_FRAME` is refused by the listener and never recorded at all. So: fill the body with
+    whatever costs most per code point, fill the rest of the wire budget with whatever costs most
+    per wire byte, and check that one more code point would not fit.
+
+    Both characters are CHOSEN HERE, by measuring every width. That is the mechanism: a reader who
+    believes some other class is the worst case has to change a comparison the tests make, not a
+    constant they can edit quietly.
+    """
+    key = listener.__name__
+    if key in _MAX_LINE:
+        return _MAX_LINE[key]
+    from hivemind_server.bus_ws import MAX_BODY
+    classes, lines = _char_classes(), await _class_lines(listener, tmp_path)
+    body_ch = classes[max(lines, key=lambda w: lines[w][0])]                     # per code point
+    fill_width = max(lines, key=lambda w: lines[w][0] / lines[w][1])             # per wire byte
+    fill_ch = classes[fill_width]
+
+    body = body_ch * MAX_BODY
+    _, wire_without = await _server_frame("x", body)
+    n = (listener.MAX_FRAME - wire_without) // fill_width
+    for _ in range(8):
+        frame, wire = await _server_frame(fill_ch * n, body)
+        if wire <= listener.MAX_FRAME:
+            break
+        n -= (wire - listener.MAX_FRAME + fill_width - 1) // fill_width
+    else:
+        raise AssertionError("could not fit a frame to the wire cap")
+    assert wire <= listener.MAX_FRAME, "a frame over MAX_FRAME is refused, so it is not a ceiling"
+    _, over = await _server_frame(fill_ch * (n + 1), body)
+    assert over > listener.MAX_FRAME, "and this is the largest one that does fit"
+    _MAX_LINE[key] = _line_bytes(listener, tmp_path, frame, "max-" + key)
+    return _MAX_LINE[key]
+
+
+@pytest.mark.anyio
+async def test_the_widest_characters_are_what_maximise_a_record(tmp_path):
+    """The claim every ceiling in this file has rested on, made checkable.
+
+    It was stated as x1, then as x6, and is x12; each time the factor was reasoned out and nothing
+    in the suite could contradict it. `MAX_BODY` counts CODE POINTS, so at a fixed number of them
+    a 4-byte (astral) character costs the most: `ensure_ascii` writes it as a surrogate PAIR.
+    Per WIRE byte — which is what bounds the uncapped `from` field — a 4-byte character ties with
+    a 2-byte one, both at 3x, and both beat a 3-byte BMP character.
     """
     from hivemind_server.bus_ws import MAX_BODY
-    frame = {"v": 1, "type": "message", "id": "01K5ZQ2ZABCDEFGHJKMNPQRSTV", "from": "mac-studio",
-             "to": "lab-box", "room": None, "body": "\U0001F600" * MAX_BODY,
-             "ts": "2026-09-23T10:00:00Z"}
-    assert len(frame["body"]) == MAX_BODY, "exactly at the server's limit, in code points"
-    assert len(frame["body"].encode("utf-8")) <= _load().MAX_FRAME, "and it fits a wire frame"
-    return len(json.dumps(frame, ensure_ascii=True)) + 1
+    lines = await _class_lines(_load(), tmp_path)
+    per_point = {w: v[0] for w, v in lines.items()}
+    per_wire = {w: round(v[0] / v[1], 1) for w, v in lines.items()}
+
+    assert max(per_point, key=per_point.get) == 4, per_point
+    assert per_point[1] < per_point[2] == per_point[3] < per_point[4], per_point
+    assert per_point[3] - per_point[1] == 5 * MAX_BODY, "a BMP character escapes to six bytes"
+    assert per_point[4] - per_point[3] == 6 * MAX_BODY, "and an astral one to twelve"
+
+    assert per_wire[4] == per_wire[2] == 3.0, per_wire
+    assert per_wire[3] == 2.0 and per_wire[1] == 1.0, per_wire
 
 
-def test_the_worst_case_record_is_measured_not_assumed():
-    """Every quantified ceiling for this file has so far been written from an expansion factor
-    someone reasoned out, and the factor has been wrong twice (x1, then x6; it is x12). So derive
-    it: this is the number the docs quote, and it will move on its own if MAX_BODY does."""
+@pytest.mark.anyio
+async def test_the_ceiling_is_derived_from_a_frame_that_really_fits_the_wire(tmp_path):
+    """The number `docs/bus.md` quotes. Every part of it is measured: the envelope comes from
+    `Hub.send`, the line from `_record`, and the frame is proven deliverable against `MAX_FRAME`
+    — which is the check that matters, because a frame the listener refuses is not a ceiling."""
+    listener = _load()
+    line = await _max_recordable_line(listener, tmp_path)
+    # What sets this is the WIRE, not MAX_BODY: a frame has to fit MAX_FRAME as UTF-8, and
+    # ensure_ascii inflates it by at most 3x (both a 2-byte and a 4-byte character escape to
+    # three bytes per wire byte). So the ceiling tracks MAX_FRAME and moves with it.
+    assert round(line / listener.MAX_FRAME, 1) == 3.0, "the wire budget times the escape ratio"
+    assert round(line / 1048576, 2) == 6.00, "6.00 MiB is the largest recordable line"
+    ceiling = 2 * (listener.INBOX_MAX_BYTES + line)
+    assert round(ceiling / 1048576, 2) == 20.00, "so 20.00 MiB is the ceiling across both files"
+
+
+@pytest.mark.anyio
+async def test_a_record_larger_than_a_whole_generation_still_lands(tmp_path):
+    """The floor assertion this file used to carry said a maximal message must fit in one
+    generation "or it could never land". Both halves were false: it does not fit (6.00 MiB against
+    a 4 MiB cap) and it lands anyway, because the rotation runs first and the append is
+    unconditional. What the cap bounds is the file, not the record."""
+    listener = _load()
+    line = await _max_recordable_line(listener, tmp_path)
+    assert line > listener.INBOX_MAX_BYTES, "the premise of the old floor does not hold"
+
     from hivemind_server.bus_ws import MAX_BODY
-    worst = _worst_case_record()
-    assert worst == 12 * MAX_BODY + 159, "12 bytes per code point, plus the frame's envelope"
-    assert 3.00 <= worst / 1048576 < 3.01, "3.00 MiB — the figure docs/bus.md states"
-    ceiling = 2 * (4 * 1024 * 1024 + worst)
-    assert 14.00 <= ceiling / 1048576 < 14.01, "and 14.00 MiB across both generations"
+    inbox = tmp_path / "oversize.jsonl"
+    frame, _wire = await _server_frame("p", "\U0001F600" * MAX_BODY)
+    assert listener._record(frame, inbox) is True, "an oversized record must still be recorded"
+    assert inbox.stat().st_size > listener.INBOX_MAX_BYTES / 2
+    assert json.loads(inbox.read_text())["body"] == frame["body"], "and it must still parse"
 
 
-def test_both_halves_agree_on_the_cap():
+@pytest.mark.anyio
+async def test_both_halves_agree_on_the_cap(tmp_path):
     from hivemind import bus as client
-    from hivemind_server.bus_ws import MAX_BODY
     plugin = _load()
     assert plugin.INBOX_MAX_BYTES == client.INBOX_MAX_BYTES == 4 * 1024 * 1024
     assert plugin.MAX_FRAME == client.MAX_FRAME, "both halves must accept the same frame size"
-    # The floor that binds is the largest record the server can hand a listener — see
-    # _worst_case_record. 6 * MAX_BODY, which this assertion used to say, is 1.50 MiB: LOWER than
-    # the MAX_FRAME floor it replaced, so it passed at caps where one record was twice a whole
-    # generation. 12 * MAX_BODY is 3.00 MiB, above both.
-    worst = _worst_case_record()
+    # ONE guard, not three: the measured line is the check, and the ceiling it implies is what
+    # docs/bus.md states. An earlier version asserted `>= 6 * MAX_BODY` "so a maximal message can
+    # land", which was weaker than the MAX_FRAME floor it replaced (1.50 MiB against 2.00 MiB)
+    # AND rested on a premise that is false: an oversized record lands regardless. What the cap
+    # has to be is large enough that ordinary traffic is not rolling constantly, and known — so
+    # what is asserted is the ceiling both halves produce, identically.
     for mod in (plugin, client):
-        assert mod.INBOX_MAX_BYTES >= 12 * MAX_BODY, \
-            "a maximal server-legal message must fit in one generation, or it could never land"
-        assert mod.INBOX_MAX_BYTES >= worst, "and the measured record, envelope included, must fit"
-        assert mod.INBOX_MAX_BYTES > mod.MAX_FRAME, "never below the floor this replaced"
+        line = await _max_recordable_line(mod, tmp_path)
+        assert round(2 * (mod.INBOX_MAX_BYTES + line) / 1048576, 2) == 20.00, \
+            "each half's cap and largest line must give the 20.00 MiB ceiling the docs state"
+    assert _MAX_LINE[plugin.__name__] == _MAX_LINE[client.__name__], \
+        "and the two halves must record a frame identically, byte for byte"
+
+
 # ── write(2) is allowed to take less than you gave it, and the count is the only way to know ──
 class _PartialOS:
     """Stands in for the `os` a listener module imported, shortening every write.
@@ -596,3 +735,27 @@ def test_the_rolled_generation_is_not_followed_when_it_is_a_symlink(listener, tm
     assert inbox.stat().st_mode & 0o777 == 0o600, "our own file is still narrowed"
     assert victim.stat().st_mode & 0o777 == 0o666, "the link's target must be left alone"
     assert os.path.islink(str(inbox) + ".1"), "and the link itself is not replaced"
+
+
+def test_a_symlinked_inbox_is_narrowed_because_we_write_through_it(listener, tmp_path,
+                                                                   permissive_umask):
+    """The other half of not following links at `.1`: the live inbox must still be narrowed.
+
+    Skipping links for both paths looked symmetrical and was wrong — every other operation here
+    follows the live path (os.open to create and to append, getsize for the rotation), so a
+    symlinked inbox is a file this listener writes peer bodies into. Leaving its mode alone means
+    a world-readable transcript, which is the case M5 exists to fix.
+    """
+    target = tmp_path / "elsewhere.jsonl"
+    target.write_text('{"body": "ours, reached through a link"}\n')
+    os.chmod(target, 0o666)
+    inbox = tmp_path / "i.jsonl"
+    os.symlink(str(target), str(inbox))
+
+    assert listener.prepare_inbox(inbox) == str(inbox)
+    assert target.stat().st_mode & 0o777 == 0o600, "the file we actually write must be narrowed"
+
+    listener.render({"type": "message", "id": "01AB", "from": "p", "body": "through the link"},
+                    inbox=inbox)
+    assert json.loads(target.read_text().splitlines()[-1])["body"] == "through the link", \
+        "and it is genuinely the file the listener appends to"

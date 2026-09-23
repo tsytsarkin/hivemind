@@ -71,6 +71,22 @@ def default_inbox():
     return os.path.join(os.path.expanduser("~"), ".hivemind", "bus-inbox.jsonl")
 
 
+def _narrow(path):
+    """Take the group and world bits off a file of ours, keeping whatever the owner had.
+
+    Best effort: not being able to chmod it is no reason to stop recording. `islink` -> `stat` ->
+    `chmod` is not atomic, so someone who can write to this directory could swap the path in
+    between — they could also just replace the file, and this only ever *narrows*, so the
+    race is not worth the portability cost of O_NOFOLLOW + fchmod.
+    """
+    try:
+        mode = os.stat(path).st_mode & 0o777
+        if mode & 0o077:
+            os.chmod(path, mode & 0o700)
+    except OSError:
+        pass
+
+
 def prepare_inbox(path):
     """Create the inbox's directory once, at startup, so appending a frame stays a plain append.
 
@@ -86,27 +102,23 @@ def prepare_inbox(path):
         # unusable location is discovered at startup, where it can be reported once, rather than
         # silently per message.
         os.close(os.open(str(path), os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600))
-        # The mode above only applies to a file this call creates. An inbox left by an earlier
-        # version — or by any run at a wider umask — keeps that mode for as long as it lives and
-        # carries it into `.1` on the first roll, so narrow it here too, along with the rolled
-        # generation beside it. This file is ours: a fixed name, written only by us, holding other
-        # agents' message bodies. Best effort — not owning it is no reason to stop recording.
         # A tear left by an earlier process is invisible to `_TORN`; heal it while there is
         # somewhere to put the newline, so the first message of this run is not appended onto it.
         if _ends_mid_line(str(path)):
             _TORN.add(str(path))
-        for p in (str(path), str(path) + ".1"):
-            try:
-                # Never follow a link here. `.1` is a path this code otherwise only ever renames
-                # — os.replace does not follow its destination — so a symlink left there is not
-                # an inbox of ours and chmod would land on whatever it points at.
-                if os.path.islink(p):
-                    continue
-                mode = os.stat(p).st_mode & 0o777
-                if mode & 0o077:
-                    os.chmod(p, mode & 0o700)
-            except OSError:
-                pass
+        # The 0o600 above only applies to a file this call creates. An inbox left by an earlier
+        # version — or by any run at a wider umask — keeps that mode for as long as it lives, and
+        # carries it into `.1` on the first roll. Narrow both.
+        #
+        # The two paths differ in exactly one way. The live inbox is ours whatever it is: every
+        # other operation here follows it too (os.open to create and to append, getsize for the
+        # rotation), so if it is a link we are already writing peer bodies into its target and
+        # narrowing that target is narrowing the file we write. `.1` this code has never opened:
+        # it is only ever RENAMED onto, and os.replace does not follow a destination — so a link
+        # left there is not an inbox of ours, and chmod would land on something else entirely.
+        _narrow(str(path))
+        if not os.path.islink(str(path) + ".1"):
+            _narrow(str(path) + ".1")
         return str(path)
     except OSError:
         return None
@@ -129,20 +141,16 @@ def _rotate(path):
     prune is the shape that took the blob store to 94 GB. The offline queue in this same subsystem
     is bounded for exactly that reason, and so is this. One generation is enough: the inbox is a
     recovery buffer for a message that scrolled past, not an archive — the graph is the archive.
-
-    Returns whether it rolled, which the caller needs: a fresh generation starts clean, so it
-    needs no repair for a line torn in the one that just rolled away.
     """
     try:
         if os.path.getsize(path) < INBOX_MAX_BYTES:
-            return False
+            return
     except OSError:
-        return False            # nothing there yet, or unreadable — the append will report it
+        return                  # nothing there yet, or unreadable — the append will report it
     try:
         os.replace(path, path + ".1")   # atomic; whatever .1 held is what falls off the horizon
-        return True
     except OSError:
-        return False            # a failed rotation must never cost the message being written
+        pass                    # a failed rotation must never cost the message being written
 
 
 _TORN = set()       # inboxes whose last line is known to be incomplete (see _write_line)
@@ -207,13 +215,14 @@ def _record(frame, inbox):
     path = str(inbox)
     payload = (line + "\n").encode("utf-8")        # ASCII by construction, see above
     try:
-        rolled = _rotate(path)
-        if path in _TORN and not rolled and _ends_mid_line(path):
+        _rotate(path)
+        if path in _TORN and _ends_mid_line(path):
             # A previous write tore and nothing has closed the line: do not share it. Confirmed
-            # against the file rather than taken from the flag, because a tear does not always
-            # leave a fragment (a write can fail having placed nothing) and the seal at the tear
-            # sometimes does land — either way a blank first line would be a false positive for
-            # "an unparseable line is a message whose write was cut short".
+            # against the file, not taken from the flag — a tear does not always leave a fragment
+            # (a write can fail having placed nothing), a rotation carries the fragment away with
+            # the generation it belonged to, and the seal at the tear sometimes does land. In all
+            # three the flag is set and the prefix would be wrong: a blank first line is a false
+            # positive for "an unparseable line is a message whose write was cut short".
             payload = b"\n" + payload
         # os.open, not open(): after a rotation this call creates the file, and the mode has to
         # travel with the creation or the new generation would land world-readable.

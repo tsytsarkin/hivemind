@@ -136,24 +136,42 @@ Details that are load-bearing:
   blob store to 94 GB.
 * **The size on disk is 8 MiB plus at most one record per generation** — not "at most 8 MiB". The
   size is checked *before* the append, so every generation ends one whole record over the cap
-  (measured: a `.1` of 4,194,648 B). With ordinary traffic that overshoot is ~1 KB. With
-  server-legal maxima it is 3.00 MiB, for a **ceiling of 14.00 MiB** across the two files, because
-  `MAX_BODY` is 256 Ki **code points** — so a body of astral characters (emoji) is legal, and
-  `ensure_ascii` writes each one as a surrogate *pair*, twelve bytes rather than the six a BMP
-  character costs. Such a body is only 1.00 MiB on the wire under UTF-8, well inside `MAX_FRAME`,
-  so this is reachable traffic and not a construction.
+  (measured: a `.1` of 4,194,648 B). With ordinary traffic that overshoot is ~1 KB.
 
-  Do not take that number on trust, and do not re-derive it from an expansion factor: this file
-  has carried a wrong quantified ceiling three times (once implicitly, then ×6, now ×12). It is
-  *built and measured* by `test_the_worst_case_record_is_measured_not_assumed`, and
-  `test_both_halves_agree_on_the_cap` asserts `INBOX_MAX_BYTES` against that measurement, so the
-  floor moves on its own if `MAX_BODY` or the encoding does. The cap is deliberately above the
-  worst-case record: below it, a maximal message could never be recorded at all.
+  The absolute ceiling is **20.00 MiB**, and what sets it is the **wire**, not `MAX_BODY`. A frame
+  has to fit `MAX_FRAME` (2 MiB) as UTF-8 or the listener refuses it and it is never recorded at
+  all; `ensure_ascii` then inflates what did arrive by at most 3× (a 2-byte and a 4-byte character
+  both escape to three bytes per wire byte). So the largest line a listener can be made to write
+  is 6.00 MiB, and two generations of `cap + one such record` is 20.00 MiB. `MAX_BODY` does not
+  bound it, because `from` is the `agent` argument of `bus_send` and **nothing caps it** — it can
+  carry a payload of its own. A record that large is hostile traffic, not ordinary use.
+
+  Do not take those numbers on trust, and do not re-derive them from an expansion factor: this
+  file has carried a wrong quantified ceiling three times (implicitly ×1, then ×6, then ×12 —
+  and ×12 was still wrong, because it was the wrong constraint). They are measured end to end by
+  `test_the_ceiling_is_derived_from_a_frame_that_really_fits_the_wire`: the envelope comes from
+  `Hub.send`, the line from the listener's own `_record`, the frame is proved to fit `MAX_FRAME`,
+  and the character that maximises it is *chosen by measuring every UTF-8 width* rather than
+  named. `test_both_halves_agree_on_the_cap` then pins both halves to the same ceiling.
+* **A record can be larger than a whole generation, and that is fine.** 6.00 MiB against a 4 MiB
+  cap. It still lands: the rotation runs first and the append is unconditional, so an oversized
+  record simply opens a generation of its own and rolls the previous one away. An earlier version
+  of this file asserted the opposite ("a maximal message must fit in one generation, or it could
+  never land") — pinned now by
+  `test_a_record_larger_than_a_whole_generation_still_lands`. What the cap bounds is the file, not
+  the record.
 * **A failed rotation costs nothing.** It is attempted before the append, inside the same
   best-effort discipline: if `os.replace` fails the message is still appended, to the oversized
   file, and still printed. The append uses `os.open(…, 0o600)` rather than `open()` so the
   generation opened by a rotation is owner-only like the one it replaced — peer traffic is not
-  world-readable.
+  world-readable. At startup an inbox inherited at a wider mode is narrowed too, along with `.1`
+  — except that `.1` is skipped when it is a **symlink**: the live inbox is ours whatever it is
+  (every other operation follows it, so we are writing into its target either way), but `.1` is a
+  path this code only ever *renames onto*, and `os.replace` does not follow a destination, so a
+  link there points at something that is not ours. That check is `islink` → `stat` → `chmod` and
+  is therefore not atomic; anyone who could win that race could replace the file outright, and
+  the operation only ever narrows, so it is not worth `O_NOFOLLOW` + `fchmod` and the portability
+  that costs.
 * **A torn write is never vouched for.** `os.write` is `write(2)` and may take less than the whole
   buffer; the loop insists on the rest and reports `False` the moment it cannot finish, so a
   truncated record is never sold to an agent as the full text. The fragment keeps its own line: the
