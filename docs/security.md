@@ -146,7 +146,10 @@ simultaneously the payload and the destination.
   their token can recover. Host access is total access, by design.
 - **No transport security.** Tokens are static bearers over plain HTTP. Bind private interfaces
   only (LAN/Tailscale), never a public NIC; put TLS in front if the path is not already trusted.
-  **Being on the LAN is not authorization** — every `/p/<project>` request still needs a token.
+  **Being on the LAN is not authorization** — every `/p/<project>` request that could return project
+  data still needs a token. The two exceptions carry none: a *shared* project's endpoint index and
+  `healthz`, and that allowlist is exactly two entries wide
+  (`test_a_shared_projects_open_tails_are_exactly_two`).
 - `HIVEMIND_ALLOWED_HOSTS=*` (the default) disables the DNS-rebinding host check. Set explicit
   hostnames to enable it.
 - `HIVEMIND_REQUIRE_AUTH=0` is a supported local mode that turns off authentication **and

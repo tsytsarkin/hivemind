@@ -43,7 +43,8 @@ what it says.
 ## Search index
 `node_fts` (BM25 over prose) and `sym_fts` (trigram over symbols) are the two halves `graph_search`
 fuses with RRF; both are FTS5 virtual tables rebuilt by `hivemind-admin reindex`. `meta` is a
-single key/value table for per-database counters such as `guide_version`.
+single key/value table; the one counter it holds is `schema_version` (`guide_version` is not in it
+— it is a per-section column on `guide_section`, bumped per section by a merge or `set-guide`).
 
 ## Blobs
 Content-addressed files (`blob`, `blob_ref`, `blob_pin`); attach to any node/edge **version**.
@@ -55,7 +56,7 @@ registry (yank, never delete; only the newest non-yanked version is indexed in `
 `node_id` and `subject_key`/`subject_version` scope it, and `status`
 (`active`/`disputed`/`retired`) makes it falsifiable. Indexed in `trap_fts`; every record and
 status change writes a `tx` row for provenance.
-`skill_link` / `tool_link` attach either to a node (`relation`, plus `source`=auto|confirmed and the retrieval `score`) and are what `graph_get` surfaces; they are written automatically on publish and a confirmed link is never downgraded. `embedding` holds one L2-normalised float32 vector per skill/tool per backend (`model`), used for semantic search; `skill_fts` / `tool_fts` hold the lexical side. Details: [skills-and-traps.md](skills-and-traps.md).
+`skill_link` / `tool_link` attach either to a node (`relation`, plus `source`=auto|confirmed and the retrieval `score`) and are what `graph_get` surfaces; they are written automatically on publish and a confirmed link is never downgraded. `embedding` holds **one** L2-normalised float32 vector per skill/tool — its primary key is `(kind, item_id)`, so `model` records which backend produced the vector that is stored rather than keying a set of them, and re-embedding under another backend replaces it. That is why switching backends leaves zero vectors for the active one and raises `semantic_warning` instead of silently mixing two vector spaces. `skill_fts` / `tool_fts` hold the lexical side. Details: [skills-and-traps.md](skills-and-traps.md).
 
 ## Agent bus (no tables at all)
 

@@ -19,10 +19,12 @@ So a write with no `project` argument is refused **on `/mcp`**, and on `/p/<name
 intended rather than against what you pinned.
 
 Projects: `project_list` (grouped `shared` / `mine` / `shared_with_me`), `project_create`
-(`visibility="private"|"shared"`, `schema="inherit"|"interview"|"bare"`), `project_info`,
-`project_share`, `project_unshare` (both **owner-only**). These five are *about* projects rather
-than *in* one, so their own `project` argument is the project they act on and no per-call one is
-injected.
+(`visibility="private"|"shared"`, `schema="inherit"|"interview"|"bare"`, plus a per-user cap —
+`HIVEMIND_MAX_PROJECTS_PER_USER`, default 50, counting every project you own at either visibility),
+`project_info`, `project_share`, `project_unshare` (both **owner-only**). These five are *about*
+projects rather than *in* one, so no per-call `project` is injected into them: `project_info`,
+`project_share` and `project_unshare` take their own **required** `project`, `project_create` names
+the new one with `name`, and `project_list` takes no arguments at all.
 
 **A project created by `project_create` has no `/p/<name>/` prefix until the server restarts.** The
 mounts are built once, in `build_app`, from the projects the registry held at startup, so a new one
@@ -36,7 +38,16 @@ Graph: `graph_types`, `graph_search`, `graph_get`, `graph_subjects`, `graph_neig
 `schema_apply` (returns `{created, unchanged}`; idempotent), `schema_changes`. Artifacts: `artifact_ref`, `artifact_attach`, `artifact_refs`, `artifact_orphans`. Tools:
 `tool_catalog`, `tool_publish`, `tool_resolve`, `tool_search`, `tool_link`, `tool_unlink`, `tool_autolink`, `tool_suggest_links`, `tool_yank`. Mini-skills: `skill_catalog`, `skill_search`, `skill_get`, `skill_publish`, `skill_link`, `skill_unlink`, `skill_autolink`, `skill_suggest_links`, `skill_yank`. Traps:
 `trap_search`, `trap_get`, `trap_record`, `trap_status`. Bus: `bus_connect`, `bus_send`, `bus_broadcast`, `bus_message`, `bus_peers`,
-`bus_disconnect` (see [bus.md](bus.md)). Guide: `guide_get`, `guide_propose`.
+`bus_disconnect` (see [bus.md](bus.md)). Guide: `guide_get`, `guide_propose`. That list is exactly
+the 52 tools the MCP server registers — 28 in `mcp_tools.build_mcp`, 9 from `registry.attach_tools`,
+4 more from `registry_tools.attach`, 5 from `project_tools.attach` and 6 from `bus_ws_tools.attach`.
+
+The three digest-taking artifact tools (`artifact_ref`, `artifact_attach`, `artifact_refs`) accept a
+full digest **or a unique hex prefix** — 8+ characters, which is what a listing gives you — and echo
+the full digest they matched; an unknown, ambiguous or truncated one is an **error**, never an empty
+result. And `artifact_refs` returning `[]` means "no `blob_ref` row", **not** "orphaned": a digest recorded
+in a node's props or carried by `tool_version.artifact_digest` is a GC root with no `blob_ref` row at
+all. `artifact_orphans` is the accounting that covers those roots; `artifact_refs` is not.
 
 Those six `bus_*` tools are the whole bus. It holds **no tables**: presence is the open WebSocket
 and messages live in memory, so nothing it carries writes a `tx` row or appears in `graph_search`,
@@ -45,6 +56,14 @@ rest — was removed along with its six tables; `Database._DROPPED` drops those 
 still has them.) See [bus.md](bus.md).
 
 `graph_search` searches by text, by type, and by field value (`props_filter={"gated": true}` — typed equality via json_extract, the only way to match booleans/numbers; `null` matches absent): pass `types=[…]`, and an empty query with `types` browses every node of that type (returns `total_of_type`); `graph_types()` lists the types that hold data. It paginates: pass the `next_cursor` from a reply back as `cursor`, and stop when `has_more` is false. Read tools are annotated `readOnlyHint`; all return `{ok, …}` or `{ok:false, error, error_kind}`.
+
+What each hit carries is selectable, and **bounded**: by default a 200-character `snippet`;
+`fields=["title","status"]` returns just those keys as real `props` plus that hit's `author`;
+`props=true` returns every key the same way. Both of those modes clamp — a single node's props over
+4,000 characters become a `_prefix` marker naming the real size, a page stops once 40,000 characters
+of props have shipped, and `props=true` additionally caps the page at 10 hits. A clamped reply says
+`props_clamped` and names which bound fired in `props_clamped_by`, with `has_more`/`next_cursor`
+carrying the rest — so a short page is not the end of the results.
 
 `author='<user>'` filters `graph_search`, `skill_search`, `trap_search` and `tool_search` by who
 wrote a row — the identity the token named, never the free-form `agent` label. On `graph_search`

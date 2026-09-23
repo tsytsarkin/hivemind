@@ -12,7 +12,8 @@ The server binds **`127.0.0.1` by default (localhost only)**. To serve other mac
 HIVEMIND_HOST=0.0.0.0        # listen on all private interfaces (LAN / Tailscale)
 HIVEMIND_PORT=8787
 ```
-(That's what `deploy/hivemind.env` does.) Verify from another machine:
+(That's what `deploy/hivemind.env` does — the deployed copy the bootstrap and service installers
+create from the tracked `deploy/hivemind.env.example`.) Verify from another machine:
 ```sh
 curl http://<server-ip>:8787/healthz              # server root
 curl http://<server-ip>:8787/p/default/healthz    # the project base your clients use
@@ -22,10 +23,13 @@ Both health paths and both indexes are **open** (no token) so a probe works with
 but the project one only for a **shared** project. A private project answers nothing at all without
 authorisation, not even its health: every HTTP path under it returns the same `404` as a name that
 does not exist. Everything else returns `401` without a bearer token.
-**Being on the LAN is not authorization** — every `/p/<project>` request still needs a bearer
-token; unauthenticated requests get `401`. `HIVEMIND_ALLOWED_HOSTS=*` disables the DNS-rebinding
-host check (fine on a trusted private network); set explicit hostnames to enable it. See
-[security.md](security.md).
+**Being on the LAN is not authorization** — apart from those two probes on a shared project, every
+`/p/<project>` request needs a bearer token; unauthenticated requests get `401`. That open list is
+exactly two tails wide (`""` and `healthz`) and a test pins both halves of it:
+`test_a_shared_projects_open_tails_are_exactly_two`, which asserts the two at 200 and `/guide`,
+`/guide/core`, `/skills`, `/skills/{id}`, `/tools` and a blob `GET` at 401. `HIVEMIND_ALLOWED_HOSTS=*`
+disables the DNS-rebinding host check (fine on a trusted private network); set explicit hostnames to
+enable it. See [security.md](security.md).
 
 ## 2. Mint a token for the person using the new machine
 
@@ -75,8 +79,9 @@ within one 30 s heartbeat for a bus socket that is already open.
 
 ## 3. Install just the plugin on the new machine
 
-The plugin is self-contained (a manifest, an `.mcp.json`, and a skill) — the machine needs
-**no server, no Python, no repo checkout**.
+The plugin is self-contained — the machine needs **no server, no Python, no repo checkout**. It
+ships a manifest, an `.mcp.json`, two skills (`hivemind` and `hivemind-schema`), the
+`/hivemind:project` command and a `SessionStart` hook.
 
 ```sh
 # from the git repo (works anywhere the machine can reach the repo):
@@ -129,15 +134,19 @@ prints what it would run — the token redacted — and `--no-check` skips the p
 
 How the token reaches the plugin, since there is no install step to collect it: the script writes
 `pluginConfigs.hivemind.options` to a temporary settings file and passes `--plugin-dir` and
-`--settings`. Three things about that are measured rather than assumed, and
-`packages/hivemind-server/tests/test_launcher.py` pins them:
+`--settings`. Three things about that were established by measurement rather than assumed:
 
 - the `pluginConfigs` key for a `--plugin-dir` plugin is the **bare** plugin name. The
   `name@marketplace` forms are accepted and then ignored, so a rename there would silently fall
   back to the `userConfig` defaults instead of erroring;
-- `--settings` **merges**, so your model, theme and other plugins are unaffected;
 - the token is written only to a `0600` file inside a `0700` directory, removed when the session
-  ends, and never placed on the `claude` command line — `ps` is world-readable.
+  ends, and never placed on the `claude` command line — `ps` is world-readable;
+- `--settings` **merges**, so your model, theme and other plugins are unaffected.
+
+`packages/hivemind-server/tests/test_launcher.py` pins the first two (plus "must not `exec`", since
+the trap that removes the token file cannot fire after one). The third is Claude Code's own
+behaviour, which no test in this repo can hold — it was measured against Claude Code 2.1.280 and is
+recorded in the script's header comment.
 
 ### `server_url`: a project base, or the server root
 
@@ -174,14 +183,17 @@ server root every one of its commands is refused. Give the CLI a project base UR
 The plugin ships `/hivemind:project`, which lists what the token can reach (grouped shared / yours /
 shared-with-you), offers a private graph or a per-session scratch project, creates it if new, and
 **pins** the choice in local state keyed by the session id. A `SessionStart` hook re-injects the
-pinned name on startup, `/clear` and compaction — because a compaction drops the choice from context,
-and a dropped choice plus a defaulted write is how private work reaches a shared graph. The pin is
-only an aide-memoire: the `project` echoed in each tool result is the authoritative answer.
+pinned name on every event that rebuilds context — the matcher is `startup|clear|compact|resume|fork`
+— because a compaction drops the choice from context, and a dropped choice plus a defaulted write is
+how private work reaches a shared graph. (`fork` is in that list because a fork does not replay the
+transcript, so without it a forked session would get nothing while the pin file sat unread.) The pin
+is only an aide-memoire: the `project` echoed in each tool result is the authoritative answer.
 
 ## 4. (Optional) the CLI, for large artifacts and tool publishing
 
 The plugin covers in-conversation use. For big uploads/downloads and publishing tools, install the
-client too (Python ≥3.9, only dep is `httpx`) — see [DEPLOY.md](../deploy/DEPLOY.md):
+client too (Python ≥3.9; two deps, `httpx` for the graph/artifact/tool calls and `websockets` for
+`hivemind bus listen`) — see [DEPLOY.md](../deploy/DEPLOY.md):
 ```sh
 pip install ./packages/hivemind-client
 export HIVEMIND_SERVER_URL=http://<server-ip>:8787/p/default   # a PROJECT base: blobs live under it

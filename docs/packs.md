@@ -98,11 +98,13 @@ widened type it would *remove* properties. That is the guard protecting your dat
 ```
 apply security-research → ios-macos-attack-surface → research-workflow   # ok, in order
 re-apply ios-macos-attack-surface   → no-op (idempotent)
-re-apply security-research          → REFUSED: non-additive (would drop finding's added fields)
+re-apply security-research          → REFUSED: pack change to node 'finding' non-additive:
+                                      removes previously-defined propert(y/ies) [...]
 ```
-Each pack is idempotent **on its own**. If you re-apply packs on every deploy, apply the whole stack
-in order, or re-apply only the outermost pack. Never `--force` a base pack over a widened type
-unless you intend to drop those fields.
+Run against the three bundled packs, in that order: the refusal names `finding` and lists the
+campaign properties the base pack does not have. Each pack is idempotent **on its own**. If you
+re-apply packs on every deploy, apply the whole stack in order, or re-apply only the outermost pack.
+Never `--force` a base pack over a widened type unless you intend to drop those fields.
 
 ## Packs are COPIED, not linked
 
@@ -143,8 +145,8 @@ makes "apply the pack on every deploy" safe.
 | Pack | Models |
 |---|---|
 | `security-research` | iOS/macOS vuln-research vocabulary: `component`, `function`, `artifact`, `finding`, `poc`, `report`, `host`; edges `contradicts` (assertive), `refines`, `derived_from`, `evidence_for`, `confirms`/`refutes`, `depends_on` (acyclic), `calls`/`reachable_from` (bulk). |
-| `research-workflow` | Workstream vocabulary captured from a live project: `claim`, `lead`, `measurement`, `verdict`, `note`, `lane`, `instrument`; edge `documented_by`. |
-| `ios-macos-attack-surface` | Layers attacker-reachability on top: `principal`, `entry_point`, `gate`, `format`, `build` (+ widens `finding`); edges `attacker_reaches`, `attacker_blocked`, `exposes`, `gated_by`, `satisfies`, `parses`, `runs_as`, `affects`, `present_on`. Apply **after** `security-research`. |
+| `research-workflow` | Workstream vocabulary captured from a live project: `claim`, `lead`, `measurement`, `verdict`, `note`, `lane`, `instrument`, `device`, `lease`; edges `documented_by`, `same_as`. |
+| `ios-macos-attack-surface` | Layers attacker-reachability on top: `principal`, `entry_point`, `gate`, `format`, `build`; edges `attacker_reaches`, `attacker_blocked`, `exposes`, `gated_by`, `satisfies`, `parses`, `runs_as`, `affects`, `present_on`. It also **widens** `finding` (11 extra optional campaign fields, minting `finding@2`) and **re-declares** `lane`, `documented_by` and `evidence_for` so it can be applied on its own — those come back under `unchanged` when the pack they belong to is already in place. Apply **after** `security-research`. |
 
 ## Contributing a pack — please do!
 

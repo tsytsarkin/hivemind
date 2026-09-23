@@ -66,14 +66,14 @@ From a shell: `hivemind bus connect <label>` · `listen --url …` · `peers` ·
 
 | Property | Choice | Why |
 |---|---|---|
-| Presence | the socket | A peer is connected exactly while its WebSocket is open. No TTL, no reaper — the two things that made v1 lose messages. |
+| Presence | the socket | A peer is connected exactly while its WebSocket is open. No TTL and no timed reaper — the two things that made v1 lose messages. The one sweep that exists (`Hub.peers`) drops a peer only when it is offline **and** holding nothing queued, so it cannot lose mail; an explicit `bus_disconnect` passes `force=True` to get past that guard. |
 | State | in memory | Bus traffic is ephemeral; persisting chat meant provenance rows outliving the messages they described. A restart is a clean slate. |
-| Offline messages | bounded queue (100 frames / 1 h / 8 MiB of body) | A message sent during a brief disconnect survives the reconnect. Bounded on all three axes, because unbounded retention is how the blob store reached 94 GB. The byte bound counts **real UTF-8 bytes**, not `len()` on a `str` — see *The byte caps are bytes* below. The reference implementation drops these entirely. |
+| Offline messages | bounded queue (100 frames / 1 h / 8 MiB of body) | A message sent during a brief disconnect survives the reconnect. Bounded on all three axes, because unbounded retention is how the blob store reached 94 GB. The byte bound counts **real UTF-8 bytes**, not `len()` on a `str` — see *The byte caps are bytes* below. The count is `deque(maxlen=MAX_QUEUE)`, the bytes are trimmed oldest-first on every queued frame, and the hour is applied when the queue is drained on reconnect (`Hub.attach`). |
 | Long bodies | kept locally in full (4 MiB, one rotation); also retained ~1 h server-side | A notification is clipped near 512 characters, so the wire frame cannot be the only copy. The listener appends every frame to a local JSONL inbox and the line points at both routes; `bus_message(id)` returns the rest from the server. The local file is bounded for the same reason the offline queue is: an append-only file nobody prunes is how the blob store reached 94 GB. |
 | Identity | stable per label | A reconnect reuses the same peer, so queued mail is not orphaned and peers keep addressing the same name. |
 | Displaced sockets | closed with 4409 | A second connection for one identity supersedes the first instead of leaving a ghost peer "online" forever. |
 | Caller-supplied names | truncated to `LABEL_CAP` (64) at the send path | The queue and the recent buffer account for the **body** of each frame and nothing else, so any *other* caller-controlled field is footprint those caps cannot see. `from` is the `agent` argument of `bus_send`; before it was normalised, an authenticated peer could park ~200 MB per offline peer and ~1 GB in the recent buffer with both caps reading it as zero. What the cap leaves uncounted afterwards is 3 fields x 64 code points x 4 bytes = 768 B per frame, i.e. at most 75 KiB on top of `QUEUE_BYTES` per peer and 375 KiB on top of `RECENT_BYTES` — under a thousandth of either. Truncated rather than refused, matching the ticket mints and the renderers' `_label()`. |
-| Auth | reusable signed listen key (7 d), or a single-use 60 s ticket | The listener connects by URL and cannot set an `Authorization` header, so an authenticated MCP call mints a ticket. The long-lived bearer token never lands in a URL, a shell history or an access log. The default is the **listen key**: HMAC-signed over (label, expiry) with a per-project secret in `<project>/bus_secret`, so verification needs no table and a key keeps working across a server restart — a listener reconnects on its own instead of dying until a human notices. It grants only "join the bus as this label", expires, and is revoked wholesale by deleting the secret. |
+| Auth | reusable signed listen key (7 d), or a single-use 60 s ticket | The listener connects by URL and cannot set an `Authorization` header, so an authenticated MCP call mints a ticket. The long-lived bearer token never lands in a URL, a shell history or an access log. The default is the **listen key**: HMAC-signed over (label, **minting user**, expiry) with a per-project secret in `<project>/bus_secret`, so verification needs no table and a key keeps working across a server restart — a listener reconnects on its own instead of dying until a human notices. The user is *inside* the signature, not beside it, because the handshake re-runs the project ACL against it: a user field its holder could edit would let any key holder nominate the owner of the project it is aimed at. It grants only "join the bus as this label", expires, and is revoked wholesale by deleting the secret. |
 
 ## A project created after startup has no bus
 
@@ -121,11 +121,16 @@ package), `test_listener_render_matches_the_client_exactly` pins them together f
 
 ## The listener keeps what it could only preview
 
-The 512-character clip is applied **here**, by `render()`, with the whole frame in hand — the
-server sent everything. So the remainder used to be thrown away on the receiving machine, and
-`bus_message("<id>")` was its only route back. That route is conditional twice over: the reading
-host has to expose the tool, and the server only retains the body for about an hour. When it did
-not resolve, an agent answered a message having read a ~300-character preview.
+The abbreviation is applied **here**, by `render()`, with the whole frame in hand — the server sent
+everything. Claude Code clips a notification near 512 characters, so `render()` keeps the line it
+emits under a **500**-character budget and the body preview under `BODY_CAP` (**300**), whichever is
+smaller: `body[:min(BODY_CAP, 500 - len(head) - len(tail) - 2)]`. That is why the preview an agent
+reads is ~300 characters and not ~512.
+
+So the remainder used to be thrown away on the receiving machine, and `bus_message("<id>")` was its
+only route back. That route is conditional twice over: the reading host has to expose the tool, and
+the server only retains the body for about an hour. When it did not resolve, an agent answered a
+message having read that ~300-character preview.
 
 Every `message` and `broadcast` frame is therefore appended verbatim, as one JSON line, to
 `~/.hivemind/bus-inbox.jsonl` before the preview is printed — `--inbox PATH` overrides the
@@ -149,14 +154,19 @@ Details that are load-bearing:
   `str.splitlines()` breaks on U+2028/U+2029 and a peer chooses its own body.
 * **It has a horizon.** `INBOX_MAX_BYTES` is 4 MiB and there is exactly one rotation: a record
   that finds the file at or over 4 MiB rolls `bus-inbox.jsonl` to `bus-inbox.jsonl.1` first, and
-  whatever `.1` held is gone. That is ~9,100 typical messages per generation (~460 B each) or
-  ~4,000 of the long ones that actually get clipped (~1 KB) — ~18,000 and ~8,000 across the two
-  files. Bounded for the same reason the offline queue is bounded: an append-only file written on
+  whatever `.1` held is gone. A record is the JSON envelope (~170 B for ASCII labels and a ULID)
+  plus the body, so that is ~9,100 typical messages per generation (~460 B each, i.e. a ~290-char
+  body) or ~4,000 of the long ones that actually get clipped (~1 KB) — ~18,000 and ~8,000 across the
+  two files. Bounded for the same reason the offline queue is bounded: an append-only file written on
   every message, on every agent machine, that nobody will ever prune is the shape that took the
   blob store to 94 GB.
 * **The size on disk is 8 MiB plus at most one record per generation** — not "at most 8 MiB". The
-  size is checked *before* the append, so every generation ends one whole record over the cap
-  (measured: a `.1` of 4,194,648 B). With ordinary traffic that overshoot is ~1 KB.
+  size is checked *before* the append (`_rotate` returns when `getsize < INBOX_MAX_BYTES`), so the
+  overshoot of each generation is exactly the record that crossed the cap: a few hundred bytes with
+  ordinary traffic, and at worst the 3.00 MiB maximal record below. `test_the_inbox_rotates_at_the_cap`
+  pins that shape — everything up to the roll is in `.1`, and the message that found the file full
+  opens the new generation. No fixed byte figure is quoted here on purpose: it is whatever the
+  crossing record happened to be.
 
   The absolute ceiling is **14.00 MiB**: the largest line a listener can be made to write is
   **3.00 MiB** (measured: 3,147,418 B), and two generations of `cap + one such record` is
@@ -267,8 +277,11 @@ this section exists to describe.
 
 Truncation, not rejection: a send that failed because a caller passed a long agent name would be a
 worse outcome than one recorded under a shortened name, and refusing would be a behaviour change
-callers could trip over. `_label()` in both renderers already truncates further, to 48, for
-display.
+callers could trip over. **It is wire-visible, so callers should know it:** a `bus_send(agent=…)`
+over 64 code points arrives at the receiver with `from` truncated to 64 — the recipient sees the
+shortened name, not an error. The same holds for a `bus_broadcast(room=…)`, and an empty or
+whitespace-only value falls back to `agent`/`lobby`. `_label()` in both renderers then truncates
+further, to 48, for display only.
 
 ## Safety
 
