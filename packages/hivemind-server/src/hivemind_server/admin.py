@@ -59,6 +59,18 @@ def _cli_identity():
 
 
 def main(argv=None) -> int:
+    """Run a subcommand, then clear the identity it set.
+
+    The identity contextvar is process-wide, so a main() called in-process — a test, an embedded
+    caller — that left it set would attribute every later write to this operator.
+    """
+    try:
+        return _run(argv)
+    finally:
+        set_identity(None)
+
+
+def _run(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="hivemind-admin", description="Hivemind operator CLI")
     ap.add_argument("--project", default="default")
     sub = ap.add_subparsers(dest="cmd", required=True)

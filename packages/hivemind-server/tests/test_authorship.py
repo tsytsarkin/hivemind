@@ -161,6 +161,17 @@ def test_an_admin_cli_write_names_the_operator_not_legacy_unknown(projects_dir, 
     assert not USERNAME_RE.fullmatch("cli:opsperson")
 
 
+def test_the_admin_cli_does_not_leave_its_identity_set(projects_dir, monkeypatch):
+    """The identity contextvar is process-wide. main() used to set it and never clear it, so any
+    later write in the same process — the next test module collected, an embedded caller — was
+    attributed to whoever ran the CLI."""
+    from hivemind_server import admin
+    from hivemind_server.identity import current_identity
+    monkeypatch.setattr(admin.getpass, "getuser", lambda: "opsperson")
+    assert admin.main(["reindex"]) in (0, None)
+    assert current_identity() is None
+
+
 def test_an_orphan_upload_names_the_person_not_just_the_job(db, tmp_path):
     """A 94 GB leak attributed only to a self-chosen label names a job, not anyone answerable."""
     from hivemind_server import blobs
