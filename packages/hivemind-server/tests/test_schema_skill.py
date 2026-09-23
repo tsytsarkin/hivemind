@@ -67,6 +67,24 @@ def _paragraphs(text: str) -> list[str]:
     return [" ".join(block.split()) for block in re.split(r"\n\s*\n", text)]
 
 
+def _section(text: str, heading: str) -> str:
+    """The body under `heading`, up to the next heading of the same or higher level.
+
+    An assertion about one section has to COUNT within that section. Counting a pattern over
+    the whole file is vacuous: matches elsewhere keep it passing after the section it claims to
+    be measuring has been deleted.
+    """
+    lines = text.splitlines()
+    start = lines.index(heading)
+    level = len(heading) - len(heading.lstrip("#"))
+    out = []
+    for line in lines[start + 1:]:
+        if line.startswith("#") and (len(line) - len(line.lstrip("#"))) <= level:
+            break
+        out.append(line)
+    return "\n".join(out)
+
+
 def test_the_skill_ships():
     assert SKILL.is_file() and TRAITS.is_file()
 
@@ -114,8 +132,11 @@ def test_the_traits_the_engine_does_not_act_on_say_so(trait):
 def test_the_symmetric_trait_explains_what_it_actually_does():
     """upsert_edge canonicalises orientation for a symmetric type; traversal does NOT mirror,
     so an author who reads 'A->B implies B->A' will write a query that returns nothing."""
-    body = TRAITS.read_text()
-    assert 'direction="both"' in body or "direction='both'" in body
+    rows = [r for r in _table_rows(TRAITS.read_text()) if "symmetric" in r[0]]
+    assert rows, "missing trait row: symmetric"
+    row = " ".join(" ".join(r) for r in rows)
+    assert 'direction="both"' in row or "direction='both'" in row, \
+        "the symmetric row itself must say how to traverse it, not some other line on the page"
 
 
 def test_it_teaches_both_versioning_axes():
@@ -134,10 +155,13 @@ def test_it_says_two_subject_cells_that_disagree_are_not_in_conflict():
 
 def test_it_requires_asking_before_proposing():
     body = SKILL.read_text()
-    headings = [h.lower() for h in body.splitlines() if h.startswith("#")]
-    assert any("before" in h and ("propose" in h or "schema" in h or "vocabulary" in h)
-               for h in headings), "the ask-first rule must be a heading, not a buried sentence"
-    questions = re.findall(r"^\d+\.\s+\*\*", body, re.M)
+    ask_first = [h for h in body.splitlines() if h.startswith("#")
+                 and "before" in h.lower()
+                 and any(w in h.lower() for w in ("propose", "schema", "vocabulary"))]
+    assert ask_first, "the ask-first rule must be a heading, not a buried sentence"
+    # counted inside that section only: other numbered lists on the page must not stand in for
+    # the interview, or this assertion survives the interview being deleted.
+    questions = re.findall(r"^\d+\.\s+\*\*", _section(body, ask_first[0]), re.M)
     assert len(questions) >= 5, f"the interview is {len(questions)} questions, want 5+"
 
 
