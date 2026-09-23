@@ -68,7 +68,7 @@ From a shell: `hivemind bus connect <label>` · `listen --url …` · `peers` ·
 | Presence | the socket | A peer is connected exactly while its WebSocket is open. No TTL, no reaper — the two things that made v1 lose messages. |
 | State | in memory | Bus traffic is ephemeral; persisting chat meant provenance rows outliving the messages they described. A restart is a clean slate. |
 | Offline messages | bounded queue (100 / 1 h) | A message sent during a brief disconnect survives the reconnect. Bounded, because unbounded retention is how the blob store reached 94 GB. The reference implementation drops these entirely. |
-| Long bodies | kept locally in full; also retained ~1 h server-side | A notification is clipped near 512 characters, so the wire frame cannot be the only copy. The listener appends every frame to a local JSONL inbox and the line points at both routes; `bus_message(id)` returns the rest from the server. |
+| Long bodies | kept locally in full (4 MiB, one rotation); also retained ~1 h server-side | A notification is clipped near 512 characters, so the wire frame cannot be the only copy. The listener appends every frame to a local JSONL inbox and the line points at both routes; `bus_message(id)` returns the rest from the server. The local file is bounded for the same reason the offline queue is: an append-only file nobody prunes is how the blob store reached 94 GB. |
 | Identity | stable per label | A reconnect reuses the same peer, so queued mail is not orphaned and peers keep addressing the same name. |
 | Displaced sockets | closed with 4409 | A second connection for one identity supersedes the first instead of leaving a ghost peer "online" forever. |
 | Auth | reusable signed listen key (7 d), or a single-use 60 s ticket | The listener connects by URL and cannot set an `Authorization` header, so an authenticated MCP call mints a ticket. The long-lived bearer token never lands in a URL, a shell history or an access log. The default is the **listen key**: HMAC-signed over (label, expiry) with a per-project secret in `<project>/bus_secret`, so verification needs no table and a key keeps working across a server restart — a listener reconnects on its own instead of dying until a human notices. It grants only "join the bus as this label", expires, and is revoked wholesale by deleting the secret. |
@@ -126,6 +126,19 @@ Details that are load-bearing:
   anyway, which is the bug this fixes.
 * **One frame is one line by construction**: the JSON is written with `ensure_ascii`, because
   `str.splitlines()` breaks on U+2028/U+2029 and a peer chooses its own body.
+* **It has a horizon.** `INBOX_MAX_BYTES` is 4 MiB per generation and there is exactly one
+  rotation: at the cap, `bus-inbox.jsonl` becomes `bus-inbox.jsonl.1` and whatever `.1` held is
+  gone. That is ~9,000 typical messages per generation (~460 B each) or ~4,000 of the long ones
+  that get clipped (~1 KB), ~18,000 and ~8,000 across both files, for at most 8 MiB on disk. The
+  cap is two wire frames wide (`MAX_FRAME` is 2 MiB), so even a maximal message always fits.
+  Bounded for the same reason the offline queue is bounded: an append-only file written on every
+  message, on every agent machine, that nobody will ever prune is the shape that took the blob
+  store to 94 GB.
+* **A failed rotation costs nothing.** It is attempted before the append, inside the same
+  best-effort discipline: if `os.replace` fails the message is still appended, to the oversized
+  file, and still printed. The append uses `os.open(…, 0o600)` rather than `open()` so the
+  generation opened by a rotation is owner-only like the one it replaced — peer traffic is not
+  world-readable.
 * The inbox is **not** a server archive and not durable knowledge. It is this machine's receipt log;
   anything worth keeping still goes in the graph.
 

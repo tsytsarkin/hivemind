@@ -109,8 +109,9 @@ def attach(mcp, cfg) -> None:
                           "at ~512 characters, so a long message arrives truncated with its id — "
                           "call this to read the rest. Ids stay resolvable for about an hour. A "
                           "listener also appends every message it received to "
-                          "~/.hivemind/bus-inbox.jsonl in full, which is the route that still "
-                          "works when this tool is unavailable or the id has aged out.")
+                          "~/.hivemind/bus-inbox.jsonl in full (size-capped, one rotation to "
+                          "`.1`), which is the route that still works when this tool is "
+                          "unavailable or the id has aged out of the server.")
     @_envelope
     def bus_message(message_id: str) -> dict:
         return _hub().message(message_id)

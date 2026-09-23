@@ -249,9 +249,9 @@ class Hub:
                 return out
         raise BusError(
             f"no message {message_id!r} in the last {int(RECENT_TTL // 60)} minutes. If your own "
-            f"listener received it, the whole frame is still in ~/.hivemind/bus-inbox.jsonl — that "
-            f"copy never ages out; grep the id there. Otherwise bus traffic is ephemeral: ask the "
-            f"sender to resend, or have them put durable content in the graph instead.")
+            f"listener received it, grep the id in ~/.hivemind/bus-inbox.jsonl (and its .1): that "
+            f"copy has no time limit, only a size one. Otherwise bus traffic is ephemeral: ask "
+            f"the sender to resend, or have them put durable content in the graph instead.")
 
     # ── registration ─────────────────────────────────────────────────────────────
     def mint_ticket(self, label: str, meta: Optional[dict] = None,

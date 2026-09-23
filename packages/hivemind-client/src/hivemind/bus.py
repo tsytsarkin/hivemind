@@ -29,6 +29,7 @@ from typing import Optional
 
 BODY_CAP = 300            # leaves room for the prefix AND the "fetch the rest" pointer
 INBOX_HINT_CAP = 64       # the inbox path shares the line's budget with the body
+INBOX_MAX_BYTES = 4 * 1024 * 1024  # per generation; one rotation, so <= 8 MiB on disk
 NOTIFICATION_BUDGET = 512 # measured clip point in Claude Code; a longer line loses its tail
 RECONNECT_MIN = 0.25
 RECONNECT_MAX = 8.0
@@ -91,6 +92,25 @@ def _inbox_hint(inbox) -> str:
     return s if len(s) <= INBOX_HINT_CAP else "…" + s[-(INBOX_HINT_CAP - 1):]
 
 
+def _rotate(path):
+    """Keep the inbox bounded: one generation kept, the older one discarded.
+
+    An append-only file written on every message, on every agent machine, that nobody will ever
+    prune is the shape that took the blob store to 94 GB. The offline queue in this same subsystem
+    is bounded for exactly that reason, and so is this. One generation is enough: the inbox is a
+    recovery buffer for a message that scrolled past, not an archive — the graph is the archive.
+    """
+    try:
+        if os.path.getsize(path) < INBOX_MAX_BYTES:
+            return
+    except OSError:
+        return                  # nothing there yet, or unreadable — the append will report it
+    try:
+        os.replace(path, path + ".1")   # atomic; whatever .1 held is what falls off the horizon
+    except OSError:
+        pass                    # a failed rotation must never cost the message being written
+
+
 def _record(frame: dict, inbox) -> bool:
     """Append the whole frame as one JSON line; returns whether it landed.
 
@@ -103,8 +123,14 @@ def _record(frame: dict, inbox) -> bool:
     except (TypeError, ValueError):
         return False
     try:
-        with open(str(inbox), "a", encoding="utf-8") as fh:
-            fh.write(line + "\n")
+        _rotate(str(inbox))
+        # os.open, not open(): after a rotation this call creates the file, and the mode has to
+        # travel with the creation or the new generation would land world-readable.
+        fd = os.open(str(inbox), os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
+        try:
+            os.write(fd, (line + "\n").encode("utf-8"))   # ASCII by construction, see above
+        finally:
+            os.close(fd)
         return True
     except OSError:
         return False        # silent: a message that printed but was not recorded beats neither

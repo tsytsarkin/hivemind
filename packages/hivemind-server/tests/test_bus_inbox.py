@@ -36,12 +36,29 @@ def _records(inbox):
 
 
 @pytest.fixture(params=["plugin", "client"])
-def render(request):
+def listener(request):
     """Both listeners must behave identically; a fix to one copy only is half a fix."""
     if request.param == "plugin":
-        return _load().render
-    from hivemind.bus import render as client_render
-    return client_render
+        return _load()
+    from hivemind import bus as client
+    return client
+
+
+@pytest.fixture
+def render(listener):
+    return listener.render
+
+
+def _ids(path):
+    return [r["id"] for r in _records(path)]
+
+
+def _fill(listener, inbox, first, count, body="b" * 100):
+    """Write `count` messages with sequential, sortable ids. Returns the ids used."""
+    ids = ["%08d" % n for n in range(first, first + count)]
+    for i in ids:
+        listener.render({"type": "message", "id": i, "from": "p", "body": body}, inbox=inbox)
+    return ids
 
 
 def test_the_listener_persists_the_frame_it_prints(render, tmp_path):
@@ -268,3 +285,88 @@ async def test_the_client_receive_loop_records_each_frame(tmp_path, monkeypatch)
     assert await client._once("ws://h/bus/ws", str(inbox)) == "closed"
     recs = _records(inbox)
     assert len(recs) == 1 and recs[0]["body"] == "L" * 900
+# ── the horizon: an append-only file nobody prunes is how the blob store reached 94 GB ────────
+def test_the_inbox_rotates_at_the_cap(listener, tmp_path, monkeypatch):
+    monkeypatch.setattr(listener, "INBOX_MAX_BYTES", 400)
+    inbox, rolled = tmp_path / "i.jsonl", tmp_path / "i.jsonl.1"
+
+    _fill(listener, inbox, 1, 1)
+    assert not rolled.exists(), "a file under the cap must not rotate"
+
+    n, written = 2, ["00000001"]
+    while not rolled.exists():
+        written += _fill(listener, inbox, n, 1)
+        n += 1
+        assert n < 100, "the cap must trigger a rotation, not grow forever"
+
+    assert _ids(rolled) == written[:-1], "everything up to the roll is in the previous generation"
+    assert _ids(inbox) == written[-1:], "and the message that found it full opened the new one"
+    assert inbox.stat().st_mode & 0o077 == 0, "the new generation must be owner-only too"
+    assert rolled.stat().st_mode & 0o077 == 0
+
+
+def test_a_message_written_right_after_a_rotation_is_readable(listener, tmp_path, monkeypatch):
+    """The point of the file is reading a clipped body back; a rotation must not cost the frame
+    that happened to arrive next."""
+    monkeypatch.setattr(listener, "INBOX_MAX_BYTES", 400)
+    inbox, rolled = tmp_path / "i.jsonl", tmp_path / "i.jsonl.1"
+
+    n = 1
+    while not rolled.exists():
+        _fill(listener, inbox, n, 1)
+        n += 1
+        assert n < 100
+
+    line = listener.render({"type": "message", "id": "01FRESH", "from": "p", "body": "L" * 900},
+                           inbox=inbox)
+    assert "bus-inbox" in line or "i.jsonl" in line, "the pointer still names the local copy"
+    assert _records(inbox)[-1]["body"] == "L" * 900
+    assert len(_records(inbox)) == 2, "one rotation-opening record plus this one"
+
+
+def test_the_previous_generation_survives_exactly_one_rotation(listener, tmp_path, monkeypatch):
+    """One generation is the whole retention policy: a recovery buffer, not an archive."""
+    monkeypatch.setattr(listener, "INBOX_MAX_BYTES", 400)
+    inbox, rolled = tmp_path / "i.jsonl", tmp_path / "i.jsonl.1"
+
+    n, gen1 = 1, []
+    while not rolled.exists():
+        gen1 += _fill(listener, inbox, n, 1)
+        n += 1
+        assert n < 100
+    first = list(_ids(rolled))
+    assert first == gen1[:-1]
+
+    gen2 = gen1[-1:]
+    while _ids(rolled) == first:
+        gen2 += _fill(listener, inbox, n, 1)
+        n += 1
+        assert n < 200, "the second rotation must arrive too"
+
+    assert _ids(rolled) == gen2[:-1], "`.1` is whatever rolled most recently"
+    assert not set(first) & set(_ids(rolled) + _ids(inbox)), "the older generation is discarded"
+    assert not (tmp_path / "i.jsonl.2").exists(), "one generation, never a chain of them"
+
+
+def test_a_failed_rotation_never_costs_the_message(listener, tmp_path, monkeypatch):
+    """Same discipline as the append itself: recording is best-effort, the message is not."""
+    monkeypatch.setattr(listener, "INBOX_MAX_BYTES", 1)      # every further write is over the cap
+    inbox = tmp_path / "i.jsonl"
+    blocked = tmp_path / "i.jsonl.1"
+    blocked.mkdir()
+    (blocked / "occupied").write_text("os.replace cannot overwrite a non-empty directory")
+
+    _fill(listener, inbox, 1, 1)                             # creates the file, no rotation yet
+    line = listener.render({"type": "message", "id": "01AB", "from": "p", "body": "keep me"},
+                           inbox=inbox)
+    assert "keep me" in line, "the notification is printed whatever the filesystem says"
+    assert _records(inbox)[-1]["body"] == "keep me", "and the append survives a failed rotation"
+    assert (blocked / "occupied").exists(), "a rotation that cannot happen changes nothing"
+
+
+def test_both_halves_agree_on_the_cap():
+    from hivemind import bus as client
+    plugin = _load()
+    assert plugin.INBOX_MAX_BYTES == client.INBOX_MAX_BYTES == 4 * 1024 * 1024
+    assert plugin.INBOX_MAX_BYTES >= plugin.MAX_FRAME, \
+        "a maximal wire frame must fit inside one generation, or it could never be recorded"

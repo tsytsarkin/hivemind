@@ -113,9 +113,13 @@ receives is appended in full, as one JSON line, to `~/.hivemind/bus-inbox.jsonl`
 tells you both routes to the rest:
 
 ```
-grep <id> ~/.hivemind/bus-inbox.jsonl     # always works; this machine only
+grep <id> ~/.hivemind/bus-inbox.jsonl*    # always works; this machine only
 bus_message("<id>")                       # any host that exposes the tool; ~1 h retention
 ```
+
+The inbox has a horizon: it is capped at 4 MiB and rotates once to `bus-inbox.jsonl.1`, which the
+next rotation discards — thousands of messages, no time limit, but not an archive. Search both
+files (the `*` above), and if the id is in neither, it fell off the end.
 
 **Never answer a long message from its preview.** Read the full body from one of those two first —
 the preview is the first ~300 characters and the instruction you are missing is usually further
