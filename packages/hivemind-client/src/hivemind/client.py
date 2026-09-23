@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import random
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterable, Optional, Tuple
 
 import httpx
 
@@ -59,7 +59,16 @@ class Client:
             return r
 
     # ── MCP tool calls ───────────────────────────────────────────────────────────
-    def call(self, tool: str, arguments: Optional[dict] = None, *, _id: int = 1) -> Any:
+    def call(self, tool: str, arguments: Optional[dict] = None, *, _id: int = 1,
+             raise_on_error: bool = True) -> Any:
+        """Invoke one MCP tool and return its payload.
+
+        A tool that refuses — `{"ok": false, ...}`, e.g. a value outside a type's enum — raises
+        `HivemindError` by default, which is what every wrapper below and the CLI are built on.
+        Pass `raise_on_error=False` to get that envelope back as data instead; it changes nothing
+        below the envelope, so auth, HTTP and JSON-RPC failures still raise either way — there is
+        no reply from the tool to return. For a batch, use `call_many`, which never raises.
+        """
         arguments = dict(arguments or {})
         arguments.setdefault("agent", self.agent)
         params = {"name": tool, "arguments": arguments,
@@ -81,10 +90,37 @@ class Client:
         if "error" in result:
             raise HivemindError(result["error"].get("message", "rpc error"), kind="rpc")
         payload = _tool_payload(result["result"])
-        if isinstance(payload, dict) and payload.get("ok") is False:
+        if raise_on_error and isinstance(payload, dict) and payload.get("ok") is False:
             raise HivemindError(payload.get("error", "tool error"),
                                 kind=payload.get("error_kind"))
         return payload
+
+    def call_many(self, calls: Iterable[Tuple[str, Optional[dict]]], *,
+                  stop_on_error: bool = False) -> list:
+        """Run a batch to completion, returning one reply per call, in order.
+
+        A single refused row must not be able to abandon the rest: the failure this exists for was
+        one out-of-enum value aborting a whole reaper batch mid-run, leaving the graph
+        half-updated with no record of where it stopped. So nothing here raises. A tool's reply is
+        passed through exactly as the server sent it, refusal included; anything that did raise —
+        auth, HTTP, JSON-RPC, transport, decode — is recorded in its place as
+        `{"ok": false, "error_kind": ..., "error": ...}`, where `error_kind` is the
+        `HivemindError.kind` when it has one and `"transport"` for the rest.
+
+        With `stop_on_error=True` the batch stops after the first reply that is not `ok`, and that
+        reply is in the returned list: the record of where it stopped is the point.
+        """
+        out: list = []
+        for tool, args in calls:
+            try:
+                out.append(self.call(tool, args, raise_on_error=False))
+            except HivemindError as e:
+                out.append({"ok": False, "error_kind": e.kind or "error", "error": str(e)})
+            except Exception as e:                      # transport, timeout, decode
+                out.append({"ok": False, "error_kind": "transport", "error": str(e)})
+            if stop_on_error and not _is_ok(out[-1]):
+                break
+        return out
 
     # ── convenience wrappers ─────────────────────────────────────────────────────
     def upsert(self, type: str, props: dict, **kw) -> dict:
@@ -129,6 +165,16 @@ class Client:
 
     def __exit__(self, *exc):
         self.close()
+
+
+def _is_ok(reply: Any) -> bool:
+    """Did a reply from `call_many` succeed? The same test `call` raises on, negated.
+
+    Deliberately `is False` rather than a truth test on a missing key: the server's envelope adds
+    `ok: true` to every dict a tool returns, but `_tool_payload` can also hand back a bare string
+    or a list when a tool answers with an unstructured content block, and that is not a refusal.
+    """
+    return not (isinstance(reply, dict) and reply.get("ok") is False)
 
 
 def _backoff(attempt: int) -> float:

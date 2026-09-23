@@ -62,6 +62,13 @@ exist. Unknown and forbidden are byte-identical by design — see `app.PROJECT_D
   config from `HIVEMIND_SERVER_URL` + `HIVEMIND_TOKEN`.
 - `hivemind.Client` (Python): `.call(tool, args)`, `.upsert/.get/.link/.search/.schema/.guide`,
   `.artifacts.put/get`, `.tool_publish/get/search`.
+  `.call` raises `HivemindError` when the tool refuses (`ok:false`), carrying `error_kind` as
+  `.kind`; `raise_on_error=False` returns that envelope as data instead (auth/HTTP/JSON-RPC
+  failures still raise — there is no reply to return). **Batches go through
+  `.call_many([(tool, args), …])`**, which never raises and returns one reply per call, in order,
+  so a single refused row cannot abandon the rest of the batch; anything that did raise is
+  recorded in its place as `{ok:false, error_kind, error}`. `stop_on_error=True` stops after the
+  first non-ok reply and still returns it, so the caller can see where the batch stopped.
 - `hivemind-admin` (operator, on the server host): `mint-token`, `create-project`, `apply-pack`,
   `promote`, `merge-guide`, `set-guide`, `gc`, `reindex`.
 
