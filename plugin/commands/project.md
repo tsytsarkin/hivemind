@@ -39,10 +39,22 @@ Do this now, in order. **Do not choose a project for the user.**
    confirm it exists in `project_list` (or that they want it created) before pinning.
 
 4. **Create it if it is new.** `project_create(name=…, visibility="private"|"shared", label=…,
-   schema=…)`. Ask which `schema` they want rather than defaulting: `inherit` copies the node/edge
-   types of the project you are in, `interview` leaves it empty and expects the `hivemind-schema`
-   skill to build a vocabulary with them, `bare` leaves it empty on purpose. Read the reply: the
-   name may already exist, and the refusal says so.
+   schema=…)`. Ask which `schema` they want rather than defaulting:
+
+   - `inherit` — copies the node/edge types of the project you are in. Right when the new project
+     tracks the same kind of work as the old one.
+   - `interview` — leaves it empty and hands the vocabulary back to the user. Right when the work
+     is different enough that the current types would not fit it.
+   - `bare` — leaves it empty on purpose; you define types with `schema_propose` as the work
+     demands them. Right for a scratch project.
+
+   A project's types are permanent (schema changes are additive-only), so this is the one choice
+   here worth a sentence of explanation rather than a default.
+
+   Read the reply: the name may already exist, and the refusal says so. **If they chose
+   `interview`, load the `hivemind-schema` skill immediately after the project is created** and run
+   it — an empty project cannot be written to at all until it has types, so stopping here leaves
+   them with a graph that refuses every write.
 
 5. **Pin it.**
 
