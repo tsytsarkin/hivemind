@@ -11,7 +11,7 @@ import json
 from typing import Optional
 
 from . import semver
-from .db import Conflict, Database, Invalid, NotFound
+from .db import LEGACY_USER, Conflict, Database, Invalid, NotFound
 
 MAX_BODY_CHARS = 20000          # ~5k tokens: a mini-skill, not a manual
 _ID_OK = set("abcdefghijklmnopqrstuvwxyz0123456789-_./")
@@ -65,10 +65,11 @@ def publish(db: Database, agent_id: str, *, id: str, version: str, title: str, d
         cur.execute("INSERT INTO skill(id, latest_version, created_tx) VALUES(?,?,?) "
                     "ON CONFLICT(id) DO NOTHING", (id, version, tx.tx_id))
         cur.execute(
+            # `author` is the agent LABEL the caller passed; `author_user` is the token's user.
             "INSERT INTO skill_version(id,version,title,description,when_to_use,body,tags,"
-            "requires,verified_how,author,created_tx) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            "requires,verified_how,author,author_user,created_tx) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
             (id, version, title, description, when_to_use, body, json.dumps(tags),
-             json.dumps(requires or {}), verified_how, agent_id, tx.tx_id))
+             json.dumps(requires or {}), verified_how, agent_id, tx.user, tx.tx_id))
         rows = cur.execute("SELECT version FROM skill_version WHERE id=? AND yanked=0",
                            (id,)).fetchall()
         latest = semver.latest([r["version"] for r in rows]) or version
@@ -126,7 +127,8 @@ def get(db: Database, id: str, constraint: str = "") -> dict:
             "description": best["description"], "when_to_use": best["when_to_use"],
             "body": best["body"], "tags": json.loads(best["tags"]),
             "requires": json.loads(best["requires"]), "verified_how": best["verified_how"],
-            "author": best["author"], "yanked": bool(best["yanked"]),
+            "author": best["author"], "author_user": best["author_user"] or LEGACY_USER,
+            "yanked": bool(best["yanked"]),
             "yanked_reason": best["yanked_reason"]}
 
 
@@ -173,7 +175,8 @@ def search(db: Database, query: str = "", *, tags: Optional[list] = None,
                 out.append({"id": sid, "version": r["version"], "title": r["title"],
                             "description": r["description"], "when_to_use": r["when_to_use"],
                             "tags": t, "requires": json.loads(r["requires"]),
-                            "verified_how": r["verified_how"], "author": r["author"]})
+                            "verified_how": r["verified_how"], "author": r["author"],
+                            "author_user": r["author_user"] or LEGACY_USER})
             if len(out) >= limit:
                 break
     from . import embeddings

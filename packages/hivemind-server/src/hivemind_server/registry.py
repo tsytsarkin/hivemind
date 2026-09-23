@@ -9,7 +9,7 @@ import re
 from typing import Optional
 
 from . import semver
-from .db import Conflict, Database, Invalid, NotFound
+from .db import LEGACY_USER, Conflict, Database, Invalid, NotFound
 
 _ID_RE = re.compile(r"^[a-z0-9]([a-z0-9._-]*[a-z0-9])?(/[a-z0-9]([a-z0-9._-]*[a-z0-9])?)?$")
 _REQUIRED = ("id", "version", "runtime", "entrypoint")
@@ -68,9 +68,9 @@ def publish(db: Database, agent_id: str, manifest: dict, artifact_digest: str, *
                 warnings.append({"similar_tools": dups, "note": "published despite similarity"})
         cur.execute("INSERT INTO tool(id,latest_version,created_tx) VALUES(?,?,?) "
                     "ON CONFLICT(id) DO NOTHING", (tid, version, tx.tx_id))
-        cur.execute("INSERT INTO tool_version(id,version,manifest,artifact_digest,created_tx) "
-                    "VALUES(?,?,?,?,?)",
-                    (tid, version, json.dumps(manifest), artifact_digest, tx.tx_id))
+        cur.execute("INSERT INTO tool_version(id,version,manifest,artifact_digest,author_user,"
+                    "created_tx) VALUES(?,?,?,?,?,?)",
+                    (tid, version, json.dumps(manifest), artifact_digest, tx.user, tx.tx_id))
         # recompute latest across non-yanked stable versions
         rows = cur.execute("SELECT version FROM tool_version WHERE id=? AND yanked=0",
                            (tid,)).fetchall()
@@ -115,7 +115,7 @@ def resolve(db: Database, tid: str, *, constraint: str = "", os: Optional[str] =
             arch: Optional[str] = None, include_prerelease: bool = False) -> dict:
     with db.read() as cur:
         rows = cur.execute(
-            "SELECT version, manifest, artifact_digest, yanked, yanked_reason "
+            "SELECT version, manifest, artifact_digest, yanked, yanked_reason, author_user "
             "FROM tool_version WHERE id=?", (tid,)).fetchall()
     if not rows:
         raise NotFound(f"tool {tid!r} not found")
@@ -156,6 +156,7 @@ def resolve(db: Database, tid: str, *, constraint: str = "", os: Optional[str] =
             "artifact_digest": best["artifact_digest"], "artifact_url": href,
             "run": _run_command(manifest), "entrypoint": manifest["entrypoint"],
             "yanked": bool(best["yanked"]), "yanked_reason": best["yanked_reason"],
+            "author_user": best["author_user"] or LEGACY_USER,
             "newer_incompatible": newer}
 
 

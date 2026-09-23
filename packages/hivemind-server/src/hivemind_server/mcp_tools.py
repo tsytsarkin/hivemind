@@ -125,7 +125,8 @@ def build_mcp(registry, identities, *, instructions: str = INSTRUCTIONS) -> MCPS
               description="Create a node, or supersede an existing one. Give subject_key+"
                           "subject_version to target a subject cell (new cell = create, existing "
                           "= supersede). Pass expected_head for optimistic concurrency (409 on "
-                          "conflict). `agent` labels the writer for provenance.")
+                          "conflict). `agent` is a free-form LABEL for the job; the author is "
+                          "taken from your token and cannot be set from here.")
     @_envelope
     def graph_upsert(type: str, props: dict, agent: str = "agent",
                      subject_key: Optional[str] = None, subject_version: Optional[str] = None,

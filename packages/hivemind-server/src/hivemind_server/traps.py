@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from .db import Database, Invalid, NotFound
+from .db import LEGACY_USER, Database, Invalid, NotFound
 from .ids import ulid
 
 VALID_STATUS = ("active", "retired", "disputed")
@@ -31,6 +31,8 @@ def _index(cur, trap_id: str, *parts: Optional[str]) -> None:
 def _row(r) -> dict:
     d = dict(r)
     d.pop("created_tx", None); d.pop("updated_tx", None)
+    # NULL means the trap predates authorship; say so rather than handing back a bare None.
+    d["author_user"] = d.get("author_user") or LEGACY_USER
     return d
 
 
@@ -54,12 +56,14 @@ def record(db: Database, agent_id: str, *, title: str, what_failed: str, symptom
             if cur.execute("SELECT 1 FROM node WHERE node_id=?", (node_id,)).fetchone() is None:
                 raise Invalid(f"node {node_id!r} not found — omit node_id for a project-wide trap")
         cur.execute(
+            # `author` is the agent LABEL the caller passed; `author_user` is the token's user.
             "INSERT INTO trap(trap_id,title,what_failed,symptom,root_cause,instead,node_id,"
             "subject_key,subject_version,cost_minutes,evidence,verified_how,confidence,status,"
-            "author,created_tx,updated_tx) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'active',?,?,?)",
+            "author,author_user,created_tx,updated_tx) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'active',?,?,?,?)",
             (tid, title, what_failed, symptom, root_cause, instead, node_id, subject_key,
              subject_version, cost_minutes, evidence, verified_how, confidence, agent_id,
-             tx.tx_id, tx.tx_id))
+             tx.user, tx.tx_id, tx.tx_id))
         _index(cur, tid, title, what_failed, symptom, root_cause, instead, subject_key)
     return {"trap_id": tid, "title": title, "scope": "node" if node_id else "project",
             "status": "active"}

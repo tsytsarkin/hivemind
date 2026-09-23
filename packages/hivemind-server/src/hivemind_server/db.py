@@ -45,15 +45,26 @@ class Invalid(Exception):
     """Bad request: validation, unknown type, illegal edge, etc. Maps to HTTP 400/422."""
 
 
+LEGACY_USER = "legacy:unknown"
+
+
 class Tx:
-    """Handle to an open write transaction: the provenance tx_id + a live cursor."""
+    """Handle to an open write transaction: the provenance tx_id + a live cursor.
 
-    __slots__ = ("tx_id", "cur", "time")
+    `user`/`device` are the resolved caller, carried here so a write path that stamps an
+    author_user column does not have to read the contextvar a second time (and cannot disagree
+    with the tx row about who wrote it).
+    """
 
-    def __init__(self, tx_id: int, cur: sqlite3.Cursor, tstamp: str):
+    __slots__ = ("tx_id", "cur", "time", "user", "device")
+
+    def __init__(self, tx_id: int, cur: sqlite3.Cursor, tstamp: str,
+                 user: str = LEGACY_USER, device: str = ""):
         self.tx_id = tx_id
         self.cur = cur
         self.time = tstamp
+        self.user = user
+        self.device = device
 
 
 class Database:
@@ -86,14 +97,25 @@ class Database:
     # Columns added to tables that may already exist on a deployed database. schema.sql uses
     # CREATE TABLE IF NOT EXISTS, which silently does nothing for an existing table, so additive
     # columns must be applied explicitly. Additive only — never drop or retype here.
+    # Every authorship column below is NULLABLE with no default and no backfill, on purpose: the
+    # live graph is ~124k nodes / ~381k node_version rows / ~1.5M tx rows in a 7.8 GB file, where a
+    # NOT NULL column or an UPDATE at startup rewrites every row. NULL therefore means "written
+    # before authorship existed", which reads out as legacy:unknown. Backfilling is a separate,
+    # explicit admin command with a dry run, not a side effect of a deploy.
     _MIGRATIONS = (
         ("skill_link", "source", "TEXT NOT NULL DEFAULT 'auto'"),
         ("skill_link", "score", "REAL"),
         ("tool_link", "source", "TEXT NOT NULL DEFAULT 'auto'"),
         ("tool_link", "score", "REAL"),
-
-
-
+        ("tx", "user_id", "TEXT"),
+        ("tx", "device", "TEXT"),
+        ("node_version", "author_user", "TEXT"),
+        ("edge_version", "author_user", "TEXT"),
+        ("node", "created_by", "TEXT"),
+        ("skill_version", "author_user", "TEXT"),
+        ("trap", "author_user", "TEXT"),
+        ("tool_version", "author_user", "TEXT"),
+        ("guide_proposal", "author_user", "TEXT"),
     )
 
     # Tables from a removed feature. Dropped on startup so a database that predates the removal
@@ -134,6 +156,20 @@ class Database:
     @contextmanager
     def write(self, agent_id: str, reason: Optional[str] = None,
               meta: Optional[dict] = None) -> Iterator[Tx]:
+        """Open a write transaction. `agent_id` is a free-form LABEL; the author is the token.
+
+        The identity is read from the contextvar rather than taken as an argument so that no call
+        site can be told the wrong one — and so the 28 existing `db.write(...)` calls across the
+        engine did not have to be edited (and one of them forgotten). identity is imported here,
+        not at module scope, because identity.py imports Invalid from this module.
+        """
+        from .identity import current_identity
+        who = current_identity()
+        # An unresolvable identity is recorded, not rejected: a write refused for want of one would
+        # take the live fleet down mid-migration, whose bootstrap credential is a legacy project
+        # token, and would also break every startup/CLI path that has no request context at all.
+        user = who.user if who is not None else LEGACY_USER
+        device = (who.device if who is not None else "") or ""
         con = self.conn()
         attempts = 0
         while True:
@@ -144,10 +180,11 @@ class Database:
                 cur = con.cursor()
                 tstamp = now_iso()
                 cur.execute(
-                    "INSERT INTO tx(tx_time, agent_id, reason, meta) VALUES(?,?,?,?)",
-                    (tstamp, agent_id, reason, canonical_json(meta or {})),
+                    "INSERT INTO tx(tx_time, agent_id, reason, meta, user_id, device) "
+                    "VALUES(?,?,?,?,?,?)",
+                    (tstamp, agent_id, reason, canonical_json(meta or {}), user, device),
                 )
-                tx = Tx(cur.lastrowid, cur, tstamp)
+                tx = Tx(cur.lastrowid, cur, tstamp, user, device)
                 yield tx
                 con.execute("COMMIT")
                 return

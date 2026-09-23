@@ -9,7 +9,8 @@ from __future__ import annotations
 import json
 from typing import Any, Optional
 
-from .db import SENTINEL, Conflict, Database, Invalid, NotFound, Tx, canonical_json
+from .db import (LEGACY_USER, SENTINEL, Conflict, Database, Invalid, NotFound, Tx,
+                 canonical_json)
 from .ids import content_hash, ulid
 from . import schemas
 
@@ -89,10 +90,39 @@ def _version_public(row: dict) -> dict:
         "props": json.loads(row["props"]),
         "schema_ver": row["schema_ver"],
         "content_hash": row["content_hash"],
+        # Every entry in a history chain carries its own author, so the chain is inspectable rather
+        # than only summarised by the node-level `contributors` list.
+        "author": row["author_user"] or LEGACY_USER,
         "tx_from": row["tx_from"],
         "tx_to": None if row["tx_to"] == SENTINEL else row["tx_to"],
         "retracted": bool(row["retracted"]),
     }
+
+
+def _contributors(cur, node_id: str) -> list[str]:
+    """Everyone who ever revised this node, in name order.
+
+    COMPUTED from the version rows, never stored as an `authors` array on the node: a
+    denormalized list would be a second copy of what node_version already says and would drift
+    from it the first time a row was corrected. Cheap because the grouping is keyed on node_id,
+    where a node has a handful of versions (measured on the live graph: ~3 on average).
+    """
+    return [r["u"] for r in cur.execute(
+        "SELECT COALESCE(author_user,?) AS u FROM node_version WHERE node_id=? "
+        "GROUP BY u ORDER BY u", (LEGACY_USER, node_id))]
+
+
+def _stamp_author(out: dict, cur, row: Optional[dict]) -> None:
+    """Record who wrote the version being returned as `current`, and under which label.
+
+    `author` is the token's user and cannot be claimed; `agent_label` is the free-form `agent`
+    string the caller passed, kept so "which job was this" survives but is never mistaken for
+    identity.
+    """
+    out["author"] = (row["author_user"] if row else None) or LEGACY_USER
+    r = (cur.execute("SELECT agent_id FROM tx WHERE tx_id=?", (row["tx_from"],)).fetchone()
+         if row else None)
+    out["agent_label"] = r["agent_id"] if r else None
 
 
 # ── node upsert (chooses axis by subject identity) ─────────────────────────────────
@@ -122,18 +152,21 @@ def upsert_node(db: Database, agent_id: str, node_type: str, props: dict, *,
         if target is None:
             # ── subject axis: brand-new node / new subject cell ──
             if expected_head is not None:
-                raise Conflict("expected_head given but no existing node to supersede")
+                raise Conflict(
+                    "expected_head given but there is no existing node to supersede. Omit "
+                    "expected_head to create, or pass the node_id/subject cell you meant.")
             nid = node_id or ulid()
             cur.execute(
                 "INSERT INTO node(node_id,node_type,subject_key,subject_version,subject_order,"
-                "created_tx) VALUES(?,?,?,?,?,?)",
-                (nid, node_type, subject_key, subject_version, subject_order, tx.tx_id),
+                "created_by,created_tx) VALUES(?,?,?,?,?,?,?)",
+                (nid, node_type, subject_key, subject_version, subject_order, tx.user, tx.tx_id),
             )
             vid = ulid()
             cur.execute(
                 "INSERT INTO node_version(version_id,node_id,seq,prev_version,props,schema_ver,"
-                "content_hash,tx_from,tx_to) VALUES(?,?,?,?,?,?,?,?,?)",
-                (vid, nid, 1, None, canonical_json(props), schema_ver, ch, tx.tx_id, SENTINEL),
+                "content_hash,author_user,tx_from,tx_to) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (vid, nid, 1, None, canonical_json(props), schema_ver, ch, tx.user,
+                 tx.tx_id, SENTINEL),
             )
             from . import search as _search
             _search.index_node(cur, nid, props)
@@ -151,7 +184,9 @@ def upsert_node(db: Database, agent_id: str, node_type: str, props: dict, *,
             raise Invalid(f"node {nid} has no current version (corrupt)")
         if expected_head is not None and head["version_id"] != expected_head:
             raise Conflict(
-                f"stale write: head is {head['version_id']}, you sent {expected_head}"
+                f"stale write: head is {head['version_id']}, you sent {expected_head}. Someone "
+                f"superseded this node; graph_get(node_id) for the current version, then retry "
+                f"with expected_head set to it."
             )
         if head["content_hash"] == ch:
             return {"node_id": nid, "version_id": head["version_id"], "seq": head["seq"],
@@ -164,8 +199,8 @@ def upsert_node(db: Database, agent_id: str, node_type: str, props: dict, *,
         seq = head["seq"] + 1
         cur.execute(
             "INSERT INTO node_version(version_id,node_id,seq,prev_version,props,schema_ver,"
-            "content_hash,tx_from,tx_to) VALUES(?,?,?,?,?,?,?,?,?)",
-            (vid, nid, seq, head["version_id"], canonical_json(props), schema_ver, ch,
+            "content_hash,author_user,tx_from,tx_to) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (vid, nid, seq, head["version_id"], canonical_json(props), schema_ver, ch, tx.user,
              tx.tx_id, SENTINEL),
         )
         if subject_order is not None:
@@ -195,7 +230,10 @@ def get_node(db: Database, *, node_id: Optional[str] = None, subject_key: Option
         nrow = _node_row(cur, node_id)
         out = {"node_id": node_id, "node_type": nrow["node_type"],
                "subject_key": nrow["subject_key"], "subject_version": nrow["subject_version"],
-               "subject_order": nrow["subject_order"], "flags": node_flags(cur, node_id)}
+               "subject_order": nrow["subject_order"], "flags": node_flags(cur, node_id),
+               # created_by is the FIRST author, distinct from `author` below (the last one).
+               "created_by": nrow["created_by"] or LEGACY_USER,
+               "contributors": _contributors(cur, node_id)}
 
         if history:
             rows = cur.execute(
@@ -211,6 +249,7 @@ def get_node(db: Database, *, node_id: Optional[str] = None, subject_key: Option
             ).fetchall()
             out["history"] = [_version_public(dict(r)) for r in rows]
             out["current"] = out["history"][0] if out["history"] else None
+            _stamp_author(out, cur, dict(rows[0]) if rows else None)
             return out
 
         if as_of is not None:
@@ -220,11 +259,13 @@ def get_node(db: Database, *, node_id: Optional[str] = None, subject_key: Option
                 (node_id, t, t),
             ).fetchone()
             out["current"] = _version_public(dict(r)) if r else None
+            _stamp_author(out, cur, dict(r) if r else None)
             out["as_of_tx"] = t
             return out
 
         head = _current_node_version(cur, node_id)
         out["current"] = _version_public(head) if head else None
+        _stamp_author(out, cur, head)
         return out
 
 
@@ -313,6 +354,9 @@ def upsert_edge(db: Database, agent_id: str, edge_type: str, src_node_id: str, d
 
         if not traits["versioned"]:
             # ── bulk edge: no per-edge history; identity incl. source_tag ──
+            # No author_user: edge_bulk has no version row to hold one. A bulk edge is attributed
+            # through its created_tx (which records the user) and its source_tag, so "every edge
+            # carries an author" is a guarantee about VERSIONED edges only.
             if source_tag is None:
                 raise Invalid(f"edge type {edge_type!r} is bulk (versioned=0); source_tag required")
             cur.execute(
@@ -331,7 +375,9 @@ def upsert_edge(db: Database, agent_id: str, edge_type: str, src_node_id: str, d
         ).fetchone()
         if erow is None:
             if expected_head is not None:
-                raise Conflict("expected_head given but edge does not exist")
+                raise Conflict(
+                    "expected_head given but this edge does not exist. Omit expected_head to "
+                    "create it.")
             eid = ulid()
             cur.execute(
                 "INSERT INTO edge(edge_id,edge_type,src_node_id,dst_node_id,created_tx) "
@@ -339,8 +385,9 @@ def upsert_edge(db: Database, agent_id: str, edge_type: str, src_node_id: str, d
             vid = ulid()
             cur.execute(
                 "INSERT INTO edge_version(version_id,edge_id,seq,prev_version,props,schema_ver,"
-                "content_hash,tx_from,tx_to) VALUES(?,?,?,?,?,?,?,?,?)",
-                (vid, eid, 1, None, canonical_json(props), schema_ver, ch, tx.tx_id, SENTINEL))
+                "content_hash,author_user,tx_from,tx_to) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (vid, eid, 1, None, canonical_json(props), schema_ver, ch, tx.user,
+                 tx.tx_id, SENTINEL))
             return {"edge_id": eid, "version_id": vid, "seq": 1, "created": True,
                     "superseded": False, "src": src, "dst": dst}
         eid = erow["edge_id"]
@@ -349,7 +396,9 @@ def upsert_edge(db: Database, agent_id: str, edge_type: str, src_node_id: str, d
         ).fetchone()
         head = dict(head)
         if expected_head is not None and head["version_id"] != expected_head:
-            raise Conflict(f"stale edge write: head is {head['version_id']}")
+            raise Conflict(
+                f"stale edge write: head is {head['version_id']}, you sent {expected_head}. "
+                f"Re-read the edge and retry with expected_head set to the current version.")
         if head["content_hash"] == ch:
             return {"edge_id": eid, "version_id": head["version_id"], "seq": head["seq"],
                     "created": False, "superseded": False, "noop": True, "src": src, "dst": dst}
@@ -359,8 +408,8 @@ def upsert_edge(db: Database, agent_id: str, edge_type: str, src_node_id: str, d
         seq = head["seq"] + 1
         cur.execute(
             "INSERT INTO edge_version(version_id,edge_id,seq,prev_version,props,schema_ver,"
-            "content_hash,tx_from,tx_to) VALUES(?,?,?,?,?,?,?,?,?)",
-            (vid, eid, seq, head["version_id"], canonical_json(props), schema_ver, ch,
+            "content_hash,author_user,tx_from,tx_to) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (vid, eid, seq, head["version_id"], canonical_json(props), schema_ver, ch, tx.user,
              tx.tx_id, SENTINEL))
         return {"edge_id": eid, "version_id": vid, "seq": seq, "created": False,
                 "superseded": True, "src": src, "dst": dst}

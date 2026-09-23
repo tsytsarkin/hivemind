@@ -18,7 +18,13 @@ assertive`, `src_types/dst_types`, `cardinality`). `versioned=1` → `edge_versi
 `props.status`; a node with an open assertive edge is flagged `disputed`.
 
 ## Provenance
-Every write inserts a `tx(tx_id, tx_time, agent_id, reason)` row; `tx_id` is the as-of coordinate.
+Every write inserts a `tx(tx_id, tx_time, agent_id, user_id, device, reason)` row; `tx_id` is the
+as-of coordinate. `user_id` is the **author**, taken from the caller's token and not settable from
+a tool argument; `agent_id` is a free-form label ("which job was this"). Versioned rows carry the
+same user directly — `node.created_by`, `node_version.author_user`, `edge_version.author_user` —
+while a bulk edge (`edge_bulk`) has no version row and so is attributed through its `created_tx`
+and `source_tag` alone. NULL means "written before authorship existed" and reads as
+`legacy:unknown`.
 
 ## Blobs
 Content-addressed files (`blob`, `blob_ref`, `blob_pin`); attach to any node/edge **version**.

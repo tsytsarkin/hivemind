@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 from typing import BinaryIO, Iterable, Optional
 
-from .db import Database, Invalid, NotFound
+from .db import LEGACY_USER, Database, Invalid, NotFound
 
 
 class BlobStore:
@@ -175,14 +175,19 @@ class BlobStore:
         pointing at them are invisible to every other agent and are what the GC eventually
         reclaims. 94 GB (80% of the store) accumulated this way before anyone noticed, so this
         makes the leak visible — and attributable — while it is small.
+
+        Grouped by (user, agent label), not by label alone: the label is a free-form string the
+        uploader chose, so a leak attributed only to it names a job and not a person.
         """
         mentioned = self._digests_mentioned_in_graph()
         cutoff = time.time() - older_than_hours * 3600
         with self.db.read() as cur:
             rows = cur.execute(
-                "SELECT b.digest, b.size, t.tx_time, t.agent_id FROM blob b "
+                "SELECT b.digest, b.size, t.tx_time, t.agent_id, "
+                "COALESCE(t.user_id,?) AS user_id FROM blob b "
                 "JOIN tx t ON t.tx_id = b.created_tx "
-                "WHERE b.digest NOT IN (SELECT digest FROM blob_ref)").fetchall()
+                "WHERE b.digest NOT IN (SELECT digest FROM blob_ref)",
+                (LEGACY_USER,)).fetchall()
         per_agent: dict = {}
         total_n = total_b = 0
         for r in rows:
@@ -190,8 +195,9 @@ class BlobStore:
                 continue
             if older_than_hours and _iso_epoch(r["tx_time"]) > cutoff:
                 continue
-            a = per_agent.setdefault(r["agent_id"], {"agent": r["agent_id"], "blobs": 0,
-                                                     "bytes": 0})
+            key = (r["user_id"], r["agent_id"])
+            a = per_agent.setdefault(key, {"user": r["user_id"], "agent": r["agent_id"],
+                                           "blobs": 0, "bytes": 0})
             a["blobs"] += 1
             a["bytes"] += r["size"] or 0
             total_n += 1

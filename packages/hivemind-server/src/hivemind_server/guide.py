@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from .db import Database, Invalid, NotFound
+from .db import LEGACY_USER, Database, Invalid, NotFound
 from .ids import ulid
 
 MAX_SECTION_CHARS = 20000  # ~5k tokens
@@ -65,16 +65,20 @@ def propose_section(db: Database, agent_id: str, name: str, body: str, why: str 
     pid = ulid()
     with db.write(agent_id, f"guide_propose {name}") as tx:
         tx.cur.execute(
-            "INSERT INTO guide_proposal(id,section,body,agent_id,why,status,created_tx) "
-            "VALUES(?,?,?,?,?,'proposed',?)", (pid, name, body, agent_id, why, tx.tx_id))
+            # agent_id is the free-form LABEL; author_user is the token's user, so a human
+            # reviewing the queue sees who actually filed each proposal.
+            "INSERT INTO guide_proposal(id,section,body,agent_id,author_user,why,status,"
+            "created_tx) VALUES(?,?,?,?,?,?,'proposed',?)",
+            (pid, name, body, agent_id, tx.user, why, tx.tx_id))
     return {"proposal_id": pid, "section": name, "status": "proposed"}
 
 
 def list_proposals(db: Database, status: str = "proposed") -> dict:
     with db.read() as cur:
         rows = cur.execute(
-            "SELECT id,section,agent_id,why,status FROM guide_proposal WHERE status=? "
-            "ORDER BY created_tx DESC", (status,)).fetchall()
+            "SELECT id,section,agent_id,COALESCE(author_user,?) AS author_user,why,status "
+            "FROM guide_proposal WHERE status=? ORDER BY created_tx DESC",
+            (LEGACY_USER, status)).fetchall()
     return {"proposals": [dict(r) for r in rows]}
 
 
