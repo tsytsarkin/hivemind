@@ -217,9 +217,12 @@ curl -s "$ROOT/"                     # index; must NOT list project names
 > `deploy/hivemind.env` survives the reset — it is gitignored, so it is untracked and `--hard`
 > leaves it alone. Nothing else hand-edited in that checkout does, which is what 1d is for.
 
-> `restart.sh` launches with `uv run --package hivemind-server` via `setsid`, so it survives SSH
-> logout but **not a reboot**. The systemd unit is still not installed — see
-> [hivemind.service](hivemind.service).
+> `restart.sh` prefers `uv run --package hivemind-server` and falls back to `./.venv/bin/hivemind-server`
+> when uv is not installed; it detaches with `setsid` on Linux and `nohup` on macOS. Either way it
+> survives SSH logout but **not a reboot**. The systemd unit is still not installed — see
+> [hivemind.service](hivemind.service). It exits non-zero when the server does not come up, so
+> `ssh "$BOX" '... && bash deploy/restart.sh' && echo deployed` no longer prints "deployed" after a
+> failed start.
 
 ## Step 2: tighten the modes on files that already exist
 
