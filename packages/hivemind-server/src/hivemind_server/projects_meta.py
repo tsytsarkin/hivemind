@@ -106,8 +106,15 @@ def _read(path: Path, name: str) -> ProjectMeta:
         if vis not in VISIBILITIES:
             # Unknown or missing visibility is not a shared project; it is an unreadable ACL.
             return _closed(name)
+        members = raw.get("members")
+        if members is not None and not isinstance(members, list):
+            # NEVER coerce an ill-typed member list: list("ab") is ['a', 'b'] and
+            # list({"ana": 1}) is ['ana'], so a hand-corrupted file would GRANT access to the users
+            # a, b and ana — single-character usernames are legal. Every other corruption mode here
+            # denies; this is the only one that could invert that, so it fails closed too.
+            return _closed(name)
         return ProjectMeta(name=name, visibility=vis, owner=raw.get("owner"),
-                           members=list(raw.get("members") or []), label=raw.get("label", ""),
+                           members=list(members or []), label=raw.get("label", ""),
                            created=raw.get("created", ""), session=raw.get("session"),
                            last_touched=raw.get("last_touched", ""))
     except (OSError, ValueError, TypeError):
@@ -135,6 +142,11 @@ def load(project_dir: Path, name: str) -> ProjectMeta:
 
 
 def save(project_dir: Path, meta: ProjectMeta) -> None:
+    if meta.visibility not in VISIBILITIES:
+        # Failing closed is the right answer for a CORRUPT FILE on read, but a first-party write is
+        # a bug in the caller: silently persisting it would produce a project that is unreachable on
+        # the next read with nothing pointing at the cause. Refuse before anything is written.
+        raise Invalid(f"visibility must be one of {VISIBILITIES} (got {meta.visibility!r})")
     project_dir.mkdir(parents=True, exist_ok=True)
     if not meta.created:
         meta.created = now_iso()

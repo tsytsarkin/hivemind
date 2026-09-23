@@ -70,6 +70,55 @@ def test_a_broken_project_json_fails_closed(tmp_path, body):
     assert not pm.can_access(NIK, meta) and not pm.can_access(ADMIN, meta)
 
 
+@pytest.mark.parametrize("body", ["[]", '"x"', "3", "null"])
+def test_valid_json_that_is_not_an_object_fails_closed(tmp_path, body):
+    """A JSON array/string/number/null parses fine and has no visibility at all; it is metadata we
+    cannot read, so it denies like any other corruption."""
+    d = tmp_path / "broken"
+    d.mkdir()
+    (d / "project.json").write_text(body)
+    meta = pm.load(d, "broken")
+    assert (meta.visibility, meta.owner, meta.members) == ("private", None, [])
+    assert not pm.can_access(NIK, meta) and not pm.can_access(ADMIN, meta)
+
+
+@pytest.mark.parametrize("members", ['"ab"', '{"ana": 1}', "5", "true", '"ana"'])
+def test_an_ill_typed_member_list_fails_closed_instead_of_granting(tmp_path, members):
+    """The one corruption mode that could GRANT rather than deny: list("ab") is ['a', 'b'] and
+    list({"ana": 1}) is ['ana'], so coercing would hand a hand-corrupted file's bytes to real
+    single-character usernames. It must resolve to unreachable like every other bad ACL."""
+    d = tmp_path / "nik.p"
+    d.mkdir()
+    (d / "project.json").write_text(
+        '{"visibility": "private", "owner": "nik", "members": %s}' % members)
+    meta = pm.load(d, "nik.p")
+    assert (meta.visibility, meta.owner, meta.members) == ("private", None, [])
+    for user in ("a", "b", "ab", "ana", "nik"):
+        assert not pm.can_access(Identity(user=user, device="box"), meta), \
+            f"a corrupt members field must not grant {user}"
+
+
+def test_a_missing_or_null_member_list_is_simply_empty(tmp_path):
+    """`null` and an absent key mean "nobody shared yet" — that denies on its own, so it is not a
+    corruption and must not make an otherwise valid private project unreachable for its owner."""
+    d = tmp_path / "nik.p"
+    d.mkdir()
+    (d / "project.json").write_text('{"visibility": "private", "owner": "nik", "members": null}')
+    assert pm.load(d, "nik.p").members == []
+    assert pm.can_access(NIK, pm.load(d, "nik.p"))
+
+
+def test_saving_an_unknown_visibility_is_refused_at_the_write(tmp_path):
+    """Fail-closed is for corrupt files; a first-party write of "restricted" is a caller bug, and
+    persisting it would leave a silently unreachable project with nothing naming the cause."""
+    d, meta = _write(tmp_path, name="nik.p", visibility="private", owner="nik")
+    meta.visibility = "restricted"
+    with pytest.raises(Invalid):
+        pm.save(d, meta)
+    assert pm.load(d, "nik.p").visibility == "private", "the refused write left the file alone"
+    assert sorted(p.name for p in d.iterdir()) == ["project.json"], "and no temp file behind"
+
+
 def test_a_project_with_no_metadata_at_all_fails_closed(tmp_path):
     d = tmp_path / "bare"
     d.mkdir()
