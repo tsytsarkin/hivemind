@@ -29,7 +29,8 @@ from typing import Optional
 
 BODY_CAP = 300            # leaves room for the prefix AND the "fetch the rest" pointer
 INBOX_HINT_CAP = 64       # the inbox path shares the line's budget with the body
-INBOX_MAX_BYTES = 4 * 1024 * 1024  # per generation; one rotation, so <= 8 MiB on disk
+INBOX_MAX_BYTES = 4 * 1024 * 1024  # rotates AT this size, so a generation ends one record over
+MAX_FRAME = 2 * 1024 * 1024        # largest WS frame accepted; matches the plugin listener
 NOTIFICATION_BUDGET = 512 # measured clip point in Claude Code; a longer line loses its tail
 RECONNECT_MIN = 0.25
 RECONNECT_MAX = 8.0
@@ -74,9 +75,24 @@ def prepare_inbox(path) -> Optional[str]:
         # Create it now, owner-only: peer bodies are coordination traffic between agents and have
         # no business being world-readable on a shared box. Creating it here also means an
         # unusable location is discovered at startup, where it can be reported once, rather than
-        # silently per message. The mode applies to a file we create; an existing one is left as
-        # the operator set it.
+        # silently per message.
         os.close(os.open(str(path), os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600))
+        # The mode above only applies to a file this call creates. An inbox left by an earlier
+        # version — or by any run at a wider umask — keeps that mode for as long as it lives and
+        # carries it into `.1` on the first roll, so narrow it here too, along with the rolled
+        # generation beside it. This file is ours: a fixed name, written only by us, holding other
+        # agents' message bodies. Best effort — not owning it is no reason to stop recording.
+        # A tear left by an earlier process is invisible to `_TORN`; heal it while there is
+        # somewhere to put the newline, so the first message of this run is not appended onto it.
+        if _ends_mid_line(str(path)):
+            _TORN.add(str(path))
+        for p in (str(path), str(path) + ".1"):
+            try:
+                mode = os.stat(p).st_mode & 0o777
+                if mode & 0o077:
+                    os.chmod(p, mode & 0o700)
+            except OSError:
+                pass
         return str(path)
     except OSError:
         return None
@@ -111,6 +127,49 @@ def _rotate(path):
         pass                    # a failed rotation must never cost the message being written
 
 
+_TORN = set()       # inboxes whose last line is known to be incomplete (see _write_line)
+
+
+def _write_line(fd, payload):
+    """Write one whole line, or report honestly that it did not.
+
+    os.write is write(2): it is allowed to take less than the whole buffer, and its return value
+    is the only way to know. Discarding that count leaves a truncated, unparseable record while
+    the caller reports success — so the pointer sends an agent to a corrupt fragment, which is
+    this file's original bug with an extra step. Loop on the count, and return False the moment
+    the line cannot be finished.
+    """
+    try:
+        while payload:
+            n = os.write(fd, payload)
+            if n <= 0:
+                return False
+            payload = payload[n:]
+        return True
+    except OSError:
+        return False
+
+
+def _ends_mid_line(path):
+    """Does the file end without a newline — i.e. did a previous write tear?
+
+    Damage from a torn write has to stop at one line: appended straight after a fragment, the next
+    message would share that unparseable line and be reported as landed. Sealing cannot happen at
+    the moment of the tear, because the device that could not finish the line cannot take a
+    newline either. So the repair happens wherever there is somewhere to put it: at the next
+    append in this process (`_TORN`), and at startup for a tear some earlier process left behind.
+    """
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            if fh.tell() == 0:
+                return False
+            fh.seek(-1, os.SEEK_END)
+            return fh.read(1) != b"\n"
+    except OSError:
+        return False
+
+
 def _record(frame: dict, inbox) -> bool:
     """Append the whole frame as one JSON line; returns whether it landed.
 
@@ -122,18 +181,26 @@ def _record(frame: dict, inbox) -> bool:
         line = json.dumps(frame, ensure_ascii=True)
     except (TypeError, ValueError):
         return False
+    path = str(inbox)
+    payload = (line + "\n").encode("utf-8")        # ASCII by construction, see above
+    if path in _TORN:
+        payload = b"\n" + payload                  # a previous write tore; do not share its line
     try:
-        _rotate(str(inbox))
+        _rotate(path)
         # os.open, not open(): after a rotation this call creates the file, and the mode has to
         # travel with the creation or the new generation would land world-readable.
-        fd = os.open(str(inbox), os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
+        fd = os.open(path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
         try:
-            os.write(fd, (line + "\n").encode("utf-8"))   # ASCII by construction, see above
+            ok = _write_line(fd, payload)
         finally:
             os.close(fd)
-        return True
     except OSError:
         return False        # silent: a message that printed but was not recorded beats neither
+    if ok:
+        _TORN.discard(path)
+    else:
+        _TORN.add(path)
+    return ok
 
 
 def render(frame: dict, inbox=None) -> Optional[str]:
@@ -185,7 +252,7 @@ async def _once(url: str, inbox=None) -> str:
     """One connection. Returns why it ended, so the caller can decide whether to retry."""
     import websockets
 
-    async with websockets.connect(url, open_timeout=15, max_size=2 * 1024 * 1024) as ws:
+    async with websockets.connect(url, open_timeout=15, max_size=MAX_FRAME) as ws:
         async for raw in ws:
             if isinstance(raw, (bytes, bytearray)):
                 continue                      # binary frames are not part of this protocol

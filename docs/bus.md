@@ -55,7 +55,8 @@ bus_disconnect(label="mac-studio")
 ```
 
 ```bash
-grep '<id>' ~/.hivemind/bus-inbox.jsonl    # the same text, from this machine's own copy
+grep '<id>' ~/.hivemind/bus-inbox.jsonl*   # this machine's own copy — the `*` picks up the
+                                           # rolled generation `.1` as well
 ```
 
 From a shell: `hivemind bus connect <label>` · `listen --url …` · `peers` · `send <to> <body>` ·
@@ -126,19 +127,38 @@ Details that are load-bearing:
   anyway, which is the bug this fixes.
 * **One frame is one line by construction**: the JSON is written with `ensure_ascii`, because
   `str.splitlines()` breaks on U+2028/U+2029 and a peer chooses its own body.
-* **It has a horizon.** `INBOX_MAX_BYTES` is 4 MiB per generation and there is exactly one
-  rotation: at the cap, `bus-inbox.jsonl` becomes `bus-inbox.jsonl.1` and whatever `.1` held is
-  gone. That is ~9,000 typical messages per generation (~460 B each) or ~4,000 of the long ones
-  that get clipped (~1 KB), ~18,000 and ~8,000 across both files, for at most 8 MiB on disk. The
-  cap is two wire frames wide (`MAX_FRAME` is 2 MiB), so even a maximal message always fits.
-  Bounded for the same reason the offline queue is bounded: an append-only file written on every
-  message, on every agent machine, that nobody will ever prune is the shape that took the blob
-  store to 94 GB.
+* **It has a horizon.** `INBOX_MAX_BYTES` is 4 MiB and there is exactly one rotation: a record
+  that finds the file at or over 4 MiB rolls `bus-inbox.jsonl` to `bus-inbox.jsonl.1` first, and
+  whatever `.1` held is gone. That is ~9,100 typical messages per generation (~460 B each) or
+  ~4,000 of the long ones that actually get clipped (~1 KB) — ~18,000 and ~8,000 across the two
+  files. Bounded for the same reason the offline queue is bounded: an append-only file written on
+  every message, on every agent machine, that nobody will ever prune is the shape that took the
+  blob store to 94 GB.
+* **The size on disk is 8 MiB plus at most one record per generation** — not "at most 8 MiB". The
+  size is checked *before* the append, so every generation ends one whole record over the cap
+  (measured: a `.1` of 4,194,648 B). With ordinary traffic that overshoot is ~1 KB; with
+  server-legal maxima it is not — `MAX_BODY` is 256 KiB **of characters**, and `ensure_ascii`
+  turns a non-ASCII character into six bytes, so one record can reach 1.50 MiB and the pair of
+  files ~11.00 MiB. That is the honest ceiling. The cap is set above that worst-case record on
+  purpose: below it, a maximal message could never be recorded at all.
 * **A failed rotation costs nothing.** It is attempted before the append, inside the same
   best-effort discipline: if `os.replace` fails the message is still appended, to the oversized
   file, and still printed. The append uses `os.open(…, 0o600)` rather than `open()` so the
   generation opened by a rotation is owner-only like the one it replaced — peer traffic is not
   world-readable.
+* **A torn write is never vouched for.** `os.write` is `write(2)` and may take less than the whole
+  buffer; the loop insists on the rest and reports `False` the moment it cannot finish, so a
+  truncated record is never sold to an agent as the full text. The fragment keeps its own line —
+  it is sealed at the next append in this process, or at startup for a tear an earlier one left —
+  so the damage stops at the one message that was being written. Verified on a 2 MB filesystem
+  driven to `ENOSPC` with 40 KB bodies: record #48 is truncated and unparseable, is *not* named in
+  its own notification, every earlier line still parses, and the first message after space
+  returned lands cleanly on a new line.
+* **Two listeners must not share one inbox.** Nothing locks the file. Ordinary appends interleave
+  safely (`O_APPEND` is atomic for a single write), but two processes can both see the file over
+  the cap and both `os.replace` it, and the second roll then overwrites a full `.1` with a
+  near-empty one. One listener per inbox; a second on the same machine should be given
+  `--inbox <another path>`.
 * The inbox is **not** a server archive and not durable knowledge. It is this machine's receipt log;
   anything worth keeping still goes in the graph.
 

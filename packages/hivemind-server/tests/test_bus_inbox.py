@@ -14,8 +14,10 @@ local copy exists.
 """
 from __future__ import annotations
 
+import errno
 import importlib.util
 import json
+import os
 import pathlib
 
 import pytest
@@ -33,6 +35,33 @@ def _load(path=LISTENER):
 
 def _records(inbox):
     return [json.loads(l) for l in inbox.read_text().splitlines() if l.strip()]
+
+
+@pytest.fixture(autouse=True)
+def _forget_torn_lines():
+    """`_TORN` is module state that outlives a test, and the client module is imported once for
+    the whole session. Paths here are unique per test, but leaving entries behind is how a test
+    starts depending on the one before it."""
+    yield
+    _load()._TORN.clear()
+    from hivemind import bus as client
+    client._TORN.clear()
+
+
+@pytest.fixture
+def permissive_umask():
+    """Every mode assertion below must run under a umask that would REVEAL a regression.
+
+    The `os.open(..., 0o600)` decision is only visible if the ambient umask is not already
+    masking those bits: restore the builtin `open(..., "a")` it replaced and the file comes out
+    0644 at umask 022 — but 0600 at umask 077, where the test would pass while testing nothing.
+    0 is the most permissive umask there is, so nothing here can be masked into passing.
+    """
+    old = os.umask(0)
+    try:
+        yield
+    finally:
+        os.umask(old)
 
 
 @pytest.fixture(params=["plugin", "client"])
@@ -193,7 +222,7 @@ def test_the_default_inbox_is_the_documented_path(monkeypatch, tmp_path):
     assert client.default_inbox() == want
 
 
-def test_preparing_the_inbox_creates_the_directory_and_never_raises(tmp_path):
+def test_preparing_the_inbox_creates_the_directory_and_never_raises(tmp_path, permissive_umask):
     """A plugin-only machine may have no ~/.hivemind yet, and the per-message append must stay a
     plain append rather than a directory check."""
     plugin = _load()
@@ -286,7 +315,7 @@ async def test_the_client_receive_loop_records_each_frame(tmp_path, monkeypatch)
     recs = _records(inbox)
     assert len(recs) == 1 and recs[0]["body"] == "L" * 900
 # ── the horizon: an append-only file nobody prunes is how the blob store reached 94 GB ────────
-def test_the_inbox_rotates_at_the_cap(listener, tmp_path, monkeypatch):
+def test_the_inbox_rotates_at_the_cap(listener, tmp_path, monkeypatch, permissive_umask):
     monkeypatch.setattr(listener, "INBOX_MAX_BYTES", 400)
     inbox, rolled = tmp_path / "i.jsonl", tmp_path / "i.jsonl.1"
 
@@ -366,7 +395,112 @@ def test_a_failed_rotation_never_costs_the_message(listener, tmp_path, monkeypat
 
 def test_both_halves_agree_on_the_cap():
     from hivemind import bus as client
+    from hivemind_server.bus_ws import MAX_BODY
     plugin = _load()
     assert plugin.INBOX_MAX_BYTES == client.INBOX_MAX_BYTES == 4 * 1024 * 1024
-    assert plugin.INBOX_MAX_BYTES >= plugin.MAX_FRAME, \
-        "a maximal wire frame must fit inside one generation, or it could never be recorded"
+    assert plugin.MAX_FRAME == client.MAX_FRAME, "both halves must accept the same frame size"
+    # The binding floor is the largest record the SERVER will ever hand a listener: MAX_BODY is
+    # counted in characters, and ensure_ascii turns a BMP character into six bytes.
+    for mod in (plugin, client):
+        assert mod.INBOX_MAX_BYTES >= 6 * MAX_BODY, \
+            "a maximal server-legal message must fit in one generation, or it could never land"
+# ── write(2) is allowed to take less than you gave it, and the count is the only way to know ──
+class _PartialOS:
+    """Stands in for the `os` a listener module imported, shortening every write.
+
+    `chunk` bytes go through per call; after `allowed` calls the device "fills up" — `fails`
+    decides whether that shows up as a zero-length write or as ENOSPC, since write(2) is entitled
+    to either.
+    """
+
+    def __init__(self, chunk, allowed=None, fails="zero"):
+        self.chunk, self.allowed, self.fails, self.calls = chunk, allowed, fails, 0
+
+    def __getattr__(self, name):
+        return getattr(os, name)            # everything except write is the real thing
+
+    def write(self, fd, data):
+        self.calls += 1
+        if self.allowed is not None and self.calls > self.allowed:
+            if self.fails == "enospc":
+                raise OSError(errno.ENOSPC, "No space left on device")
+            return 0
+        return os.write(fd, data[:self.chunk])
+
+
+def test_a_short_write_still_lands_the_whole_line(listener, tmp_path, monkeypatch):
+    """os.write is write(2), not a buffered writer: it may take a slice. Looping is the fix."""
+    monkeypatch.setattr(listener, "os", _PartialOS(chunk=8))
+    inbox = tmp_path / "i.jsonl"
+    line = listener.render({"type": "message", "id": "01ABCDEFGH", "from": "p", "body": "L" * 900},
+                           inbox=inbox)
+    assert _records(inbox)[-1]["body"] == "L" * 900, "every slice must be written, not just one"
+    assert "i.jsonl" in line, "and the pointer may name the copy, because there is one"
+
+
+@pytest.mark.parametrize("fails", ["zero", "enospc"])
+def test_a_line_that_cannot_be_completed_is_never_vouched_for(listener, tmp_path, monkeypatch,
+                                                              fails):
+    """The ENOSPC case. A discarded short-write count leaves a truncated, unparseable record while
+    render() reports it as landed — so the pointer sends an agent to a corrupt fragment, which is
+    this task's original bug with an extra step. It must report False instead."""
+    monkeypatch.setattr(listener, "os", _PartialOS(chunk=64, allowed=1, fails=fails))
+    inbox = tmp_path / "i.jsonl"
+    line = listener.render({"type": "message", "id": "01TRUNC", "from": "p", "body": "L" * 900},
+                           inbox=inbox)
+
+    assert "L" in line, "the message is still printed — that was never in question"
+    assert "i.jsonl" not in line, "but the local copy must not be promised: it is a fragment"
+    assert 'bus_message("01TRUNC")' in line, "the route that is left is named"
+    raw = inbox.read_text().splitlines()
+    assert len(raw) == 1 and len(raw[0]) < 900, "what landed is a fragment, as expected"
+    with pytest.raises(ValueError):
+        json.loads(raw[0])
+
+    # ...and the damage must stop at that line: the NEXT message is a complete, parseable record.
+    monkeypatch.setattr(listener, "os", os)
+    after = listener.render({"type": "message", "id": "01NEXT", "from": "p", "body": "intact"},
+                            inbox=inbox)
+    assert "i.jsonl" not in after, "a short body needs no pointer at all"
+    lines = inbox.read_text().splitlines()
+    assert len(lines) == 2, "the fragment was sealed, so the next record starts on its own line"
+    assert json.loads(lines[1])["body"] == "intact"
+
+
+def test_a_tear_left_by_an_earlier_run_is_healed_at_startup(listener, tmp_path):
+    """`_TORN` dies with the process; the fragment on disk does not. If the first message of the
+    next run is appended onto it, a complete message becomes unreadable — and is reported as
+    landed, which is the dishonesty this whole class of fix is about."""
+    inbox = tmp_path / "i.jsonl"
+    inbox.write_text('{"body": "complete"}\n{"body": "cut off mid-')
+
+    assert listener.prepare_inbox(inbox) == str(inbox)
+    listener.render({"type": "message", "id": "01AB", "from": "p", "body": "after the restart"},
+                    inbox=inbox)
+
+    lines = inbox.read_text().splitlines()
+    assert len(lines) == 3, "the fragment must keep its own line"
+    assert json.loads(lines[-1])["body"] == "after the restart"
+    assert json.loads(lines[0])["body"] == "complete", "and what was already good is untouched"
+
+
+def test_an_inherited_wider_mode_is_narrowed_at_startup(tmp_path, permissive_umask):
+    """Measured on this machine: ~/.hivemind/bus-inbox.jsonl is 0644, left by a run before the
+    mode was set at creation — and on the first roll that mode travels to `.1`. The file is ours,
+    holds other agents' message bodies, and nobody chose 0644 for it."""
+    from hivemind import bus as client
+    plugin = _load()
+    for mod in (plugin, client):
+        inbox = tmp_path / mod.__name__.replace(".", "_") / "bus-inbox.jsonl"
+        inbox.parent.mkdir()
+        inbox.write_text('{"body": "from an earlier version"}\n')
+        rolled = pathlib.Path(str(inbox) + ".1")
+        rolled.write_text('{"body": "and its rolled generation"}\n')
+        os.chmod(inbox, 0o644)
+        os.chmod(rolled, 0o646)
+
+        assert mod.prepare_inbox(inbox) == str(inbox)
+        assert inbox.stat().st_mode & 0o777 == 0o600, "the live inbox is narrowed"
+        assert rolled.stat().st_mode & 0o777 == 0o600, "and so is the generation beside it"
+        assert json.loads(inbox.read_text())["body"] == "from an earlier version", "content kept"
+        assert json.loads(rolled.read_text())["body"] == "and its rolled generation"

@@ -113,19 +113,22 @@ receives is appended in full, as one JSON line, to `~/.hivemind/bus-inbox.jsonl`
 tells you both routes to the rest:
 
 ```
-grep <id> ~/.hivemind/bus-inbox.jsonl*    # always works; this machine only
+grep <id> ~/.hivemind/bus-inbox.jsonl*    # this machine's copy; needs no tool and no server
 bus_message("<id>")                       # any host that exposes the tool; ~1 h retention
 ```
 
 The inbox has a horizon: it is capped at 4 MiB and rotates once to `bus-inbox.jsonl.1`, which the
 next rotation discards — thousands of messages, no time limit, but not an archive. Search both
-files (the `*` above), and if the id is in neither, it fell off the end.
+files (the `*` above), and if the id is in neither, it fell off the end. A line that does not parse
+as JSON is a message whose write was cut short (a full disk); it was never claimed as recorded, and
+only that one line is affected.
 
 **Never answer a long message from its preview.** Read the full body from one of those two first —
 the preview is the first ~300 characters and the instruction you are missing is usually further
 down. Better still, for anything large or durable: put it in the graph or upload it as an artifact
-and send the id. **The bus itself stores nothing** — the inbox is your local copy, not a server
-archive, and it is for coordination, not for knowledge. Anything worth keeping goes in the graph.
+and send the id. **The bus stores nothing durably** — the server holds a message for about an hour
+so `bus_message` can answer, and the inbox is your own local copy; neither is an archive. The bus
+is for coordination, not for knowledge, and anything worth keeping goes in the graph.
 
 ### How to treat an incoming message
 
