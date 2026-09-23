@@ -1,4 +1,4 @@
-"""Attach artifact + tool-registry MCP tools and REST routes to a project's MCP server.
+"""Attach artifact + tool-registry MCP tools and REST routes to the MCP server.
 Called from mcp_tools.build_mcp. Artifact bytes move over REST (rest_blobs); these tools handle
 references, attachment, and (task 6) the tool registry.
 """
@@ -7,22 +7,29 @@ from __future__ import annotations
 from typing import Optional
 
 from . import registry as reg
-from .envelope import RO, WRITE, envelope as _envelope
+from .envelope import (RO, WRITE, CurrentBlobs, CurrentDb, current_project,
+                       envelope as _envelope)
 from .rest_blobs import register_blob_routes
 from .rest_guide import register_guide_routes
 from .rest_skills import (register_index_routes, register_skill_routes,
                           register_tool_routes)
 
 
+def _base() -> str:
+    """The URL prefix of the project this CALL is for. Built per call, never at attach time: one
+    server now answers for every project, so a baked-in prefix would hand back another project's
+    URLs."""
+    return f"/p/{current_project().name}"
+
+
 def attach(mcp, project) -> None:
     register_blob_routes(mcp, project)
-    register_guide_routes(mcp, project)
-    register_skill_routes(mcp, project)
-    register_tool_routes(mcp, project)
+    register_guide_routes(mcp)
+    register_skill_routes(mcp)
+    register_tool_routes(mcp)
     register_index_routes(mcp, project)
-    store = project.blobs
-    db = project.db
-    base = f"/p/{project.name}"
+    store = CurrentBlobs()        # both resolve per call — see envelope._Current
+    db = CurrentDb()
 
     # ── artifact tools (bytes go over REST; these manage references) ────────────────
     @mcp.tool(annotations=RO,
@@ -31,7 +38,7 @@ def attach(mcp, project) -> None:
     @_envelope
     def artifact_ref(digest: str) -> dict:
         meta = store.stat(digest)
-        href = f"{base}/blobs/{digest.replace(':', '/', 1)}"
+        href = f"{_base()}/blobs/{digest.replace(':', '/', 1)}"
         return {"digest": digest, "size": meta["size"], "media_type": meta.get("media_type"),
                 "resource_link": href, "upload_hint": f"PUT {href}"}
 
@@ -60,4 +67,4 @@ def attach(mcp, project) -> None:
         return {"digest": digest, "refs": store.refs(digest)}
 
     # ── tool-registry tools (implemented in task 6 / registry.py) ───────────────────
-    reg.attach_tools(mcp, project, _envelope, RO, WRITE, base)
+    reg.attach_tools(mcp, db, _envelope, RO, WRITE)

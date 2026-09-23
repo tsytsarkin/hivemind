@@ -8,10 +8,11 @@ from starlette.responses import JSONResponse, PlainTextResponse, Response
 
 from . import guide
 from .db import NotFound
+from .envelope import CurrentDb
 
 
-def register_guide_routes(mcp, project) -> None:
-    db = project.db
+def register_guide_routes(mcp) -> None:
+    db = CurrentDb()             # resolves per request; one app serves every project
 
     @mcp.custom_route("/guide", methods=["GET"])
     async def guide_index(_req: Request) -> Response:

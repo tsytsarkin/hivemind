@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Optional
 
 from .bus_ws import BusError, MAX_BODY, current_origin, hub_for, register_secret
-from .envelope import RO, WRITE, envelope as _envelope
+from .envelope import RO, WRITE, current_project, envelope as _envelope
 
 
 # Where the skill installs the dependency-free listener. It must be an absolute path that any
@@ -18,9 +18,18 @@ from .envelope import RO, WRITE, envelope as _envelope
 LISTENER = "$HOME/.hivemind/bus-listen.py"
 
 
-def attach(mcp, project, cfg) -> None:
-    hub = hub_for(project.name)
-    register_secret(project.name, project.dir / "bus_secret")
+def attach(mcp, cfg) -> None:
+    def _hub():
+        """The hub of the project this CALL is for — one server now answers for every project, so
+        binding a hub at attach time would push every message onto one project's bus.
+
+        register_secret is idempotent (it reads the key back off disk) and is repeated here for a
+        project created after startup, which build_app never looped over.
+        """
+        p = current_project()
+        register_secret(p.name, p.dir / "bus_secret")
+        return hub_for(p.name)
+
     def _ws_url() -> str:
         """Build a ws:// URL from the address THIS caller used, falling back to config.
 
@@ -32,7 +41,7 @@ def attach(mcp, project, cfg) -> None:
         if "://" in base:
             scheme, _, hostport = base.partition("://")
             base = ("wss://" if scheme == "https" else "ws://") + hostport
-        return f"{base}/p/{project.name}/bus/ws"
+        return f"{base}/p/{current_project().name}/bus/ws"
 
     @mcp.tool(annotations=WRITE,
               description="Join the agent bus and start receiving messages from other agents. "
@@ -43,6 +52,7 @@ def attach(mcp, project, cfg) -> None:
                           "stable and descriptive (the machine or the job, not a random id).")
     @_envelope
     def bus_connect(label: str, meta: Optional[dict] = None) -> dict:
+        hub = _hub()
         k = hub.mint_listen_key(label, meta)
         t = hub.mint_ticket(label, meta)
         ws_url = _ws_url()
@@ -79,14 +89,14 @@ def attach(mcp, project, cfg) -> None:
                           "EPHEMERAL — anything worth keeping goes in the graph.")
     @_envelope
     def bus_send(to: str, body: str, agent: str = "agent") -> dict:
-        return _run(hub.send(agent, to, body))
+        return _run(_hub().send(agent, to, body))
 
     @mcp.tool(annotations=WRITE,
               description="Send a message to every other connected peer in a room (default "
                           "'lobby'). Use sparingly: every recipient pays attention for it.")
     @_envelope
     def bus_broadcast(body: str, room: str = "lobby", agent: str = "agent") -> dict:
-        return _run(hub.broadcast(agent, body, room))
+        return _run(_hub().broadcast(agent, body, room))
 
     @mcp.tool(annotations=RO,
               description="Fetch the FULL text of a bus message by id. Notifications are clipped "
@@ -94,14 +104,14 @@ def attach(mcp, project, cfg) -> None:
                           "call this to read the rest. Ids stay resolvable for about an hour.")
     @_envelope
     def bus_message(message_id: str) -> dict:
-        return hub.message(message_id)
+        return _hub().message(message_id)
 
     @mcp.tool(annotations=RO,
               description="Who is on the bus right now, and whether each peer is currently "
                           "connected. Check this before sending, so you address a real label.")
     @_envelope
     def bus_peers(online_only: bool = False) -> dict:
-        peers = hub.peers(online_only=online_only)
+        peers = _hub().peers(online_only=online_only)
         return {"peers": peers, "count": len(peers),
                 "hint": "bus_send(to=<peer>, body=…)" if peers else
                         "nobody is connected; run bus_connect to join"}
@@ -111,6 +121,7 @@ def attach(mcp, project, cfg) -> None:
                           "bus_peers. Stop the Monitor task as well.")
     @_envelope
     def bus_disconnect(label: str) -> dict:
+        hub = _hub()
         p = hub.peer(label)
         if p is None:
             raise BusError(f"no peer {label!r}")

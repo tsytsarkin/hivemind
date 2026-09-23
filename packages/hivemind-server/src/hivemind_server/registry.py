@@ -227,8 +227,10 @@ def search(db: Database, query: str = "", *, os: Optional[str] = None,
 
 
 # ── MCP tool attachment (called from registry_tools.attach) ────────────────────────
-def attach_tools(mcp, project, envelope, RO, WRITE, base) -> None:
-    db = project.db
+def attach_tools(mcp, db, envelope, RO, WRITE) -> None:
+    """`db` is the per-call database proxy (envelope.CurrentDb), not one project's handle. It used
+    to take the project plus a URL base; the base was never used and the project only for its db.
+    """
 
     @mcp.tool(annotations=WRITE,
               description="Publish an immutable tool version. `manifest` must include id "

@@ -1,5 +1,5 @@
-"""REST blob endpoints, registered on each project's MCP app via custom_route so they live in the
-same process/prefix (/p/<project>/...). Large bytes move here, never through JSON-RPC.
+"""REST blob endpoints, registered on the MCP app via custom_route so they live in the same
+process/prefix (/p/<project>/...). Large bytes move here, never through JSON-RPC.
 
   PUT  /blobs/{algo}/{hex}     stream upload, verify digest (idempotent 201/200)
   GET  /blobs/{algo}/{hex}     stream download (Range-aware), immutable cache
@@ -17,12 +17,15 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
 
 from .db import Invalid, NotFound
+from .envelope import CurrentBlobs
 
 _UPLOAD_CHUNK = 1024 * 1024
 
 
 def register_blob_routes(mcp, project) -> None:
-    store = project.blobs
+    # One app serves every project, so both of these resolve per REQUEST: `store` through the
+    # proxy, and `project.name` (in `batch`) through the same proxy handed in by build_mcp.
+    store = CurrentBlobs()
 
     def _digest(req: Request) -> str:
         return f"{req.path_params['algo']}:{req.path_params['hex']}"

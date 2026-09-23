@@ -1,8 +1,11 @@
-"""ASGI entrypoint. One Starlette app hosts every project under /p/<name>/… (MCP at
-/p/<name>/mcp, REST blob routes under the same prefix). A single middleware gates all project
-traffic: it resolves the caller's identity once per request and enforces the project ACL, so the
-REST routes — which never reach a tool — are covered by the same check as an MCP call. The server
-root /healthz stays open, and so do a SHARED project's health probe and endpoint index; a private
+"""ASGI entrypoint. ONE MCP server, mounted twice: at /mcp, where each tool call names its own
+project, and at /p/<name>/ for every project the registry holds (MCP at /p/<name>/mcp, REST blob
+routes under the same prefix). A single middleware gates all of it: it resolves the caller's
+identity once per request and, for a /p/<name> path, enforces the project ACL — so the REST routes,
+which never reach a tool, are covered by the same check as an MCP call. On the neutral endpoint
+there is no project in the URL to check, so the ACL moves into the call: envelope.resolve_project
+runs it against the project= argument, and refuses a WRITE that named none. The server root
+/healthz stays open, and so do a SHARED project's health probe and endpoint index; a private
 project answers nothing it has not authorised.
 """
 from __future__ import annotations
@@ -22,6 +25,7 @@ from starlette.routing import Mount, Route, WebSocketRoute
 from . import bus_ws as _bus_ws_mod
 from .auth import bearer_from_headers
 from .config import Config, config
+from .envelope import set_mount_default, visible_projects
 from .identity import Identity, IdentityStore, resolve, set_identity
 from .mcp_tools import build_mcp
 from .project import ProjectRegistry, projects_root_from_env
@@ -34,6 +38,11 @@ log = logging.getLogger(__name__)
 # whole of what the private tier is meant to withhold.
 PROJECT_DENIED = {"error": "unknown project or not accessible with this token"}
 NO_TOKEN = {"error": "invalid or missing bearer token"}
+# The project-neutral endpoint is /mcp and nothing else: every other path the MCP app registers
+# needs a project to act on, and here there is none in the URL. Says which shape to use, and names
+# no project — the caller supplied the path, so echoing nothing about the server gives nothing away.
+NOT_NEUTRAL = {"error": "no such endpoint; only /mcp is project-neutral. "
+                        "REST endpoints live under /p/<project>/…"}
 # project dir -> the reason already warned about, so a file that is broken for a week does not
 # write one warning per request (the ACL is consulted on every one of them, and /p/<name>/ answers
 # before auth, so an outsider could otherwise flood the log on purpose). Keyed by PATH, not name,
@@ -62,15 +71,18 @@ def _transport_security(cfg: Config) -> TransportSecuritySettings:
 
 
 class ProjectAuthMiddleware:
-    """Bearer-token gate AND project ACL for every /p/<name>/… request.
+    """Bearer-token gate for every request, plus the project ACL for every /p/<name>/… one.
 
-    For project traffic this is where a token becomes a person: the caller is resolved once, here,
-    and published on the identity contextvar, which is where a tool body reads the caller from
-    (identity.current_identity; today only tests do, the write path lands in a later task).
-    Server-level identities are tried first, then the project's own legacy tokens (see
-    identity.resolve). It is not the only caller of identity.resolve — the root `GET /projects`
-    route resolves independently, because it is outside any project prefix and so never reaches
-    this middleware; it publishes no contextvar, since no tool runs on it.
+    This is where a token becomes a person: the caller is resolved once, here, and published on the
+    identity contextvar, which is where a tool body reads the caller from (identity.current_identity;
+    today only tests do, the write path lands in a later task). Server-level identities are tried
+    first, then the project's own legacy tokens (see identity.resolve). It is not the only caller of
+    identity.resolve — the root `GET /projects` route resolves independently, because it answers
+    before any project is known; it publishes no contextvar, since no tool runs on it.
+
+    A /p/<name> request also leaves the project it authorised on the mount-default contextvar, which
+    is what a tool call with no project= argument means and what the REST handlers read their project
+    from. The neutral endpoint sets no default (see _neutral).
 
     The ACL lives here rather than in the tool decorator because the REST surface — blob GET/PUT,
     guide, skills, the project index — never reaches a tool at all: an ACL in the tool layer would
@@ -90,6 +102,7 @@ class ProjectAuthMiddleware:
         # otherwise leave the previous caller's identity readable. A real server hands every
         # request a fresh context copy, but the invariant must not depend on that.
         set_identity(None)
+        set_mount_default(None)          # same reason: a stale project must not become the default
         if scope["type"] != "http":
             # The only non-http route under /p/ is the bus WebSocket, which carries its own
             # credential in the query string (a single-use ticket or a listen key, both minted by
@@ -98,8 +111,6 @@ class ProjectAuthMiddleware:
             # launched by Monitor, which cannot set one.
             return await self.app(scope, receive, send)
         path = scope.get("path", "")
-        if not path.startswith("/p/"):
-            return await self.app(scope, receive, send)
         hdrs = {k.decode().lower(): v.decode() for k, v in scope.get("headers", [])}
         # Record the address this caller reached us on, so a tool can hand back a URL that works
         # from where the caller is (see bus_ws._ORIGIN).
@@ -107,6 +118,8 @@ class ProjectAuthMiddleware:
         if host:
             proto = hdrs.get("x-forwarded-proto") or scope.get("scheme") or "http"
             _bus_ws_mod.set_origin(f"{proto}://{host}")
+        if not path.startswith("/p/"):
+            return await self._neutral(scope, receive, send, path, hdrs)
         parts = path.split("/", 3)  # ['', 'p', '<name>', 'rest...']
         name = parts[2] if len(parts) > 2 else ""
         tail = parts[3] if len(parts) > 3 else ""
@@ -123,6 +136,39 @@ class ProjectAuthMiddleware:
         # We depend on that; an SDK upgrade could remove it.
         # test_a_handshake_era_request_resolves_identity_per_request is what pins it.
         set_identity(verdict)
+        # The URL named a project and this caller may reach it, so it is what a tool call with no
+        # project= argument means. Published only AFTER _authorize passed, so a denied request never
+        # leaves a usable default behind.
+        set_mount_default(name)
+        return await self.app(scope, receive, send)
+
+    async def _neutral(self, scope, receive, send, path: str, hdrs) -> None:
+        """The project-neutral surface: the server root, and /mcp with no project in the URL.
+
+        Only four paths exist outside a /p/ prefix. The MCP app is mounted at the root as well, so
+        everything it registers — the blob routes, the guide, the skills and tools listings — is
+        reachable here too, and those handlers take their project from the URL, which this one does
+        not carry. Rather than trusting each of them to fail closed, the router is closed instead:
+        anything but the four is a 404 before it reaches a handler.
+        """
+        if path in ("/", "/healthz", "/projects"):
+            # Answered by the server-root routes, which resolve their own caller (GET /projects) or
+            # name nothing at all. No project, so no ACL to apply here.
+            return await self.app(scope, receive, send)
+        if path.rstrip("/") != "/mcp":
+            return await self._json(send, 404, NOT_NEUTRAL)
+        token = bearer_from_headers(hdrs)
+        who = resolve(token, self.identities, None)
+        if self.cfg.require_auth and who is None:
+            # `resolve(..., None)` deliberately refuses a legacy project token here: it is pinned to
+            # the project whose tokens.json holds it, and this endpoint has not named a project yet.
+            # Such a caller uses its own /p/<name>/mcp, where the pin can be checked.
+            return await self._json(send, 401, NO_TOKEN,
+                                    extra=[(b"www-authenticate", b"Bearer")])
+        set_identity(who)
+        # No mount default: on this endpoint the tool argument is the only thing that says which
+        # project a call is for, which is why a write with no argument is refused rather than
+        # defaulted (envelope.resolve_project).
         return await self.app(scope, receive, send)
 
     def _authorize(self, hdrs, name: str, tail: str) -> Union[Identity, None, Denied]:
@@ -196,17 +242,23 @@ def build_app(cfg: Optional[Config] = None) -> Starlette:
     registry.discover()
     identities = IdentityStore(cfg.identities_path)
 
+    # ONE MCP server for every project: each tool resolves its project per call (see envelope), so
+    # the same ASGI app can serve the neutral /mcp endpoint and every /p/<name> prefix. It used to
+    # be one server per project, which made the project a property of the connection — and so
+    # unanswerable for an agent holding one token and working in two projects at once.
+    mcp = build_mcp(registry, identities)
+    asgi = mcp.streamable_http_app(streamable_http_path="/mcp",
+                                   transport_security=_transport_security(cfg),
+                                   host=cfg.host)
     mounts = []
-    mcps = []
     for project in registry.all():
         project.tokens.ensure_first_token(client_id=f"{project.name}-bootstrap")
         from . import guide as _guide
         _guide.ensure_core_guide(project.db)
-        mcp = build_mcp(project)
-        mcps.append(mcp)
-        asgi = mcp.streamable_http_app(streamable_http_path="/mcp",
-                                       transport_security=_transport_security(cfg),
-                                       host=cfg.host)
+        # At startup, not on first use: a listener reconnecting after a server restart redeems a
+        # listen key signed with this secret, and no tool call need have happened first. Without it
+        # bus_ws._secret would mint a throwaway one and reject the key.
+        _bus_ws_mod.register_secret(project.name, project.dir / "bus_secret")
         # The bus WebSocket is mounted at the Starlette level: MCPServer.custom_route registers
         # HTTP methods only, so a ws route cannot go through it. Auth is the connect ticket in the
         # query string (see bus_ws), not the bearer header, because the listener is launched by
@@ -221,10 +273,14 @@ def build_app(cfg: Optional[Config] = None) -> Starlette:
         # websocket handler and so refuses the connection.
         mounts.append(WebSocketRoute(f"/p/{project.name}/bus/ws", _ws_route()))
         mounts.append(Mount(f"/p/{project.name}", app=asgi))
+    # Last, so the project prefixes and the root routes below match first. This is the neutral
+    # endpoint: /mcp works here, and ProjectAuthMiddleware._neutral 404s every other path it
+    # exposes, since those need a project the URL does not carry.
+    mounts.append(Mount("", app=asgi))
 
-    # The three routes below are the server root, outside any project prefix and so outside the
-    # middleware's gate. All three used to hand every project name to anyone who asked, which is
-    # the same existence oracle the /p/ ACL removes — fixing only one of them would be theatre.
+    # The three routes below are the server root. All three used to hand every project name to
+    # anyone who asked, which is the same existence oracle the /p/ ACL removes — fixing only one of
+    # them would be theatre.
     async def healthz(_req: Request) -> Response:
         return JSONResponse({"ok": True})
 
@@ -237,7 +293,10 @@ def build_app(cfg: Optional[Config] = None) -> Starlette:
                 # uses its own project base URL instead.
                 return JSONResponse(NO_TOKEN, status_code=401,
                                     headers={"www-authenticate": "Bearer"})
-            names = [p.name for p in registry.all() if can_access(who, p.meta)]
+            # The same list the tool layer names in its refusals, from one helper: two spellings of
+            # "projects you can use" would eventually disagree, and this is the one an agent is told
+            # to trust.
+            names = visible_projects(who, registry)
         else:
             names = [p.name for p in registry.all()]
         return JSONResponse({"projects": names})
@@ -247,8 +306,9 @@ def build_app(cfg: Optional[Config] = None) -> Starlette:
         return JSONResponse({
             "service": "hivemind",
             "health": f"{root}/healthz",
-            # A shape, not a live URL: there is no project-neutral /mcp endpoint yet.
-            "mcp": f"{root}/p/<project>/mcp",
+            # Project-neutral: pass project=<name> to each tool. The per-project form still works.
+            "mcp": f"{root}/mcp",
+            "mcp_per_project": f"{root}/p/<project>/mcp",
             "your_projects": f"{root}/projects",
             "note": ("project names are not listed here — GET /projects with your token, or point "
                      "clients at a project base URL"),
@@ -261,9 +321,7 @@ def build_app(cfg: Optional[Config] = None) -> Starlette:
         from . import bus_ws as _bus_ws
         # WebSocket sends issued from MCP tool threads are scheduled onto this loop.
         _bus_ws.set_loop(_asyncio.get_running_loop())
-        async with contextlib.AsyncExitStack() as stack:
-            for mcp in mcps:
-                await stack.enter_async_context(mcp.session_manager.run())
+        async with mcp.session_manager.run():
             yield
 
     routes = [Route("/", index), Route("/healthz", healthz),
@@ -286,7 +344,8 @@ def main() -> None:
         tok_path = p.dir / "tokens.json"
         print(f"[hivemind] project {p.name!r}: data={p.dir}  tokens={tok_path}")
     print(f"[hivemind] listening on http://{cfg.host}:{cfg.port}  "
-          f"(MCP: /p/<project>/mcp)  auth={'on' if cfg.require_auth else 'OFF'}")
+          f"(MCP: /mcp with project=<name>, or /p/<project>/mcp)  "
+          f"auth={'on' if cfg.require_auth else 'OFF'}")
     uvicorn.run(app, host=cfg.host, port=cfg.port, log_level="info")
 
 

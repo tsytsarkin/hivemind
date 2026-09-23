@@ -1,6 +1,8 @@
-"""MCP tool surface. `build_mcp(project)` returns an MCPServer whose tools/routes are bound to
-that project's data. Few powerful, namespaced tools; read tools annotated read-only; every tool
-returns a uniform envelope so agents get actionable errors instead of opaque failures.
+"""MCP tool surface. `build_mcp` returns ONE MCPServer for every project the registry holds: each
+tool takes a `project` argument, and the `db`/`project` used in the bodies below are proxies onto
+whatever that resolved to for the call in flight (see envelope). Few powerful, namespaced tools;
+read tools annotated read-only; every tool returns a uniform envelope so agents get actionable
+errors instead of opaque failures.
 """
 from __future__ import annotations
 
@@ -9,8 +11,8 @@ from typing import Any, Optional
 from mcp.server import MCPServer
 
 from . import graph, guide, schemas, skills, traps
-from .envelope import RO, WRITE, envelope as _envelope
-from .project import Project
+from .envelope import (RO, WRITE, CurrentDb, CurrentProject, ProjectAware,
+                       envelope as _envelope, set_registry)
 
 INSTRUCTIONS = (
     "Hivemind REPLACES local memory for this fleet: read it before doing any work, and persist "
@@ -28,6 +30,8 @@ INSTRUCTIONS = (
     "trap_search — before building a tool or working out a procedure; build only if they come "
     "back empty. Publish what you build (tool_publish/skill_publish) and trap_record an "
     "approach the moment you abandon it. Search is hybrid lexical+semantic. "
+    "Every tool takes a `project` argument saying which graph to act in; a tool that WRITES "
+    "refuses to guess it, so pass it explicitly unless your endpoint URL already names a project. "
     "Separately from the graph there is an AGENT BUS for live peer-to-peer coordination: call "
     "bus_connect ONCE at session start and run the Monitor snippet it returns — messages from "
     "other agents then arrive as notifications with no polling. bus_send / bus_broadcast reach "
@@ -36,9 +40,17 @@ INSTRUCTIONS = (
 )
 
 
-def build_mcp(project: Project, *, instructions: str = INSTRUCTIONS) -> MCPServer:
-    db = project.db
-    mcp = MCPServer(name=f"hivemind:{project.name}", instructions=instructions, version="0.1.0")
+def build_mcp(registry, identities, *, instructions: str = INSTRUCTIONS) -> MCPServer:
+    """One project-neutral MCP server. `identities` is threaded in for the project tools that come
+    next (create/share have to check a user exists); nothing here reads it yet."""
+    set_registry(registry)
+    # Resolved per call, so none of the 47 tool bodies below has to know the project exists: the
+    # alternative was editing every one of them to take it as an argument.
+    db = CurrentDb()
+    project = CurrentProject()
+    real = MCPServer(name="hivemind", instructions=instructions, version="1.1.0")
+    # Registration goes through the proxy so a tool cannot be added without project resolution.
+    mcp = ProjectAware(real)
 
     # ── graph reads ──────────────────────────────────────────────────────────────
     @mcp.tool(annotations=RO, description="Search nodes by text and/or BY TYPE. Pass types=[...] to restrict, and an EMPTY query with types to browse every node of that type (returns total_of_type). graph_types() lists the types that have data. props_filter={'gated': true, 'kind': 'mach-service'} filters on exact FIELD VALUES - the only way to match booleans and numbers, since text search cannot tell gated=true from gated=false (null matches absent). Paginated: pass the next_cursor from a reply back as cursor; has_more says when to stop.")
@@ -331,5 +343,5 @@ def build_mcp(project: Project, *, instructions: str = INSTRUCTIONS) -> MCPServe
     registry_tools.attach(mcp, project)
     from . import bus_ws_tools    # agent bus: WebSocket push, deliberately outside the graph
     from .config import config as _config
-    bus_ws_tools.attach(mcp, project, _config())
-    return mcp
+    bus_ws_tools.attach(mcp, _config())
+    return real                   # mount the real server; the proxy only wraps registration

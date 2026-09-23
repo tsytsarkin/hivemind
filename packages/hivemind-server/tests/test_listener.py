@@ -169,9 +169,16 @@ def test_bus_connect_returns_a_command_a_plugin_only_machine_can_run():
         dir = pathlib.Path(__file__).resolve().parent / "_tmp_plugin_only"
 
     FakeProject.dir.mkdir(exist_ok=True)
-    bus_ws_tools.attach(FakeMCP(), FakeProject, type("C", (), {"public_url": "http://box:8787"}))
+    bus_ws_tools.attach(FakeMCP(), type("C", (), {"public_url": "http://box:8787"}))
 
-    out = captured["bus_connect"](label="remote-session")
+    # The hub and the ws URL are resolved per CALL now, from the project of the call in flight —
+    # published by envelope.with_project on the real path, which this FakeMCP stands in for.
+    from hivemind_server import envelope
+    tok = envelope._PROJECT.set(FakeProject)
+    try:
+        out = captured["bus_connect"](label="remote-session")
+    finally:
+        envelope._PROJECT.reset(tok)
     cmd = out["monitor_command"]
     assert cmd.startswith("python3 "), cmd
     assert "$HOME/.hivemind/bus-listen.py" in cmd, cmd

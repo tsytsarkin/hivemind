@@ -261,6 +261,7 @@ dependencies = [
     { name = "httpx" },
     { name = "jsonschema" },
     { name = "mcp" },
+    { name = "pydantic" },
     { name = "starlette" },
     { name = "uvicorn", extra = ["standard"] },
 ]
@@ -270,6 +271,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27,<1" },
     { name = "jsonschema", specifier = ">=4.21,<5" },
     { name = "mcp", specifier = ">=2.0,<3" },
+    { name = "pydantic", specifier = ">=2.12,<3" },
     { name = "starlette", specifier = ">=0.40,<1" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30,<1" },
 ]
