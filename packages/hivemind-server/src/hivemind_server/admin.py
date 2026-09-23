@@ -93,8 +93,8 @@ def main(argv=None) -> int:
     sub.add_parser("autolink")
 
     args = ap.parse_args(argv)
-    # Before _registry()/_project(), which can create a project and seed its guide section — those
-    # writes belong to the operator who asked for them too.
+    # Before _registry()/_project(), which can create a project and seed its guide
+    # section — those writes belong to the operator who asked for them too.
     set_identity(_cli_identity())
     reg = _registry()
     cfg = config()
