@@ -267,3 +267,34 @@ def test_uv_is_preferred_over_the_venv_when_both_are_available(checkout):
     r = checkout.run(start_timeout="2")
     assert "launching with: uv run" in r.stdout, r.stdout
     assert r.returncode != 0, r.stdout
+
+
+def test_the_log_is_rotated_not_truncated(checkout):
+    """`>"$LOG"` on a file the OUTGOING server still holds open does not move its file offset — it
+    only sets the length to 0. The dying process then writes at its stale offset and the kernel
+    zero-fills the gap, so the log becomes one enormous sparse line of NULs.
+
+    Measured on the deploy host before this fix: apparent size 1.3 MB against 8 KB on disk, a single
+    line of 1,340,225 characters ending in "Waiting for connections to close" — the outgoing
+    server's last words, landed a megabyte into the file the incoming one had just emptied.
+
+    A rename leaves the old descriptor pointing at the old inode, so those last words go to .1 and
+    the new log starts at offset 0.
+    """
+    body = (checkout.root / "deploy" / "restart.sh").read_text()
+    assert 'mv -f "$LOG" "$LOG.1"' in body, \
+        "the log must be renamed before launch; truncating one a live process holds open leaves a hole"
+    launch = body[body.index("$DETACH bash -c"):]
+    assert launch.index('>"$LOG"') > 0, "the new server should still write to a fresh $LOG"
+    assert 'mv -f "$LOG"' in body[:body.index("$DETACH bash -c")], \
+        "the rotation must happen BEFORE the launch, or the new server's own output is moved aside"
+
+
+def test_the_log_tail_is_bounded_in_bytes_not_only_lines(checkout):
+    """"Five lines" is not a size. One pathological line — exactly what the bug above produced —
+    made every restart print a megabyte through whatever ssh the operator was reading."""
+    body = (checkout.root / "deploy" / "restart.sh").read_text()
+    tail = [l for l in body.splitlines() if l.strip().startswith("tail -5")]
+    assert tail, "no tail of the log found"
+    assert any("cut -c" in l or "head -c" in l or "tail -c" in l for l in tail), \
+        f"the log tail is unbounded in bytes: {tail}"

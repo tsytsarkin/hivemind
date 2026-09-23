@@ -120,6 +120,14 @@ fi
 echo "launching with: ${LAUNCH#exec } (via $DETACH)"
 # ROOT travels in the environment rather than interpolated into the -c string, so a checkout path
 # containing a space or a quote cannot break the child's `cd`.
+# ROTATE, do not truncate. `>"$LOG"` on a file the OUTGOING server still holds open does not
+# reset its file offset — it only sets the length to 0. That process then writes its shutdown line
+# ("Waiting for connections to close") at its stale offset and the kernel zero-fills the gap, so the
+# log becomes one sparse line of NULs. Measured on the deploy host: apparent size 1.3 MB, 8 KB on
+# disk, one line of 1,340,225 characters — which `tail` below then faithfully printed in full,
+# making every restart emit a megabyte of nothing. A rename leaves the old fd pointing at the old
+# inode, so the dying process's last words land in .1 where they belong and the new log starts clean.
+[ -f "$LOG" ] && mv -f "$LOG" "$LOG.1"
 HM_ROOT=$ROOT $DETACH bash -c '
     cd "$HM_ROOT" || exit 1
     set -a; . deploy/hivemind.env; set +a
@@ -145,7 +153,10 @@ else
     echo "healthz: FAILED (no answer in ${i}s)"
 fi
 echo "--- tail $LOG ---"
-tail -5 "$LOG"
+# Bounded in bytes as well as lines: "5 lines" is not a size when a single line can be a megabyte,
+# and the caller is usually an ssh whose output someone is reading. cut per line, not head on the
+# stream, so five short lines still all appear.
+tail -5 "$LOG" | cut -c1-400
 
 # Exit non-zero when the server did not come up, so a caller — or a human reading $? after an ssh
 # one-liner — is not told a failed restart succeeded. This is the whole point of the file.
