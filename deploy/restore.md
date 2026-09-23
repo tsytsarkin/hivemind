@@ -1,7 +1,13 @@
 # Restoring a Hivemind backup
 
-Backups live on a second physical disk (default `$HIVEMIND_BACKUP_DIR/<project>/`):
-dated `db/hivemind-<stamp>.db` snapshots, a `blobs/sha256/` mirror, and `tokens.json`.
+Backups live on a second physical disk: per project under `$HIVEMIND_BACKUP_DIR/<project>/` —
+dated `db/hivemind-<stamp>.db` snapshots, a `blobs/sha256/` mirror, `tokens.json` and
+`project.json` — plus one `$HIVEMIND_BACKUP_DIR/identities.json` for the whole deployment.
+
+> **Restore `project.json` before starting the server.** It is the per-project ACL, and a project
+> whose `project.json` is absent is stamped `visibility=shared, owner=null` the first time the
+> server constructs it — so skipping step 3 publishes every private graph to every user of the
+> server, irreversibly as far as the ACL is concerned.
 
 ```sh
 sudo systemctl stop hivemind   ||  pkill -f hivemind-server      # stop writers first
@@ -18,8 +24,16 @@ cp $B/db/hivemind-<stamp>.db $P/hivemind.db
 # 2. blobs — the mirror never deletes, so this only adds back what is missing
 rsync -a $B/blobs/sha256/ $P/blobs/sha256/
 
-# 3. tokens (only if you lost them; existing clients keep working otherwise)
+# 3. project.json — the ACL. Do this BEFORE the server starts (see the warning above).
+cp $B/project.json $P/project.json && chmod 600 $P/project.json
+
+# 4. tokens (only if you lost them; existing clients keep working otherwise)
 cp $B/tokens.json $P/tokens.json && chmod 600 $P/tokens.json
+
+# 5. server-level identities — one file for the whole deployment, not per project.
+#    Without it every `mint-token --user` credential is gone, i.e. everyone is revoked.
+cp $HIVEMIND_BACKUP_DIR/identities.json $HIVEMIND_DATA_DIR/identities.json \
+  && chmod 600 $HIVEMIND_DATA_DIR/identities.json
 ```
 
 Then start the server and check `/healthz`. If the database is newer than the blob mirror,

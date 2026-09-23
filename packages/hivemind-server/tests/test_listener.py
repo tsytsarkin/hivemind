@@ -168,7 +168,7 @@ def test_secret_file_is_owner_only(tmp_path):
     assert path.stat().st_mode & 0o077 == 0, "the bus signing key must not be group/world readable"
 
 
-def test_bus_connect_returns_a_command_a_plugin_only_machine_can_run():
+def test_bus_connect_returns_a_command_a_plugin_only_machine_can_run(tmp_path):
     """The regression this file exists for. The command must run with python3 against a path built
     from $HOME, and must NOT name the `hivemind` CLI: that ships in hivemind-client, which a
     machine holding only the Claude Code plugin has not installed."""
@@ -183,11 +183,16 @@ def test_bus_connect_returns_a_command_a_plugin_only_machine_can_run():
                 return fn
             return deco
 
+    # Under tmp_path, NOT beside this file: bus_connect calls register_secret(dir), which mints a
+    # real 32-byte HMAC key into whatever directory it is handed. Pointed at the source tree it
+    # wrote a live secret into the working copy on every run — one such key has already reached
+    # origin that way. .gitignore covers it, but an ignore rule is the second line of defence and
+    # this is the first.
     class FakeProject:
         name = "plugin-only"
-        dir = pathlib.Path(__file__).resolve().parent / "_tmp_plugin_only"
+        dir = tmp_path / "plugin-only"
 
-    FakeProject.dir.mkdir(exist_ok=True)
+    FakeProject.dir.mkdir()
     bus_ws_tools.attach(FakeMCP(), type("C", (), {"public_url": "http://box:8787"}))
 
     # The hub and the ws URL are resolved per CALL now, from the project of the call in flight —

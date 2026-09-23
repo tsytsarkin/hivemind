@@ -7,6 +7,12 @@
 #
 # Blobs are content-addressed and immutable, so they are mirrored incrementally and WITHOUT
 # --delete: an artifact GC'd on the live side stays recoverable here.
+#
+# project.json and identities.json are backed up because they are ACL state, not convenience:
+# project.json IS the per-project ACL, and a project restored without it reads as visibility=shared
+# with no owner (Project.__init__ stamps that when the file is absent) — i.e. a restore would
+# silently publish every private graph. identities.json holds every server-level token, so a
+# restore without it revokes everyone.
 set -euo pipefail
 
 DATA_DIR="${HIVEMIND_DATA_DIR:-$HOME/hivemind-data}"
@@ -63,11 +69,26 @@ PY
   # ── tokens (credentials: keep them 0600 here too) ────────────────────────────
   [ -f "$proj_dir/tokens.json" ] && install -m 600 "$proj_dir/tokens.json" "$out/tokens.json"
 
+  # ── project.json: the ACL. Not optional — see the header. ────────────────────
+  if [ -f "$proj_dir/project.json" ]; then
+    install -m 600 "$proj_dir/project.json" "$out/project.json"
+  else
+    echo "  [$proj] !!! no project.json — this project will restore as SHARED"
+  fi
+
   # ── rotation ─────────────────────────────────────────────────────────────────
   ls -1t "$out/db"/hivemind-*.db 2>/dev/null | tail -n +$((KEEP + 1)) | while read -r old; do
     echo "  [$proj] pruning $(basename "$old")"
     rm -f "$old"
   done
 done
+
+# Server-level credentials, one per deployment rather than per project.
+if [ -f "$DATA_DIR/identities.json" ]; then
+  install -m 600 "$DATA_DIR/identities.json" "$DEST/identities.json"
+  echo "  identities.json backed up ($(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))))' "$DATA_DIR/identities.json" 2>/dev/null || echo '?') tokens)"
+else
+  echo "  note: no identities.json at $DATA_DIR (no server-level identities minted yet)"
+fi
 
 echo "=== $(date -Is) backup done in $(( $(date +%s) - total_start ))s; dest usage: $(du -sh "$DEST" | cut -f1) ==="

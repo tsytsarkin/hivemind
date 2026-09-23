@@ -209,9 +209,12 @@ class Database:
     def write_light(self) -> Iterator[sqlite3.Cursor]:
         """Same locking/retry discipline as write(), but no `tx` row.
 
-        For ephemeral, TTL-reaped data (the agent bus) where a provenance row per chat message
-        would outlive the message it describes and defeat the reaper. Anything that belongs to
-        the revision axis must use write() instead — provenance is not optional there.
+        For work where a provenance row would be wrong or useless. Its original caller — the v1
+        polling bus, whose rows were TTL-reaped — no longer exists (the WebSocket bus stores
+        nothing at all); what uses it today is `admin.backfill_authors`, which rewrites the author
+        column on rows that predate it and must not stamp a tx of its own on each 5,000-row batch.
+        Anything that belongs to the revision axis must use write() instead — provenance is not
+        optional there.
         """
         con = self.conn()
         attempts = 0

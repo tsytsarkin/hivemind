@@ -18,30 +18,60 @@ curl http://<server-ip>:8787/healthz              # server root
 curl http://<server-ip>:8787/p/default/healthz    # the project base your clients use
 curl http://<server-ip>:8787/p/default/           # index of every endpoint for that project
 ```
-Both health paths and both indexes are **open** (no token) so a probe works with only a URL;
-everything else returns `401` without a bearer token.
+Both health paths and both indexes are **open** (no token) so a probe works with only a URL —
+but the project one only for a **shared** project. A private project answers nothing at all without
+authorisation, not even its health: every HTTP path under it returns the same `404` as a name that
+does not exist. Everything else returns `401` without a bearer token.
 **Being on the LAN is not authorization** — every `/p/<project>` request still needs a bearer
 token; unauthenticated requests get `401`. `HIVEMIND_ALLOWED_HOSTS=*` disables the DNS-rebinding
-host check (fine on a trusted private network); set explicit hostnames to enable it.
+host check (fine on a trusted private network); set explicit hostnames to enable it. See
+[security.md](security.md).
 
-## 2. Mint a token for the new machine
+## 2. Mint a token for the person using the new machine
 
-Run **on the server host**, one token per machine so you can revoke individually:
+A token names a **person**, not a machine — that is what puts an author on every write. Run **on the
+server host**:
+
+```sh
+hivemind-admin mint-token --user nik --device mac-studio        # [--role member|admin]
+# -> hm_…        (printed once; stored in <data-dir>/identities.json)
+```
+
+`--user` is the username authorship is recorded under: lowercase `[a-z0-9][a-z0-9_-]{0,31}`, **no
+dots** (dots are reserved for the `<user>.<suffix>` project-ownership prefix). `--device` is a label kept
+beside it, so one person can hold one token per machine and revoke them individually. `--role` is
+accepted but carries no authority today.
+
+This token reaches **every project that user may access**, and it is the only kind that works on the
+project-neutral `/mcp` endpoint and on `GET /projects`.
+
+<details><summary>The legacy per-project form</summary>
 
 ```sh
 hivemind-admin --project default mint-token --client-id <machine-name>
-# -> {"token": "hm_…", …}   (shown once; it is stored in the project's tokens.json)
+# -> hm_…        (stored in that project's tokens.json)
 ```
+
+Still supported for credentials already deployed. It is pinned to the one project whose file holds
+it — it reaches no other project, not even another shared one — it is refused on `POST /mcp` and
+`GET /projects` with a `401`, it cannot create or share a project, and its writes are attributed
+`legacy:<client-id>` rather than to a person. Prefer `--user` for anything new.
+
+</details>
 
 **Transferring it:** the token is a bearer credential — move it over a channel you already trust:
 
 ```sh
 # simplest: mint it over ssh and capture it directly on the client machine
-ssh you@server 'hivemind-admin --project default mint-token --client-id laptop' | tee ~/hm-token.json
+ssh you@server 'hivemind-admin mint-token --user nik --device laptop' | tee ~/hm-token
 ```
 or copy/paste from an SSH session into the machine's password manager / Keychain. **Don't** send it
-over chat or email, and don't commit it. To revoke, delete that entry from
-`<data-dir>/projects/<project>/tokens.json` on the server and restart.
+over chat or email, and don't commit it.
+
+**To revoke**, delete the token's entry from `<data-dir>/identities.json` (or, for a legacy token,
+from `<data-dir>/projects/<project>/tokens.json`). **No restart is needed**: both files are re-read
+whenever their mtime/size changes, so the revocation takes effect on the very next request — and
+within one 30 s heartbeat for a bus socket that is already open.
 
 ## 3. Install just the plugin on the new machine
 
@@ -75,13 +105,47 @@ claude mcp list
 `api_token` is declared `sensitive`, so Claude Code stores it in the OS keychain rather than in a
 settings file.
 
+### `server_url`: a project base, or the server root
+
+`server_url` is used as `${server_url}/mcp`, and **both forms work**:
+
+| Form | What a call with no `project=` does | Blobs and the bus |
+|---|---|---|
+| `http://<ip>:8787/p/default` (recommended) | acts in `default` — the URL named it | work, under that prefix |
+| `http://<ip>:8787` | is **refused**, reads and writes alike | **not reachable** |
+
+The root form is the project-neutral endpoint: one connection reaches every project the token may
+access, by passing `project=<name>` on each call, and a call that names none is refused rather than
+defaulted. It needs a server-level identity token (a legacy per-project one gets `401`). What it
+does *not* carry is the REST surface: `PUT`/`GET /blobs/…`, the guide and the catalogs all need a
+project the root URL has not named, so the router 404s them there, and the bus WebSocket has no root
+route at all. So point the CLI — whose reason to exist is large artifacts — at a **project base
+URL**, and pick the root only for an MCP-only client that genuinely works across projects.
+
+A project base URL is not a restriction either way: `project=<name>` on an individual call overrides
+it, so `/p/default/mcp` still reaches `nik.private` if the token may. That is a property of the tool
+layer — the MCP client and `hivemind.Client.call(tool, {"project": …})`. **The `hivemind` CLI has no
+`--project` flag** and never sends one, so it acts in whatever project its URL names, and against the
+server root every one of its commands is refused. Give the CLI a project base URL.
+
+### Picking the project for a session
+
+The plugin ships `/hivemind:project`, which lists what the token can reach (grouped shared / yours /
+shared-with-you), offers a private graph or a per-session scratch project, creates it if new, and
+**pins** the choice in local state keyed by the session id. A `SessionStart` hook re-injects the
+pinned name on startup, `/clear` and compaction — because a compaction drops the choice from context,
+and a dropped choice plus a defaulted write is how private work reaches a shared graph. The pin is
+only an aide-memoire: the `project` echoed in each tool result is the authoritative answer.
+
 ## 4. (Optional) the CLI, for large artifacts and tool publishing
 
 The plugin covers in-conversation use. For big uploads/downloads and publishing tools, install the
 client too (Python ≥3.9, only dep is `httpx`) — see [DEPLOY.md](../deploy/DEPLOY.md):
 ```sh
 pip install ./packages/hivemind-client
-export HIVEMIND_SERVER_URL=http://<server-ip>:8787/p/default
+export HIVEMIND_SERVER_URL=http://<server-ip>:8787/p/default   # a PROJECT base: blobs live under it
 export HIVEMIND_TOKEN=hm_…
 hivemind health
 ```
+The same URL rule as above applies: bytes move over `/p/<project>/blobs/…`, so the CLI wants a
+project base URL, not the server root.

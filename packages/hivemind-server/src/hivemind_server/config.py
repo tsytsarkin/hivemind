@@ -33,13 +33,12 @@ class Config:
     def db_path(self) -> Path:
         return self.data_dir / "hivemind.db"
 
-    @property
-    def blobs_dir(self) -> Path:
-        return self.data_dir / "blobs"
-
     def ensure_dirs(self) -> None:
+        # Only the data dir. There is no server-level blob store: every blob lives under the
+        # project that owns it (<project dir>/blobs, created by project.Project), and a
+        # cross-project directory beside them would be somewhere a future code path could write
+        # bytes that no project's ACL covers.
         self.data_dir.mkdir(parents=True, exist_ok=True)
-        (self.blobs_dir / "tmp").mkdir(parents=True, exist_ok=True)
 
 
 _cfg: Config | None = None
