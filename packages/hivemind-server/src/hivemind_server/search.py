@@ -6,9 +6,19 @@ from __future__ import annotations
 import json
 from typing import Any, List, Optional
 
-from .db import SENTINEL, Database, Invalid
+from .db import LEGACY_USER, SENTINEL, Database, Invalid
 
 _RRF_K = 60
+
+# Caps on the structured-props modes of search(). Props are returned only on request, and bounded,
+# because they are unbounded by nature: measured over 2000 head revisions of the live graph they
+# run to a median of 721 characters, p90 3657, max 30405, so a 25-hit page of full props is ~91k
+# characters at p90 — against a 25k-token MCP output cap. A hit's snippet stays the default.
+PROPS_LIMIT = 10                 # props=True pages are clamped to this many hits
+PROPS_MAX_CHARS = 4000           # ...and any ONE hit's props to this many characters
+# One page's total props payload, in either mode. fields= is the cheap mode, but the CALLER picks
+# the keys and a single key can hold a whole document, so it needs the same ceiling.
+PROPS_PAGE_MAX_CHARS = PROPS_LIMIT * PROPS_MAX_CHARS
 
 
 def _flatten(obj: Any, out: List[str]) -> None:
@@ -79,17 +89,57 @@ def _props_filter_sql(props_filter: Optional[dict]):
     return sql, args
 
 
+def author_filter(column: str, author: Optional[str]) -> tuple:
+    """SQL predicate for "written by <user>", against an author_user column. ("", []) if no author.
+
+    NULL in an author_user column means "written before authorship existed" and every read path
+    reports it as LEGACY_USER, so a filter for that name has to match NULL too — otherwise the
+    filter and the field it filters on disagree about the same rows.
+    """
+    if not author:
+        return "", []
+    if author == LEGACY_USER:
+        return f"({column} IS NULL OR {column} = ?)", [author]
+    return f"{column} = ?", [author]
+
+
+def _hit_props(props: dict, fields: Optional[List[str]]) -> tuple:
+    """Build one hit's props payload: a projection if fields was given, else the whole dict.
+
+    Returns (payload, chars, truncated). An oversized dict becomes a truncated JSON prefix plus a
+    marker naming the real size, so the caller knows to graph_get that one node rather than
+    mistaking a cut payload for the whole of it.
+    """
+    p = {k: props[k] for k in fields if k in props} if fields is not None else props
+    raw = json.dumps(p)
+    if len(raw) <= PROPS_MAX_CHARS:
+        return p, len(raw), False
+    return ({"_json": raw[:PROPS_MAX_CHARS], "_truncated": True, "_chars": len(raw)},
+            PROPS_MAX_CHARS, True)
+
+
 def search(db: Database, query: str, *, types: Optional[List[str]] = None,
-           limit: int = 25, cursor: int = 0, props_filter: Optional[dict] = None) -> dict:
+           limit: int = 25, cursor: int = 0, props_filter: Optional[dict] = None,
+           fields: Optional[List[str]] = None, props: bool = False,
+           author: Optional[str] = None) -> dict:
     """Hybrid FTS: BM25 over prose + trigram over symbols, fused by RRF. Falls back to listing
     recent nodes when query is empty.
 
     `cursor` is an offset into the FILTERED result list (results that survive type/redirect/head
     filtering), so paging never repeats or skips a row. The candidate pool is widened to cover
     cursor+limit, because a fixed pool would silently truncate deep pages.
+
+    Each hit carries a 200-character `snippet` by default. `fields=[...]` replaces it with just
+    those props keys, `props=True` with the whole dict; both are bounded (see PROPS_* above) and a
+    reply that hit a bound says `props_clamped`. `author` restricts to what one identity wrote.
     """
     limit = max(1, min(limit, 200))
     cursor = max(0, int(cursor or 0))
+    want = [f for f in fields if isinstance(f, str)] if fields else None   # fields wins over props
+    clamped = False
+    if want is None and props and limit > PROPS_LIMIT:
+        limit = PROPS_LIMIT
+        clamped = True
     pool = min(max(200, (cursor + limit) * 3), 2000)
     match = _fts_query(query)
     type_sql, type_args = "", []
@@ -97,9 +147,13 @@ def search(db: Database, query: str, *, types: Optional[List[str]] = None,
         type_sql = " AND n.node_type IN (%s)" % ",".join("?" * len(types))
         type_args = list(types)
     prop_sql, prop_args = _props_filter_sql(props_filter)
-    # props live on the current version, so filtering on them needs that join
-    prop_join = (" JOIN node_version nv ON nv.node_id = n.node_id AND nv.tx_to = %d"
-                 % SENTINEL) if prop_sql else ""
+    auth_pred, auth_args = author_filter("nv.author_user", author)
+    auth_sql = f" AND {auth_pred}" if auth_pred else ""
+    # props and the author both live on the current version, so either filter needs that join. Both
+    # go into the SQL below rather than into the result loop: a filter applied after the candidate
+    # pool silently drops rows that fell outside it, which is the bug already fixed once for types.
+    head_join = (" JOIN node_version nv ON nv.node_id = n.node_id AND nv.tx_to = %d"
+                 % SENTINEL) if (prop_sql or auth_sql) else ""
     with db.read() as cur:
         from .graph import node_flags, _current_node_version, _node_row  # local import
         ranks: dict = {}
@@ -109,10 +163,11 @@ def search(db: Database, query: str, *, types: Optional[List[str]] = None,
                 # that fell outside the candidate pool, so a rare type looked empty
                 rows = cur.execute(
                     f"SELECT f.node_id AS node_id, f.rank AS rank FROM {tbl} f "
-                    f"JOIN node n ON n.node_id = f.node_id{prop_join} "
-                    f"WHERE {tbl} MATCH ? AND n.redirect_to IS NULL{type_sql}{prop_sql} "
+                    f"JOIN node n ON n.node_id = f.node_id{head_join} "
+                    f"WHERE {tbl} MATCH ? AND n.redirect_to IS NULL"
+                    f"{type_sql}{prop_sql}{auth_sql} "
                     f"ORDER BY f.rank LIMIT ?",
-                    (match, *type_args, *prop_args, pool)).fetchall()
+                    (match, *type_args, *prop_args, *auth_args, pool)).fetchall()
                 for i, r in enumerate(rows):
                     ranks[r["node_id"]] = ranks.get(r["node_id"], 0.0) + 1.0 / (_RRF_K + i)
             # tie-break on node_id so the order is total and stable across calls — otherwise
@@ -122,13 +177,14 @@ def search(db: Database, query: str, *, types: Optional[List[str]] = None,
             # no query = browse. Page the node table directly so listing a type works even when
             # none of its nodes are recent, and so the total is the real one.
             ordered = [r["node_id"] for r in cur.execute(
-                f"SELECT n.node_id FROM node n{prop_join} "
-                f"WHERE n.redirect_to IS NULL{type_sql}{prop_sql} "
+                f"SELECT n.node_id FROM node n{head_join} "
+                f"WHERE n.redirect_to IS NULL{type_sql}{prop_sql}{auth_sql} "
                 f"ORDER BY n.created_tx DESC, n.node_id LIMIT ? OFFSET ?",
-                (*type_args, *prop_args, limit + 1, cursor))]
+                (*type_args, *prop_args, *auth_args, limit + 1, cursor))]
         results = []
         skipped = 0 if query else cursor       # browse paged in SQL; search pages in the loop
         has_more = False
+        spent = 0                              # props characters shipped on this page
         for nid in ordered:
             nrow = _node_row(cur, nid)
             if nrow is None or nrow["redirect_to"] is not None:
@@ -141,26 +197,40 @@ def search(db: Database, query: str, *, types: Optional[List[str]] = None,
             if skipped < cursor:          # advance to the requested page, counting only
                 skipped += 1               # rows that actually pass the filters
                 continue
+            # Both caps below stop the page by setting has_more, so has_more tracks the UNCLAMPED
+            # row count: a page cut short by a cap must not read as the last page, or the caller
+            # silently loses the rest of its results.
             if len(results) >= limit:      # one extra qualifying row proves there is a next page
                 has_more = True
                 break
-            props = json.loads(head["props"])
+            if spent >= PROPS_PAGE_MAX_CHARS:  # ...as does one the props budget has no room for
+                has_more, clamped = True, True
+                break
+            pdict = json.loads(head["props"])
+            if want is not None or props:
+                payload, chars, cut = _hit_props(pdict, want)
+                spent += chars
+                clamped = clamped or cut
+                shown = {"props": payload}
+            else:
+                shown = {"snippet": json.dumps(pdict)[:200]}
             results.append({"node_id": nid, "node_type": nrow["node_type"],
                             "subject_key": nrow["subject_key"],
                             "subject_version": nrow["subject_version"],
                             "version_id": head["version_id"],
                             "score": round(ranks.get(nid, 0.0), 5),
-                            "snippet": json.dumps(props)[:200],
+                            **shown,
                             "flags": node_flags(cur, nid)})
     total = None
-    if types or props_filter or not query:
+    if types or props_filter or author or not query:
         with db.read() as cur:
             total = cur.execute(
-                f"SELECT COUNT(*) c FROM node n{prop_join} "
-                f"WHERE n.redirect_to IS NULL{type_sql}{prop_sql}",
-                (*type_args, *prop_args)).fetchone()["c"]
+                f"SELECT COUNT(*) c FROM node n{head_join} "
+                f"WHERE n.redirect_to IS NULL{type_sql}{prop_sql}{auth_sql}",
+                (*type_args, *prop_args, *auth_args)).fetchone()["c"]
     return {"results": results, "count": len(results),
             **({"total_of_type": total} if total is not None else {}),
+            **({"props_clamped": True} if clamped else {}),
             "cursor": cursor,
             "next_cursor": (cursor + len(results)) if has_more else None,
             "has_more": has_more,

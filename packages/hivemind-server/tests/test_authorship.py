@@ -232,3 +232,82 @@ async def test_a_legacy_project_token_is_attributed_to_its_client_id(env):
     assert got["author"] == f"legacy:{client_id}"
     assert got["author"] != "legacy:unknown"
     assert got["agent_label"] == "boot"
+
+
+# ── search: structured props instead of a truncated snippet ─────────────────────────
+def test_fields_projects_only_the_named_keys(db):
+    graph.upsert_node(db, "j", "component", {"title": "alpha", "status": "open",
+                                             "notes": "x" * 5000}, reason="x")
+    hit = graph.search_nodes(db, "alpha", fields=["title", "status"])["results"][0]
+    assert hit["props"] == {"title": "alpha", "status": "open"}
+    assert "notes" not in hit["props"], "a field not asked for must not be shipped"
+    assert "snippet" not in hit, "fields replaces the snippet rather than adding to it"
+
+
+def test_a_missing_field_is_omitted_not_nulled(db):
+    graph.upsert_node(db, "j", "component", {"title": "alpha"}, reason="x")
+    hit = graph.search_nodes(db, "alpha", fields=["title", "nope"])["results"][0]
+    assert hit["props"] == {"title": "alpha"}
+
+
+def test_props_true_returns_the_whole_dict(db):
+    graph.upsert_node(db, "j", "component", {"title": "alpha", "status": "open"}, reason="x")
+    hit = graph.search_nodes(db, "alpha", props=True)["results"][0]
+    assert hit["props"] == {"title": "alpha", "status": "open"}
+
+
+def test_props_true_clamps_the_page_size(db):
+    for i in range(15):
+        graph.upsert_node(db, "j", "component", {"title": f"alpha {i}"}, reason="x")
+    out = graph.search_nodes(db, "alpha", props=True, limit=25)
+    assert len(out["results"]) == graph.PROPS_LIMIT == 10
+    assert out["props_clamped"] is True
+    assert out["has_more"] is True, "clamping must not look like the end of the results"
+    assert out["next_cursor"] == 10, "...and the next page has to start where this one stopped"
+
+
+def test_an_oversized_props_is_truncated_with_a_marker(db):
+    graph.upsert_node(db, "j", "component", {"title": "alpha", "big": "x" * 9000}, reason="x")
+    out = graph.search_nodes(db, "alpha", props=True)
+    hit = out["results"][0]
+    assert hit["props"]["_truncated"] is True
+    assert hit["props"]["_chars"] > graph.PROPS_MAX_CHARS
+    assert len(json.dumps(hit["props"])) < 5000, "the whole point is a bounded payload"
+    assert out["props_clamped"] is True, "a truncated hit is a clamped reply"
+
+
+def test_an_oversized_projection_is_truncated_the_same_way(db):
+    """fields is the cheap mode, but the caller picks the keys — one can hold a whole document."""
+    graph.upsert_node(db, "j", "component", {"title": "alpha", "big": "x" * 9000}, reason="x")
+    out = graph.search_nodes(db, "alpha", fields=["big"])
+    assert out["results"][0]["props"]["_truncated"] is True
+    assert len(json.dumps(out["results"][0]["props"])) < 5000
+    assert out["props_clamped"] is True
+
+
+def test_a_page_stops_when_the_props_budget_is_spent(db):
+    """20 hits x 3000 chars would be a 60k-character reply; the page ends early and says so."""
+    for i in range(20):
+        graph.upsert_node(db, "j", "component", {"title": f"alpha {i}", "body": "y" * 3000},
+                          reason="x")
+    out = graph.search_nodes(db, "alpha", fields=["title", "body"], limit=25)
+    assert 0 < len(out["results"]) < 20
+    assert out["props_clamped"] is True
+    assert out["has_more"] is True and out["next_cursor"] == len(out["results"])
+    # ...and paging on from there is what returns the rest, rather than losing it.
+    nxt = graph.search_nodes(db, "alpha", fields=["title"], limit=25, cursor=out["next_cursor"])
+    seen = {h["node_id"] for h in out["results"]} | {h["node_id"] for h in nxt["results"]}
+    assert len(seen) == 20
+
+
+def test_the_default_shape_is_unchanged(db):
+    graph.upsert_node(db, "j", "component", {"title": "alpha"}, reason="x")
+    hit = graph.search_nodes(db, "alpha")["results"][0]
+    assert "snippet" in hit and "props" not in hit
+    assert "props_clamped" not in graph.search_nodes(db, "alpha")
+
+
+def test_fields_wins_over_props(db):
+    graph.upsert_node(db, "j", "component", {"title": "alpha", "status": "open"}, reason="x")
+    hit = graph.search_nodes(db, "alpha", fields=["title"], props=True)["results"][0]
+    assert hit["props"] == {"title": "alpha"}

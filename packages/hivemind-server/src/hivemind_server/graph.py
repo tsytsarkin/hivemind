@@ -13,6 +13,9 @@ from .db import (LEGACY_USER, SENTINEL, Conflict, Database, Invalid, NotFound, T
                  canonical_json)
 from .ids import content_hash, ulid
 from . import schemas
+# Re-exported: search_nodes is the public entry point, so the caps on what a reply may carry are
+# part of ITS contract even though the code that applies them lives in search.
+from .search import PROPS_LIMIT, PROPS_MAX_CHARS, PROPS_PAGE_MAX_CHARS      # noqa: F401
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────────
@@ -499,42 +502,13 @@ def neighbors(db: Database, node_id: str, *, edge_types: Optional[list[str]] = N
 
 def search_nodes(db: Database, query: str, *, types: Optional[list[str]] = None,
                  limit: int = 25, cursor: int = 0,
-                 props_filter: Optional[dict] = None) -> dict:
+                 props_filter: Optional[dict] = None,
+                 fields: Optional[list[str]] = None, props: bool = False,
+                 author: Optional[str] = None) -> dict:
     """Search current node versions via FTS5 (unicode61 + trigram, RRF-fused)."""
     from . import search as _search
     return _search.search(db, query, types=types, limit=limit, cursor=cursor,
-                          props_filter=props_filter)
-    limit = max(1, min(limit, 200))
-    with db.read() as cur:
-        params: list = []
-        where = "nv.tx_to=?"
-        params.append(SENTINEL)
-        if types:
-            where += " AND n.node_type IN (%s)" % ",".join("?" * len(types))
-            params.extend(types)
-        if query:
-            where += " AND nv.props LIKE ?"
-            params.append(f"%{query}%")
-        rows = cur.execute(
-            f"SELECT n.node_id, n.node_type, n.subject_key, n.subject_version, nv.version_id, "
-            f"nv.props FROM node n JOIN node_version nv ON nv.node_id=n.node_id "
-            f"WHERE {where} AND n.redirect_to IS NULL ORDER BY n.node_id LIMIT ? OFFSET ?",
-            (*params, limit + 1, cursor),
-        ).fetchall()
-        has_more = len(rows) > limit
-        rows = rows[:limit]
-        results = []
-        for r in rows:
-            props = json.loads(r["props"])
-            snippet = json.dumps(props)[:200]
-            results.append({
-                "node_id": r["node_id"], "node_type": r["node_type"],
-                "subject_key": r["subject_key"], "subject_version": r["subject_version"],
-                "version_id": r["version_id"], "snippet": snippet,
-                "flags": node_flags(cur, r["node_id"]),
-            })
-    return {"results": results, "next_cursor": (cursor + limit) if has_more else None,
-            "has_more": has_more}
+                          props_filter=props_filter, fields=fields, props=props, author=author)
 
 
 def node_types(db: Database, *, subject_key: Optional[str] = None) -> dict:

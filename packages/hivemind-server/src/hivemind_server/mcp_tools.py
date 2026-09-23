@@ -56,13 +56,14 @@ def build_mcp(registry, identities, *, instructions: str = INSTRUCTIONS) -> MCPS
     mcp = ProjectAware(real)
 
     # ── graph reads ──────────────────────────────────────────────────────────────
-    @mcp.tool(annotations=RO, description="Search nodes by text and/or BY TYPE. Pass types=[...] to restrict, and an EMPTY query with types to browse every node of that type (returns total_of_type). graph_types() lists the types that have data. props_filter={'gated': true, 'kind': 'mach-service'} filters on exact FIELD VALUES - the only way to match booleans and numbers, since text search cannot tell gated=true from gated=false (null matches absent). Paginated: pass the next_cursor from a reply back as cursor; has_more says when to stop.")
+    @mcp.tool(annotations=RO, description="Search nodes by text and/or BY TYPE. Pass types=[...] to restrict, and an EMPTY query with types to browse every node of that type (returns total_of_type). graph_types() lists the types that have data. props_filter={'gated': true, 'kind': 'mach-service'} filters on exact FIELD VALUES - the only way to match booleans and numbers, since text search cannot tell gated=true from gated=false (null matches absent). Each hit carries a 200-character `snippet` by default: fields=[\"title\",\"status\"] instead returns just those keys per hit as real `props`, and is the cheap, precise way to read structure across a page. props=true returns every key but clamps the page to 10 hits and truncates any one node over 4000 characters, so prefer fields unless you genuinely need the lot; a reply that hit either bound says props_clamped. Paginated: pass the next_cursor from a reply back as cursor; has_more says when to stop.")
     @_envelope
     def graph_search(query: str = "", types: Optional[list[str]] = None,
                      limit: int = 25, cursor: int = 0,
-                     props_filter: Optional[dict] = None) -> dict:
+                     props_filter: Optional[dict] = None,
+                     fields: Optional[list[str]] = None, props: bool = False) -> dict:
         out = graph.search_nodes(db, query, types=types, limit=limit, cursor=cursor,
-                                 props_filter=props_filter)
+                                 props_filter=props_filter, fields=fields, props=props)
         if query:                       # surface known dead-ends for this query, unprompted
             rel = traps.search(db, query, limit=3)["traps"]
             if rel:
