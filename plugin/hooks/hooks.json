@@ -1,9 +1,9 @@
 {
-  "description": "Re-injects this session's Hivemind project pin on startup, clear and compact, so a rebuilt context never leaves the project choice behind.",
+  "description": "Re-injects this session's Hivemind project pin on startup, clear, compact, resume and fork, so a rebuilt context never leaves the project choice behind.",
   "hooks": {
     "SessionStart": [
       {
-        "matcher": "startup|clear|compact",
+        "matcher": "startup|clear|compact|resume|fork",
         "hooks": [
           {
             "type": "command",

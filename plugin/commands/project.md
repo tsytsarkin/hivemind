@@ -4,9 +4,16 @@ argument-hint: [project-name]
 ---
 
 Pick the Hivemind project for this session and pin it. Every Hivemind call carries
-`project=<name>`, and **write tools refuse when no project is resolvable** — so this choice decides
-which graph the session's knowledge lands in. Private work written into a shared project cannot be
-un-shared.
+`project=<name>`, and this choice decides which graph the session's knowledge lands in. Private work
+written into a shared project cannot be un-shared.
+
+**Omitting the argument is not safe, and whether it fails depends on the endpoint.** A write with no
+`project=` is refused only on the project-neutral `POST /mcp`. On a project base URL —
+`POST /p/<name>/mcp`, which is what `${user_config.server_url}` resolves to by default and what the
+deployed plugin uses — the URL *is* the project, so the write silently lands in whatever project
+that URL names. That is by design (the caller's own URL named it), and it is exactly how an omitted
+argument puts private work in the shared graph. Pass `project=<name>` on every call; never rely on
+the refusal.
 
 Do this now, in order. **Do not choose a project for the user.**
 

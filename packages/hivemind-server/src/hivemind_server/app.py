@@ -103,6 +103,11 @@ class ProjectAuthMiddleware:
         # request a fresh context copy, but the invariant must not depend on that.
         set_identity(None)
         set_mount_default(None)          # same reason: a stale project must not become the default
+        # Third of the same kind, and it was the one left out: a request with no Host header (or a
+        # non-http scope, which returns below) used to leave the PREVIOUS caller's address readable,
+        # and bus_connect builds the ws:// URL it hands an agent out of exactly that. Cleared first,
+        # then set below if this request actually carries one.
+        _bus_ws_mod.set_origin("")
         # Published per request, before any early return, because nothing enforces one app per
         # process: a module-global registry would let a call in one deployment resolve a name against
         # another's data dir. This middleware is the one place that holds both.
@@ -123,6 +128,9 @@ class ProjectAuthMiddleware:
         if host:
             proto = hdrs.get("x-forwarded-proto") or scope.get("scheme") or "http"
             _bus_ws_mod.set_origin(f"{proto}://{host}")
+        # No else: cleared at the top of __call__ with the other two. bus_ws_tools._ws_url falls
+        # back to cfg.public_url when it is empty, which is the right answer for "this caller did
+        # not tell us where it reached us" — a stale neighbour's address is not.
         if not path.startswith("/p/"):
             return await self._neutral(scope, receive, send, path, hdrs)
         parts = path.split("/", 3)  # ['', 'p', '<name>', 'rest...']

@@ -8,6 +8,13 @@
 # Blobs are content-addressed and immutable, so they are mirrored incrementally and WITHOUT
 # --delete: an artifact GC'd on the live side stays recoverable here.
 #
+# One file is deliberately LEFT OUT: <project>/bus_secret, the HMAC key that signs listen keys.
+# That file is the wholesale revocation lever (deleting it revokes every outstanding key), so
+# restoring an old copy would resurrect keys a rotation had revoked. The server recreates it at
+# startup; the cost is that every listener on the project is refused once, exits, and its agent has
+# to re-run bus_connect. Written up in restore.md -- do not "fix" this by adding it here without
+# reading that section.
+#
 # project.json and identities.json are backed up because they are ACL state, not convenience:
 # project.json IS the per-project ACL, and a project restored without it reads as visibility=shared
 # with no owner (Project.__init__ stamps that when the file is absent) — i.e. a restore would

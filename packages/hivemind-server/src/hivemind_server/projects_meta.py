@@ -195,7 +195,15 @@ def save(project_dir: Path, meta: ProjectMeta) -> None:
     meta.last_touched = now_iso()   # db.now_iso, so every timestamp the server writes matches
     path = project_dir / "project.json"
     tmp = path.with_suffix(f".json.tmp{os.getpid()}")
-    tmp.write_text(json.dumps(meta.as_json(), indent=2))
+    tmp.unlink(missing_ok=True)      # a leftover from a crashed run that reused this pid
+    # 0600, and created AT that mode rather than chmod'd afterwards — jsonstore.save's discipline,
+    # for the same reason. This file IS the per-project ACL: it names the owner and every member,
+    # and a reader who can edit it can add themselves. It was written 0644 while identities.json
+    # and bus_secret were 0600 and backup.sh stored this one at 0600, so the live file and its own
+    # backup disagreed about whether it was a secret.
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(json.dumps(meta.as_json(), indent=2))
     os.replace(tmp, path)            # atomic: a reader sees the old file or the new one
     # Drop the entry rather than trusting the new stamp: an edit that keeps the size (a member
     # added and removed again) within one mtime tick would otherwise be invisible to readers.

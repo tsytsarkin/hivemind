@@ -6,6 +6,10 @@ dated `db/hivemind-<stamp>.db` snapshots, a `blobs/sha256/` mirror, `tokens.json
 (Server-level files live under `_server/` because the top level of the backup dir is one directory
 per project, and `identities.json` is itself a legal project name.)
 
+One file in a project directory is **not** in the backup, by decision: **`bus_secret`**. It
+needs nothing done during a restore, but it does have a consequence every agent on the
+project will notice — see [the section at the end](#bus_secret-is-not-restored-and-every-listener-dies-once).
+
 > **Restore `project.json` before starting the server.** It is the per-project ACL, and a project
 > whose `project.json` is absent is stamped `visibility=shared, owner=null` the first time the
 > server constructs it — so skipping step 3 publishes every private graph to every user of the
@@ -42,3 +46,27 @@ cp $HIVEMIND_BACKUP_DIR/_server/identities.json $HIVEMIND_DATA_DIR/identities.js
 Then start the server and check `/healthz`. If the database is newer than the blob mirror,
 `hivemind-admin --project default gc` reports nothing to collect — a blob referenced by the DB but
 missing on disk shows up as a 404 on download, not as corruption.
+
+## `bus_secret` is not restored, and every listener dies once
+
+`<project>/bus_secret` is the 32-byte HMAC key that signs that project's listen keys. It is
+deliberately absent from `backup.sh` and from the steps above: the file **is** the wholesale
+revocation lever — deleting it revokes every outstanding listen key for the project — so restoring
+an old copy would resurrect keys a rotation had already revoked. Not restoring it is the safer
+default, and the cost has to be written down because nobody would guess it:
+
+- The server **recreates** the secret the first time it registers the project (`bus_ws.register_secret`
+  at startup), so nothing is broken and nothing needs doing by hand.
+- Every listen key minted before the restore then fails verification. The refusal is pre-accept, so
+  it reaches the listener as a bare `403`, which it classifies as *refused* rather than as a blip:
+  it prints `[hivemind bus] refused (…); run bus_connect for a fresh key` and **exits**.
+- That is **terminal**. A listener does not retry a refusal — a listen key is reusable, so a refusal
+  means revoked or expired, not a dropped link — so **every agent on that project must call
+  `bus_connect` once and restart its `Monitor` task.** Unlike an HTTP caller, none of them recovers
+  on its own.
+- Nothing is lost. Bus traffic is ephemeral by design; anything durable is already in the graph.
+  Queued offline messages are in memory and were gone with the process anyway.
+
+If you would rather keep the keys valid across a restore, copy the file yourself *before* starting
+the server (`cp $B/bus_secret $P/bus_secret && chmod 600 $P/bus_secret`) — and understand that you
+are also reinstating any key you revoked by rotating it.

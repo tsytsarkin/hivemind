@@ -72,7 +72,10 @@ only durable trace of a conversation is the local JSONL inbox each listener appe
 ## Projects
 
 A project is a directory — `<projects_root>/<name>/{hivemind.db, blobs/, tokens.json,
-project.json}` — so "which project" is a filesystem boundary, not a column. `project.json` holds
+project.json, bus_secret}` — so "which project" is a filesystem boundary, not a column. Three of
+those five are credentials or ACL state and are written `0600`: `tokens.json`, `project.json` and
+`bus_secret` (the HMAC key that signs this project's bus listen keys; it is the only one *not* in
+`deploy/backup.sh`, on purpose — see `deploy/restore.md`). `project.json` holds
 `{name, visibility: "shared"|"private", owner, members[], label, created, session, last_touched}`
 and **is the ACL**: `projects_meta.can_access` is the one predicate every surface consults. It is
 read through an mtime+size-stamped cache, so a share made in another process takes effect on the

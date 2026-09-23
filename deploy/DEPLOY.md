@@ -109,9 +109,30 @@ What it does, per project:
   verified with `PRAGMA integrity_check` and only counts as a backup if it passes.
 - **Blobs** — incremental `rsync`, **without `--delete`**: artifacts are content-addressed and
   immutable, so anything GC'd on the live side stays recoverable in the backup.
-- **Tokens** — copied at mode 0600.
+- **Tokens** — `tokens.json`, copied at mode 0600.
+- **`project.json`** — the per-project **ACL**: it names the owner and every member. Not optional.
+  A project restored without it is stamped `visibility=shared, owner=null` the first time the
+  server constructs it, so a restore that skipped it would **publish every private graph**. The
+  script prints `!!! no project.json — this project will restore as SHARED` if one is missing.
 - **Rotation** — keeps `HIVEMIND_BACKUP_KEEP` (default 7) dated database snapshots; blobs are a
   single mirror.
+
+And once per deployment, not per project:
+
+- **`_server/identities.json`** — every server-level token. A restore without it **revokes
+  everyone**. It lives under `_server/` because the top level of the backup dir is one directory
+  per project and `identities.json` is itself a legal project name (`projects_meta.NAME_RE` accepts
+  it verbatim); the script refuses loudly if a real project ever collides with a name it owns.
+
+**Deliberately NOT backed up: `<project>/bus_secret`.** It is the per-project HMAC key that signs
+every listen key, and restoring an old one would resurrect keys that a rotation had revoked — the
+file *is* the revocation lever (deleting it revokes every outstanding listen key for that project).
+The cost of not having it is bounded and self-announcing: the server recreates the secret at
+startup, every pre-existing listen key then fails verification, and each listener prints
+`[hivemind bus] refused (…); run bus_connect for a fresh key` and **exits** — so every agent on
+that project must re-run `bus_connect` once, and none of them recovers on its own the way an HTTP
+caller does. No data is lost: bus traffic is ephemeral by definition and anything durable is in the
+graph. See [restore.md](restore.md).
 
 Tunables: `HIVEMIND_BACKUP_DIR` (default `$HIVEMIND_BACKUP_DIR`), `HIVEMIND_BACKUP_KEEP`,
 `HIVEMIND_DATA_DIR`. Log: `<backup dir>/backup.log`.

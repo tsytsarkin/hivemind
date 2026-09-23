@@ -250,3 +250,26 @@ def test_saving_an_ill_typed_member_list_is_refused_at_the_write(tmp_path, membe
         pm.save(d, meta)
     assert pm.load(d, "nik.p").members == [], "the refused write left the file alone"
     assert sorted(p.name for p in d.iterdir()) == ["project.json"], "and no temp file behind"
+
+
+def test_project_json_is_owner_only_like_every_other_credential(tmp_path):
+    """It IS the per-project ACL — owner plus every member — so a reader who can edit it can add
+    themselves. It was written 0644 while identities.json and bus_secret were 0600 and backup.sh
+    stored this one at 0600, so the live file and its own backup disagreed about whether it is a
+    secret.
+
+    The mode is asserted on the REPLACED file, not on the temp file, because os.replace carries the
+    temp file's mode across — which is why jsonstore.save creates at 0600 rather than chmod'ing
+    after the write, and why this does the same.
+    """
+    d, meta = _write(tmp_path, name="nik.p", visibility="private", owner="nik")
+    mode = (d / "project.json").stat().st_mode & 0o777
+    assert mode == 0o600, f"project.json is {oct(mode)}, not 0600"
+
+    # And on a rewrite, not just on the first write: the temp file is what os.replace installs, so
+    # a permissive umask on a later save would otherwise widen it again.
+    meta.members = ["ana"]
+    pm.save(d, meta)
+    mode = (d / "project.json").stat().st_mode & 0o777
+    assert mode == 0o600, f"project.json is {oct(mode)} after a rewrite"
+    assert pm.load(d, "nik.p").members == ["ana"], "and the rewrite actually landed"

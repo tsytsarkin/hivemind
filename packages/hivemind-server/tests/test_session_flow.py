@@ -302,11 +302,21 @@ def test_the_helper_reports_the_session_id():
 
 
 # ── registration: an unregistered hook is a hook that never runs ──────────────────────────────
-def test_the_hook_is_registered_for_startup_clear_and_compact():
+def test_the_hook_is_registered_for_every_event_that_rebuilds_the_context():
+    """All five, and `fork` is the one the original three missed.
+
+    `compact` is why the hook exists at all — a compaction drops the choice and a dropped choice
+    plus a defaulted write is how private work reaches the shared graph. `resume` and `fork` are the
+    same shape: the pin is keyed by session id and the helper's docstring says it exists so a
+    `--resume` lands back on the same project. A resume usually replays the transcript, so the
+    earlier injection survives; a FORK does not, so without it a forked session got nothing while
+    the pin file sat there unread.
+    """
     cfg = json.loads(HOOKS_JSON.read_text())
     entries = cfg["hooks"]["SessionStart"]
     assert len(entries) == 1
-    assert entries[0]["matcher"] == "startup|clear|compact"
+    assert set(entries[0]["matcher"].split("|")) == {"startup", "clear", "compact", "resume",
+                                                    "fork"}, entries[0]["matcher"]
     cmds = [h["command"] for h in entries[0]["hooks"]]
     assert cmds == ['bash "${CLAUDE_PLUGIN_ROOT}/hooks/session-start"'], cmds
 

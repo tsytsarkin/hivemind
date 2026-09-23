@@ -3027,7 +3027,8 @@ after creation.
 - [ ] **Step 6: Run the tests**
 
 Run: `$UV run --group dev pytest packages/ -q`
-Expected: PASS — 199 total.
+Expected: PASS — 199 total. (A prediction made before the work; the finished branch runs 517. See
+the note at the end of Task 14 Step 5.)
 
 - [ ] **Step 7: Stage, do not commit**
 
@@ -3078,8 +3079,16 @@ referenced it.
 - [ ] **Step 5: Run everything**
 
 Run: `$UV run --group dev pytest packages/ -q`
-Expected: PASS — 199 tests, and `test_no_host_specifics.py` still green (no home paths, usernames or
-IPs in tracked files).
+Expected: PASS, and `test_no_host_specifics.py` still green (no home paths, usernames or IPs in
+tracked files).
+
+> **The test counts in this plan are the plan's own predictions, written before the work, and they
+> drifted.** The figure that matters — what the finished branch actually runs — is **517**, not the
+> 199 this step originally claimed; the per-task numbers above (113, 123, 126, 140, 146, 152, 167,
+> 174, 177, 178, 181, 190, 199) were never revised as tasks grew their own coverage. An operator
+> checking a deployment should compare against **517** and against `deploy/deploy-checklist.md`,
+> which carries the live figure. The intermediate numbers are left as written rather than
+> back-dated, because this file is the record of what was planned.
 
 - [ ] **Step 6: Commit**
 

@@ -7,6 +7,7 @@ import pytest
 from conftest import Lifespan, _parse, _post
 
 from hivemind_server import app as appmod
+from hivemind_server import bus_ws as busmod
 from hivemind_server import projects_meta as pm
 from hivemind_server.config import Config
 from hivemind_server.identity import Identity, IdentityStore, current_identity, set_identity
@@ -266,3 +267,49 @@ async def test_a_denied_request_leaves_no_identity_behind(two_users):
         r = await c.get("/p/nik.private/skills", headers=_auth(ana))
     assert r.status_code == 404
     assert current_identity() is None
+
+
+@pytest.mark.anyio
+async def test_a_request_with_no_host_leaves_no_previous_callers_address_behind(two_users):
+    """`bus_ws._ORIGIN` was set per request but never cleared, unlike `identity` and
+    `mount_default`, which are both cleared first with a comment explaining why.
+
+    It matters because `bus_connect` builds the `ws://` URL it hands an agent out of exactly this
+    value. Two scopes reach the middleware without setting it: an http request carrying no Host
+    header, and the bus WebSocket, which returns before that code runs at all. Either used to read
+    the PREVIOUS caller's address, so an agent could be handed a URL naming somebody else's host.
+
+    The middleware is driven directly for the two header-less scopes, because httpx always sends a
+    Host and this invariant belongs to the middleware rather than to the router.
+    """
+    application, _, _ = two_users
+    transport = httpx.ASGITransport(app=application)
+    async with Lifespan(application), httpx.AsyncClient(transport=transport,
+                                                        base_url="http://first.example",
+                                                        timeout=30) as c:
+        assert (await c.get("/p/default/healthz")).status_code == 200
+    assert busmod.current_origin() == "http://first.example", "the premise: it IS set per request"
+
+    reached = []
+
+    async def inner(scope, _receive, _send):
+        reached.append(scope["path"])
+
+    mw = appmod.ProjectAuthMiddleware(inner, registry=application.state.registry,
+                                      cfg=application.state.cfg,
+                                      identities=application.state.identities)
+
+    # 1. An http request with no Host header at all. Shared project + `healthz` tail, so it is
+    #    allowed through and the inner app runs — i.e. this is the live request path, not a refusal.
+    busmod.set_origin("http://stale.example")
+    await mw({"type": "http", "scheme": "http", "path": "/p/default/healthz", "headers": []},
+             None, None)
+    assert reached == ["/p/default/healthz"], "the request must actually have been served"
+    assert busmod.current_origin() == "", \
+        "a request with no Host must not inherit the previous caller's address"
+
+    # 2. The bus WebSocket scope, which returns before the origin code is reached at all.
+    busmod.set_origin("http://stale.example")
+    await mw({"type": "websocket", "path": "/p/default/bus/ws", "headers": []}, None, None)
+    assert reached[-1] == "/p/default/bus/ws", "the ws scope must be passed through"
+    assert busmod.current_origin() == "", "a non-http scope must not inherit it either"

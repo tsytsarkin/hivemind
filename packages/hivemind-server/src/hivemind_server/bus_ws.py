@@ -187,8 +187,14 @@ def register_secret(project_dir: Path) -> bytes:
     secret = secrets.token_bytes(32)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
-    tmp.write_bytes(secret)
-    os.chmod(tmp, 0o600)          # the signing key for bus access: owner-only
+    tmp.unlink(missing_ok=True)   # a leftover from a crashed run
+    # Created AT 0600, not chmod'd after the write: a chmod-after-write leaves the signing key for
+    # bus access briefly world-readable under a permissive umask, which is the same window
+    # jsonstore.save opens O_EXCL to avoid. Anyone who reads these 32 bytes can mint a listen key
+    # for any label on this project.
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "wb") as f:
+        f.write(secret)
     tmp.replace(path)
     _SECRETS[scope] = secret
     return secret

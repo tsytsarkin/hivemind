@@ -278,6 +278,14 @@ class _Current:
     def _target(self):
         p = current_project()
         if p is None:
+            # Currently UNREACHABLE, and kept deliberately. Every path into a tool body has already
+            # resolved a project: with_project sets _PROJECT before calling one, and the REST
+            # handlers run under a /p/<name> prefix whose name the middleware published — while the
+            # neutral router 404s every REST path, so there is no request that reaches a body with
+            # neither set. A mutant deleting this branch therefore survives the suite. It stays
+            # because "unreachable" is a property of today's routing: one new route outside /p/, or
+            # one tool registered on the raw MCP server rather than through ProjectAware, and this
+            # is the difference between a named refusal and an AttributeError on None.
             raise Invalid("no project resolved for this call; pass project=<name>")
         return getattr(p, self._attr) if self._attr else p
 

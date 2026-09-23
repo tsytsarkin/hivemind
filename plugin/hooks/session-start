@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
-# Re-inject this session's Hivemind project pin. Registered for startup, clear and compact — the
-# compact matcher is the point: a compaction rebuilds the context and drops the choice, and a
-# dropped choice plus a defaulted write is how private work reaches the shared graph.
+# Re-inject this session's Hivemind project pin. Registered for startup, clear, compact, resume and
+# fork — the compact matcher is the point: a compaction rebuilds the context and drops the choice,
+# and a dropped choice plus a defaulted write is how private work reaches the shared graph.
+#
+# `resume` and `fork` are in the list because the pin is keyed by session id and the helper's own
+# docstring says the pin exists so that a `--resume` lands back on the same project. A resume
+# usually replays the transcript, so the earlier injection survives and this is belt-and-braces; a
+# FORK does not, so without it a forked session gets nothing at all while the pin file sits there
+# unread — the one case where the file says one thing and the context says nothing.
 #
 # Local state only. Listing projects needs the API token, and project_list over MCP is already
 # authenticated, so this hook never talks to the server. Every path below prints valid JSON (or
