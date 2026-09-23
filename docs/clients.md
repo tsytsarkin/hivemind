@@ -160,7 +160,8 @@ footprint. The launcher loads the plugin for **one session** instead:
 
 ```sh
 scripts/hivemind-claude                      # prompts for address (default localhost:8787) + token
-scripts/hivemind-claude --url <host>:8787 --project scratch
+scripts/hivemind-claude --url <host>:8787    # the SERVER ROOT — pin with /hivemind:project
+scripts/hivemind-claude --url <host>:8787 --project scratch   # the older /p/scratch shape
 scripts/hivemind-claude --resume             # anything it does not recognise goes to claude
 scripts/hivemind-claude -- --model sonnet    # or be explicit with --
 ```
@@ -168,11 +169,17 @@ scripts/hivemind-claude -- --model sonnet    # or be explicit with --
 It needs the repo (or just a copy of `plugin/` plus the script) and nothing else — no install, no
 marketplace, no change to your settings. `HIVEMIND_SERVER_URL` and `HIVEMIND_TOKEN` are used as the
 defaults, so setting both makes it non-interactive. A bare `host:port` is expanded to
-`http://host:port/p/<project>`; a URL that already names a project is left alone.
+`http://host:port` — the **server root**, as an install gets — and a URL that already names a project
+is left alone. `--project <name>` selects the older `/p/<name>` shape instead; without it the session
+has no project until `/hivemind:project` pins one, which the launcher says on stderr rather than
+leaving you to meet it as a refusal.
 
-Before starting, it checks `/healthz` and then fetches `/guide` with your token, so a wrong address
-or a rejected token is a line of output rather than a silent MCP failure ten minutes later. `--dry-run`
-prints what it would run — the token redacted — and `--no-check` skips the preflight.
+Before starting, it checks `/healthz` and then makes one authenticated read: `/projects` off the root,
+or that project's `/guide` when the URL names one. So a wrong address or a rejected token is a line of
+output rather than a silent MCP failure ten minutes later — and the probe follows the shape on
+purpose, because `/guide` does not exist off the root and a legacy per-project token is `401` on
+`/projects`, so the wrong probe would warn about a working setup. `--dry-run` prints what it would
+run — the token redacted — and `--no-check` skips the preflight.
 
 How the token reaches the plugin, since there is no install step to collect it: the script writes
 `pluginConfigs.hivemind.options` to a temporary settings file and passes `--plugin-dir` and
@@ -194,12 +201,14 @@ So the launcher's token arrives exactly the way an installed plugin's does, and 
 `SessionStart` hook exports it to the session's shell like any other plugin config — the launcher
 itself exports nothing. Two asymmetries to know. Its own `HIVEMIND_SERVER_URL` only pre-fills
 the prompt, and `claude` inherits that variable from your shell **verbatim**, before the launcher's
-normalisation: give it a bare `box.local:8787` and the plugin gets
-`http://box.local:8787/p/default` while the session's Bash calls see `box.local:8787`, which carries
-no scheme and is not a usable base for anything. Export a full URL — either shape — or let the prompt
-collect it. And the launcher still hands the plugin a **project** URL where the plugin's own default
-is now the server root, so a launched session keeps the older behaviour for a call that names no
-project: it lands in the URL's project instead of being refused.
+normalisation: give it a bare `box.local:8787` and the plugin gets `http://box.local:8787` while the
+session's Bash calls see `box.local:8787`, which carries no scheme and is not a usable base for
+anything. Export a full URL — either shape — or let the prompt collect it. And what it hands the
+plugin is the **server root**, the same as an install, so a launched session also starts with no
+project — which it says on stderr: Hivemind calls are refused and the live guide has no URL to build
+until `/hivemind:project` pins one. `--project <name>` opts into the older `/p/<name>` shape for
+someone who wants defaulting without pinning first; a URL that already names a project is passed
+through either way.
 
 ### `server_url`: the server root, or a project base
 

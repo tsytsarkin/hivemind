@@ -34,28 +34,38 @@ footprint, not capability.
 ```sh
 scripts/hivemind-claude
 # Hivemind server address [localhost:8787]: <host>:8787
-# Bearer token for http://<host>:8787/p/default (not echoed): ****   # the launcher adds /p/<project>
+# Bearer token for http://<host>:8787 (not echoed): ****
+# hivemind-claude: http://<host>:8787 is the server root — this session has no project until you run /hivemind:project.
 ```
 
 It loads the plugin for that session only and forwards anything it doesn't recognise to `claude`:
 
 ```sh
-scripts/hivemind-claude --url <host>:8787 --project scratch
+scripts/hivemind-claude --url <host>:8787              # the server root — pin with /hivemind:project
+scripts/hivemind-claude --url <host>:8787 --project scratch   # the older /p/scratch shape
 scripts/hivemind-claude --resume                  # unrecognised → claude
 scripts/hivemind-claude -- --model sonnet         # or be explicit
 ```
 
-Set `HIVEMIND_SERVER_URL` and `HIVEMIND_TOKEN` to skip both prompts — useful in a script. A bare
-`host:port` becomes `http://host:port/p/default`; pass `--project` to change the project, or give a
-URL that already names one. (The launcher still hands the plugin a project URL, where the plugin's
-own default is the server root; both work.) That expansion is for the plugin only: `claude` inherits
-your exported variables **verbatim**, and they take precedence over the plugin's config in the
-session's shell — so export a full URL, `http://host:8787` or `http://host:8787/p/<name>`, never a
-bare `host:port`, which has no scheme for the shell-side tools (the live guide, the CLI) to use.
+**A launched session starts with no project**, exactly as an installed one does, and the launcher
+says so on stderr: every Hivemind call is refused until `/hivemind:project` pins one, and the live
+guide has no URL to build until then. That is the safer shape — pin first, then work. `--project
+<name>` opts into the older project-URL form (`http://host:port/p/<name>`) if you would rather have
+defaulting without pinning; it changes the *shape* of the address, not merely which project is used.
 
-Before launching it checks the server's health endpoint and then fetches the guide with your token,
-so a wrong address or a rejected token is one line of output rather than a silent failure ten
-minutes in. `--dry-run` shows what it would run (token redacted); `--no-check` skips the preflight.
+Set `HIVEMIND_SERVER_URL` and `HIVEMIND_TOKEN` to skip both prompts — useful in a script. A bare
+`host:port` becomes `http://host:port`, and a URL that already names a project is passed through
+unchanged. That expansion is for the plugin only: `claude` inherits your exported variables
+**verbatim**, and they take precedence over the plugin's config in the session's shell — so export a
+full URL, `http://host:8787` or `http://host:8787/p/<name>`, never a bare `host:port`, which has no
+scheme for the shell-side tools (the live guide, the CLI) to use.
+
+Before launching it checks the server's health endpoint and then makes one authenticated read with
+your token — `/projects` off the root, or that project's `/guide` when the URL names one — so a wrong
+address or a rejected token is one line of output rather than a silent failure ten minutes in. (The
+probe follows the shape on purpose: `/guide` does not exist off the root, and a per-project token is
+`401` on `/projects`, so the wrong probe would warn about a working setup.) `--dry-run` shows what it
+would run (token redacted); `--no-check` skips the preflight.
 
 Nothing is written to your permanent configuration, and `--settings` merges rather than replaces —
 your model, theme and other plugins are untouched.
