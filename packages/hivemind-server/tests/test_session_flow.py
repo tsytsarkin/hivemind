@@ -329,6 +329,19 @@ def test_the_manifest_points_at_the_hooks_file_and_the_versions_agree():
     assert f'version: "{manifest["version"]}"' in front, "SKILL.md metadata must not drift"
 
 
+def test_the_configured_address_is_the_server_root(tmp_path):
+    """`server_url` is the SERVER, not a project.
+
+    On the root a call that names no project is REFUSED — reads as well as writes — which is the
+    behaviour the session pin exists to make safe; on a project URL it silently lands in whatever
+    that URL named. Shipping the safer default is the whole of plugin 1.2.0, and the two shell
+    consumers get their project from the pin (HIVEMIND_PROJECT) instead of from this field.
+    """
+    default = json.loads(MANIFEST.read_text())["userConfig"]["server_url"]["default"]
+    assert "/p/" not in default, f"the default names a project: {default}"
+    assert default.rstrip("/") == default and default.endswith(":8787"), default
+
+
 # ── the agent's own entry points name a path a plain shell can expand ──────────────────────────
 def test_guide_sh_installs_the_pin_helper(tmp_path):
     """The hook and the slash command both name $HOME/.hivemind, so a skill load must put it

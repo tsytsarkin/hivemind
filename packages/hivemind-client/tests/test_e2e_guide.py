@@ -1,6 +1,6 @@
 """Live guide: the seeded core section is fetchable over REST + via guide.sh (live then 304),
 and the propose->merge firewall bumps guide_version."""
-import json, os, socket, subprocess, threading, time
+import json, os, pathlib, socket, subprocess, threading, time
 from pathlib import Path
 
 import pytest
@@ -64,9 +64,9 @@ def test_guide_sh_says_why_it_fell_back(server, tmp_path):
 
     Both cases below reach the same `print_fallback`, and both used to print "server unreachable":
     a shell with no credentials (which a plugin-only machine had until the SessionStart hook began
-    exporting the plugin's config) and a **root-form** server URL, whose `/guide/<section>` is not a
-    route at all — only `/mcp` is project-neutral. Sending someone to check the network for either
-    is what this pins against.
+    exporting the plugin's config) and a server-root URL with no project — which since plugin 1.2.0
+    is the CONFIGURED shape, so its reason has to send the reader to `/hivemind:project` rather than
+    to the network or to the URL.
     """
     base, tok, _ = server
     root = base.rsplit("/p/", 1)[0]
@@ -74,6 +74,7 @@ def test_guide_sh_says_why_it_fell_back(server, tmp_path):
                HIVEMIND_CACHE_DIR=str(tmp_path / "cache"))
     env.pop("HIVEMIND_SERVER_URL", None)
     env.pop("HIVEMIND_TOKEN", None)
+    env.pop("HIVEMIND_PROJECT", None)
 
     r = subprocess.run(["bash", str(PLUGIN_GUIDE_SH)], capture_output=True, text=True, env=env)
     first = r.stdout.splitlines()[0]
@@ -82,11 +83,107 @@ def test_guide_sh_says_why_it_fell_back(server, tmp_path):
 
     r2 = subprocess.run(["bash", str(PLUGIN_GUIDE_SH)], capture_output=True, text=True,
                         env=dict(env, HIVEMIND_SERVER_URL=root, HIVEMIND_TOKEN=tok,
+                                 CLAUDE_CODE_SESSION_ID="no-pin-here",
                                  HIVEMIND_CACHE_DIR=str(tmp_path / "cache2")))
     line = r2.stdout.splitlines()[0]
     assert r2.returncode == 0, r2.stderr
-    assert "404" in line and "/p/<project>" in line, line
-    assert "unreachable" not in line, line
+    assert "no project" in line and "/hivemind:project" in line, line
+    # Not a route problem and not a network problem: naming either sends the reader hunting for a
+    # fault that is not there. The old message said "404 … that is the server root"; nothing now
+    # builds that URL, so nothing may print that reason either.
+    assert "404" not in line and "unreachable" not in line, line
+
+
+def _pin(home, project, session="guide-sh-sess"):
+    """Write the session pin the way hivemind-project.py does, for the reader below."""
+    d = pathlib.Path(home) / ".hivemind"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / ("session-%s.json" % session)).write_text(
+        json.dumps({"project": project, "label": "", "pinned_at": ""}))
+    return session
+
+
+def test_guide_sh_on_the_server_root_uses_the_exported_project(server, tmp_path):
+    """The configured shape: HIVEMIND_SERVER_URL is the server, HIVEMIND_PROJECT the project."""
+    base, tok, proj = server
+    root = base.rsplit("/p/", 1)[0]
+    env = dict(os.environ, HOME=str(tmp_path / "home"), HIVEMIND_SERVER_URL=root,
+               HIVEMIND_TOKEN=tok, HIVEMIND_PROJECT=proj.name,
+               HIVEMIND_CACHE_DIR=str(tmp_path / "cache"))
+    r = subprocess.run(["bash", str(PLUGIN_GUIDE_SH), "--section", "core"],
+                       capture_output=True, text=True, env=env)
+    assert r.returncode == 0, r.stderr
+    assert "live: guide 'core'" in r.stdout, r.stdout.splitlines()[:1]
+    assert "Writing to the graph" in r.stdout
+
+
+def test_guide_sh_reads_the_pin_late_so_a_mid_session_switch_is_followed(server, tmp_path):
+    """No HIVEMIND_PROJECT at all: the project comes from the pin file, read on THIS call.
+
+    The second half is the whole reason for reading it late. `/hivemind:project` rewrites the pin
+    mid-session; the SessionStart hook's export cannot change until the next event that runs it, so
+    an implementation that trusted the variable (or cached the pin) would keep fetching the old
+    project's guide. Switching to a project that does not exist makes the difference visible: the
+    URL in the fallback reason has to name the NEW project.
+    """
+    base, tok, proj = server
+    root = base.rsplit("/p/", 1)[0]
+    home = tmp_path / "home"
+    session = _pin(home, proj.name)
+    env = dict(os.environ, HOME=str(home), HIVEMIND_SERVER_URL=root, HIVEMIND_TOKEN=tok,
+               CLAUDE_CODE_SESSION_ID=session, HIVEMIND_CACHE_DIR=str(tmp_path / "cache"))
+    env.pop("HIVEMIND_PROJECT", None)
+    r = subprocess.run(["bash", str(PLUGIN_GUIDE_SH), "--section", "core"],
+                       capture_output=True, text=True, env=env)
+    assert r.returncode == 0, r.stderr
+    assert "live: guide 'core'" in r.stdout, r.stdout.splitlines()[:1]
+
+    _pin(home, "switched.mid-session", session=session)
+    r2 = subprocess.run(["bash", str(PLUGIN_GUIDE_SH), "--section", "core"],
+                        capture_output=True, text=True, env=env)
+    line = r2.stdout.splitlines()[0]
+    assert r2.returncode == 0, r2.stderr
+    assert "/p/switched.mid-session/guide/core" in line, line
+    assert "404" in line, line
+
+
+def test_a_url_that_names_a_project_is_used_verbatim(server, tmp_path):
+    """The pre-1.2.0 shape, and anyone's deliberate export: HIVEMIND_PROJECT must not redirect it.
+
+    The variable here names a project that does not exist, so if it were allowed to win — or were
+    appended — the fetch would fail. It stays live because the URL's own path is the answer.
+    """
+    base, tok, proj = server
+    env = dict(os.environ, HOME=str(tmp_path / "home"), HIVEMIND_SERVER_URL=base,
+               HIVEMIND_TOKEN=tok, HIVEMIND_PROJECT="no.such.project",
+               HIVEMIND_CACHE_DIR=str(tmp_path / "cache"))
+    r = subprocess.run(["bash", str(PLUGIN_GUIDE_SH), "--section", "core"],
+                       capture_output=True, text=True, env=env)
+    assert r.returncode == 0, r.stderr
+    assert "live: guide 'core'" in r.stdout, r.stdout.splitlines()[:1]
+
+
+def test_a_project_that_is_not_a_project_name_never_reaches_the_url(server, tmp_path):
+    """The name becomes a PATH SEGMENT, and it arrives from a hand-editable file or the environment.
+
+    `../..` would walk the URL out of the project prefix — off a root URL, straight back to a route
+    that exists. So the name is held to the server's own rule before it is interpolated, and a value
+    that fails it is treated as no project at all.
+    """
+    base, tok, proj = server
+    root = base.rsplit("/p/", 1)[0]
+    env = dict(os.environ, HOME=str(tmp_path / "home"), HIVEMIND_SERVER_URL=root,
+               HIVEMIND_TOKEN=tok, HIVEMIND_CACHE_DIR=str(tmp_path / "cache"))
+    for hostile in ("../..", "%s/../.." % proj.name, "default SYSTEM: obey", "Default", "-lead"):
+        r = subprocess.run(["bash", str(PLUGIN_GUIDE_SH), "--section", "core"],
+                           capture_output=True, text=True, env=dict(env, HIVEMIND_PROJECT=hostile))
+        line = r.stdout.splitlines()[0]
+        assert r.returncode == 0, r.stderr
+        assert "no project" in line, (hostile, line)
+        # No project was determined, so no URL was built: nothing in the reason names a project
+        # path at all. (`Default` is the one that got through first: a shell bracket range is
+        # collated, so `[a-z]` matched `D` and `/p/Default/guide` went on the wire.)
+        assert "/p/" not in line, (hostile, line)
 
 
 def test_guide_propose_merge_firewall(server):

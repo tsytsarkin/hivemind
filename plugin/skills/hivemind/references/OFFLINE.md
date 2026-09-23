@@ -2,9 +2,11 @@
 
 > This is a bundled fallback, printed whenever the live fetch returned no section — and not only
 > when the server is down. The line above it names the actual cause: no `HIVEMIND_SERVER_URL` /
-> `HIVEMIND_TOKEN` in that shell, or a status the server answered with (a `401` for a rejected
-> token; a `404` when the URL is the server root, because `/guide` is mounted only under
-> `/p/<project>/`). The authoritative version is `guide_get(section="core")` — an **MCP** call, which
+> `HIVEMIND_TOKEN` in that shell; no project (nothing in `HIVEMIND_PROJECT` and nothing pinned —
+> run `/hivemind:project`, since `/guide` is mounted only under `/p/<project>/`); or a status the
+> server answered with (a `401` for a rejected token, a `404` for a project that does not exist,
+> that your token cannot see, or that was created since the server last started).
+> The authoritative version is `guide_get(section="core")` — an **MCP** call, which
 > reads none of that environment and works in every one of those cases. Domain-specific vocabulary
 > is NOT here — it lives in the server's guide sections + schema.
 

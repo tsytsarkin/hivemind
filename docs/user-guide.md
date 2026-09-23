@@ -34,7 +34,7 @@ footprint, not capability.
 ```sh
 scripts/hivemind-claude
 # Hivemind server address [localhost:8787]: <host>:8787
-# Bearer token for http://<host>:8787/p/default (not echoed): ****
+# Bearer token for http://<host>:8787/p/default (not echoed): ****   # the launcher adds /p/<project>
 ```
 
 It loads the plugin for that session only and forwards anything it doesn't recognise to `claude`:
@@ -47,10 +47,11 @@ scripts/hivemind-claude -- --model sonnet         # or be explicit
 
 Set `HIVEMIND_SERVER_URL` and `HIVEMIND_TOKEN` to skip both prompts — useful in a script. A bare
 `host:port` becomes `http://host:port/p/default`; pass `--project` to change the project, or give a
-URL that already names one. That expansion is for the plugin only: `claude` inherits your exported
-variables **verbatim**, and they take precedence over the plugin's config in the session's shell, so
-export the full `http://host:8787/p/<name>` form if the shell-side tools (the live guide, the CLI)
-should work too.
+URL that already names one. (The launcher still hands the plugin a project URL, where the plugin's
+own default is the server root; both work.) That expansion is for the plugin only: `claude` inherits
+your exported variables **verbatim**, and they take precedence over the plugin's config in the
+session's shell — so export a full URL, `http://host:8787` or `http://host:8787/p/<name>`, never a
+bare `host:port`, which has no scheme for the shell-side tools (the live guide, the CLI) to use.
 
 Before launching it checks the server's health endpoint and then fetches the guide with your token,
 so a wrong address or a rejected token is one line of output rather than a silent failure ten
@@ -64,7 +65,7 @@ your model, theme and other plugins are untouched.
 ```sh
 claude plugin marketplace add tsytsarkin/hivemind
 claude plugin install hivemind@hivemind-marketplace --scope user \
-  --config server_url=http://<server-host>:8787/p/default \
+  --config server_url=http://<server-host>:8787 \
   --config api_token=hm_…
 claude mcp list      # expect: plugin:hivemind:hivemind … ✔ Connected
 ```
@@ -132,9 +133,9 @@ that bites:
   as well as writes**, because there is no project for the call to be about. Measured: `graph_types`
   and `guide_get` are refused the same as `graph_upsert`; only the wording differs, and the refusal
   lists the projects you may name.
-- On a project base URL — `POST /p/<name>/mcp`, which is what the installed plugin's default
-  `server_url` resolves to — **the URL *is* the project**, so the write silently lands wherever that
-  URL points.
+- On a project base URL — `POST /p/<name>/mcp`, the pre-1.2.0 shape and still supported — **the URL
+  *is* the project**, so the write silently lands wherever that URL points. The installed plugin's
+  default is the server root precisely so that the refusing case is the one you get.
 
 That second case is by design: your own URL named the project. It is also exactly how private work
 ends up in a shared graph, and **private work written into a shared project cannot be un-shared**.
@@ -157,13 +158,14 @@ what stops the next person re-deriving it.
 You can filter search by `author=`.
 
 **Large files** go through the REST blob endpoints via the `hivemind` CLI, never inline. It reads
-`HIVEMIND_SERVER_URL` and `HIVEMIND_TOKEN` from the environment, and inside a session the plugin's
-`SessionStart` hook has already exported both from the plugin's own config, so it usually just runs.
-In a plain terminal — or on a machine without the plugin — export them yourself. The CLI has no
-`--project` flag, so whichever way they are set they must name a **project base** URL
-(`http://<host>:8787/p/<name>`): against the server root its tool calls are refused for naming no
-project and `/blobs` 404s. Don't verify with `hivemind health` — it reads `/healthz` off the server
-root, which needs no token, so it says `{"ok": true}` even for a root URL or a bad token. Details: [`clients.md`](clients.md#where-the-url-and-the-token-come-from).
+`HIVEMIND_SERVER_URL`, `HIVEMIND_TOKEN` and `HIVEMIND_PROJECT` from the environment, and inside a
+session the plugin's `SessionStart` hook has already exported the first two from the plugin's own
+config and the third from the session pin, so it usually just runs. In a plain terminal — or on a
+machine without the plugin — export them yourself, or pass `--project <name>` per command. With no
+project its tool calls are refused by the server and its `/blobs` paths refuse client-side; a URL
+that names a project needs no flag. Don't verify with `hivemind health` — it reads `/healthz` off the
+server root, which needs no token, so it says `{"ok": true}` even with no project or a bad token; use
+`hivemind --project <name> guide get`. Details: [`clients.md`](clients.md#where-the-url-and-the-token-come-from).
 
 ### Sharing a private project
 
@@ -208,9 +210,10 @@ descriptive (the machine or the job, not a random id).
 | A brand-new project 404s over REST/CLI/bus | Expected until the server restarts — see the note above. |
 | Write refused for naming no project | You're on the project-neutral endpoint. Pass `project=`. |
 | The bus listener says "connection refused" | The project's `/p/<name>/bus/ws` route doesn't exist yet (new project, no restart), or the listener script isn't installed — load the `hivemind` skill once, which installs it. |
-| The live guide shows an `(offline: …)` copy | Read the rest of that line — it names the cause. `no HIVEMIND_SERVER_URL / HIVEMIND_TOKEN in this shell` means neither your shell nor the plugin config had them (a plain terminal, or no plugin here); `answered HTTP 404 — that is the server root` means `server_url` names no project, and `/guide` only exists under `/p/<project>/`. `guide_get()` over MCP works in every one of those cases. |
+| The live guide shows an `(offline: …)` copy | Read the rest of that line — it names the cause. `no HIVEMIND_SERVER_URL / HIVEMIND_TOKEN in this shell` means neither your shell nor the plugin config had them (a plain terminal, or no plugin here); `no project … run /hivemind:project` means nothing named a project, which `/guide` needs because it exists only under `/p/<project>/`; `answered HTTP 404` means the project it did name does not exist, is not yours, or was created since the server last started. `guide_get()` over MCP works in every one of those cases. |
 | The CLI says `error: set HIVEMIND_SERVER_URL and HIVEMIND_TOKEN` | The plugin's hook exports them only for Bash calls **inside** a Claude Code session. In a plain terminal, export them yourself. |
-| Plugin not connecting after install | `claude mcp list` shows the resolved URL; check it names the project base you meant. |
+| The CLI says `this needs a project and nothing named one` | The URL is the server root and neither `--project` nor `$HIVEMIND_PROJECT` named a project. |
+| Plugin not connecting after install | `claude mcp list` shows the resolved URL; check it is the server you meant (`http://<host>:8787`, or a `/p/<name>` base). |
 
 ---
 

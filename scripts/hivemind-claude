@@ -28,8 +28,13 @@
 # to the session's shell for `guide.sh` and the `hivemind` CLI. HIVEMIND_SERVER_URL/HIVEMIND_TOKEN
 # below are only defaults for the two prompts — but note that `claude` also INHERITS them from this
 # shell, where they outrank the plugin config, and inherits them un-normalised: exporting a bare
-# `box.local:8787` gives the plugin `http://box.local:8787/p/default` while the session's shell still
-# sees a root URL, whose /guide is not a route. Export the full project URL if you export at all.
+# `box.local:8787` gives the plugin `http://box.local:8787/p/$PROJECT` while the session's shell sees
+# `box.local:8787`, which has no scheme and so is not a usable base at all. Export a full URL if you
+# export at all — either shape works, and a bare host:port does not.
+#
+# This launcher still hands the plugin a PROJECT url (the plugin's own default is the server root
+# since 1.2.0). That keeps `--project` meaningful here and the session working with no pin, at the
+# cost of the root form's refuse-rather-than-default behaviour for a call that names no project.
 set -euo pipefail
 
 PROG=${0##*/}
@@ -62,7 +67,8 @@ environment:
   HIVEMIND_TOKEN        default for --token  skip both prompts entirely)
                         Both are inherited by the session as you set them, where
                         they outrank the plugin's own config — so export a full
-                        http://host:port/p/<project> URL, not a bare host:port.
+                        URL (http://host:port, or .../p/<project>), never a bare
+                        host:port, which has no scheme for the shell tools to use.
 
 examples:
   $PROG                                   # prompt for address and token, then launch

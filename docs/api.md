@@ -80,8 +80,9 @@ Two reads carry extra, unrequested context so recorded dead-ends can't be missed
 
 ## REST
 
-Clients are configured with a **project base URL** — `http://<host>:8787/p/<project>` — and every
-path below is relative to it. `GET /p/<project>/` returns an index of that project's endpoints, so
+Every path below is relative to a **project base** — `http://<host>:8787/p/<project>`. A client
+configured with the server root (the plugin's default) composes that prefix itself from the project
+it was given: `HIVEMIND_PROJECT` / `--project` for the CLI, the session pin for the live guide. `GET /p/<project>/` returns an index of that project's endpoints, so
 a wrong base URL tells you so instead of 404ing — except for a private project, which tells an
 unauthorised caller nothing at all (see below). `GET /` on the **server root** is a different, much
 shorter index: four links and an explicit note that project names are not listed there.
@@ -117,7 +118,7 @@ carries its own credential and enforces the same ACL itself — see below.)
 |---|---|
 | `GET /projects` (server root) | only the projects **you** can reach; needs a server-level identity token (a legacy per-project token gets `401` here and uses its own project base URL instead) |
 | `POST /mcp` (server root) | the **project-neutral** MCP endpoint; every call names its own `project`, and one with no project is refused rather than defaulted. Needs a server-level identity — a legacy per-project token gets `401` here, because it is pinned to a project this URL has not named |
-| `POST /p/<project>/mcp` | the same MCP server under one project's prefix; the URL is the default for a call that passes no `project` |
+| `POST /p/<project>/mcp` | the same MCP server under one project's prefix; the URL is the default for a call that passes no `project` (the pre-1.2.0 plugin shape, still supported) |
 | `GET /guide` · `GET /guide/{section}` | ETag = `guide_version` |
 | `GET /skills[?topic=&limit=&offset=]` · `GET /skills/{id}[?constraint=]` | skill catalog |
 | `GET /tools[?topic=&limit=&offset=]` · `GET /tools/{id}[?constraint=]` | tool catalog |
@@ -131,11 +132,13 @@ carries its own credential and enforces the same ACL itself — see below.)
   `schema apply <pack.json>`, `skill publish|search|get|yank`, `trap record|search|get|status`),
   config from `HIVEMIND_SERVER_URL` + `HIVEMIND_TOKEN` (which the Claude Code plugin's `SessionStart`
   hook exports from its own config for in-session Bash calls; export them yourself anywhere else).
-  It has **no `--project` flag** and never sends one, so it acts in the project its URL names — give
-  it a project base URL, not the server root, where every tool call is refused for naming no project
-  and `/blobs`, `/guide` and the catalogs 404. `hivemind health` is the one exception and not a
-  reassuring one: it resolves `/healthz` from the root either way, and that path needs no token, so
-  it prints `{"ok": true}` for a root URL and for a bogus token alike.
+  The URL may be the server root: `--project <name>` (default `$HIVEMIND_PROJECT`) then names the
+  project, riding as a tool argument on `<root>/mcp` and as the `/p/<name>/` prefix on every REST
+  path. With no project at all a tool call is refused by the server and a REST path by the client,
+  which names the missing flag rather than letting a `404` read as "no such blob". A URL that names
+  a project still works and needs no flag; `--project` overrides it. `hivemind health` is the one
+  command that needs neither, and it is not reassuring: it resolves `/healthz` from the root either
+  way, and that path needs no token, so it prints `{"ok": true}` for a bogus token alike.
 - `hivemind.Client` (Python): `.call(tool, args)`, `.upsert/.get/.link/.search/.schema/.guide`,
   `.artifacts.put/get`, `.tool_publish/get/search`.
   `.call` raises `HivemindError` when the tool refuses (`ok:false`), carrying `error_kind` as

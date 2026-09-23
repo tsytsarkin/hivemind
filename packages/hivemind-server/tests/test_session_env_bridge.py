@@ -1,5 +1,10 @@
 """The SessionStart hook publishes the plugin's config to the session's shell.
 
+Three variables, not two. `HIVEMIND_SERVER_URL` and `HIVEMIND_TOKEN` come from the plugin's own
+config; `HIVEMIND_PROJECT` comes from the session pin, because since plugin 1.2.0 `server_url` is the
+SERVER and the project is no longer in it — and both shell consumers need one to build
+`/p/<project>/guide` and `/p/<project>/blobs`.
+
 Why this exists at all: `skills/hivemind/scripts/guide.sh` and the `hivemind` CLI (`bus listen`
 included — it builds a client before it opens the socket) read `HIVEMIND_SERVER_URL` /
 `HIVEMIND_TOKEN` from the environment. On a plugin-only machine nobody exports them, so the live
@@ -19,6 +24,7 @@ The direction that matters most here is the **override**: an environment variabl
 set must win, so a machine deliberately pointed at another server or token is never quietly
 redirected to the plugin's idea of them.
 """
+import json
 import os
 import pathlib
 import subprocess
@@ -105,3 +111,89 @@ def test_a_missing_env_file_is_survivable(tmp_path):
                        stdin=subprocess.DEVNULL)
     assert r.returncode == 0, r.stderr
     assert "hookSpecificOutput" in r.stdout
+
+
+# ── the third variable: the project, from the session pin ───────────────────────────────────────
+HELPER = REPO / "plugin" / "skills" / "hivemind" / "scripts" / "hivemind-project.py"
+
+
+def pin(tmp_path, project, label=""):
+    """Pin through the real helper, so the file this hook reads is the one production writes."""
+    r = subprocess.run(["python3", str(HELPER), "--pin", project, "--label", label],
+                       capture_output=True, text=True,
+                       env={"HOME": str(tmp_path), "PATH": os.environ["PATH"],
+                            "CLAUDE_CODE_SESSION_ID": "bridge-sess"})
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+def run_hook_pinned(tmp_path, env=None):
+    e = {"CLAUDE_CODE_SESSION_ID": "bridge-sess"}
+    e.update(env or {})
+    return run_hook(tmp_path, e)
+
+
+def test_the_pinned_project_is_published_as_the_project_the_url_no_longer_carries(tmp_path):
+    """The whole point of the change: the URL is the server, so the project rides beside it."""
+    pin(tmp_path, "nik.private")
+    _, written, _ = run_hook_pinned(tmp_path, {
+        "CLAUDE_PLUGIN_OPTION_SERVER_URL": "http://box.example:8787",
+        "CLAUDE_PLUGIN_OPTION_API_TOKEN": "hm_fromplugin"})
+    assert "export HIVEMIND_SERVER_URL=http://box.example:8787" in written, written
+    assert "export HIVEMIND_PROJECT=nik.private" in written, written
+
+
+def test_an_exported_project_wins_like_the_other_two(tmp_path):
+    """Same rule as the URL and the token: the environment is the override, the pin is the fallback.
+    A shell deliberately pointed at another project is never silently redirected to the pinned one."""
+    pin(tmp_path, "nik.private")
+    _, written, _ = run_hook_pinned(tmp_path, {
+        "CLAUDE_PLUGIN_OPTION_SERVER_URL": "http://box.example:8787",
+        "HIVEMIND_PROJECT": "some.other"})
+    assert "nik.private" not in written, f"the pin overrode a real export: {written}"
+
+
+def test_the_project_is_decided_on_its_own(tmp_path):
+    """A plugin that holds no config at all still has a pin to publish, and vice versa."""
+    pin(tmp_path, "nik.private")
+    _, written, _ = run_hook_pinned(tmp_path)
+    assert "export HIVEMIND_PROJECT=nik.private" in written, written
+    assert "HIVEMIND_SERVER_URL" not in written and "HIVEMIND_TOKEN" not in written, written
+
+
+def test_nothing_is_exported_when_nothing_is_pinned(tmp_path):
+    """An unset variable is not a gap: guide.sh then reads the pin file itself, which is the fresher
+    source anyway. Exporting an empty value would instead look like a project named ""."""
+    _, written, _ = run_hook_pinned(tmp_path, {
+        "CLAUDE_PLUGIN_OPTION_SERVER_URL": "http://box.example:8787"})
+    assert "HIVEMIND_PROJECT" not in written, written
+
+
+def test_a_name_the_server_would_refuse_is_never_exported(tmp_path):
+    """This value becomes a PATH SEGMENT in the URL guide.sh builds — `../..` would walk straight
+    out of the project prefix — so the hook holds it to the server's name rule itself.
+
+    Through a STUB helper, not by hand-editing the pin file: the real helper already refuses these
+    names on read, so a pin file alone proves only that the helper works. `$HOME`'s copy is refreshed
+    only when the skill loads and can be older than this hook, which is the case that has to fail
+    closed. (Measured: with the hook's own check removed, a hand-edited pin file still exported
+    nothing — this test passed for the wrong reason until it went through the stub.)
+    """
+    fake = tmp_path / "older-helper.py"
+    for hostile in ("../..", "default/../other", "Default", "a b", "-lead", "x" * 70):
+        fake.write_text("print(%r)\n" % json.dumps({"project": hostile, "label": ""}))
+        _, written, _ = run_hook_pinned(tmp_path, {
+            "HIVEMIND_PIN_HELPER": str(fake),
+            "CLAUDE_PLUGIN_OPTION_SERVER_URL": "http://box.example:8787"})
+        assert "HIVEMIND_PROJECT" not in written, (hostile, written)
+
+
+def test_the_export_and_the_injected_context_can_never_name_different_projects(tmp_path):
+    """One extraction feeds both, so a reader of the shell variable and the model reading the prose
+    are looking at the same project. They came from separate parses once; that is how they could
+    disagree."""
+    pin(tmp_path, "nik.private")
+    out, written, _ = run_hook_pinned(tmp_path, {
+        "CLAUDE_PLUGIN_OPTION_SERVER_URL": "http://box.example:8787"})
+    ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+    assert "export HIVEMIND_PROJECT=nik.private" in written, written
+    assert "project=nik.private" in ctx, ctx

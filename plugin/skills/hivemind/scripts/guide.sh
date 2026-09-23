@@ -2,7 +2,12 @@
 # Fetch a live Hivemind guide section with an ETag cache. NEVER fails the skill:
 # on any error it prints the cached copy (or the bundled offline snapshot) and exits 0 — and says
 # WHICH error, because "server unreachable" was wrong for most of them: a missing token, a 401 and
-# a root-form URL (whose /guide is not a route) all reached this path and all blamed the network.
+# a project nobody pinned all reach this path and all used to blame the network.
+#
+# HIVEMIND_SERVER_URL is the SERVER (plugin 1.2.0 made the root the configured shape) and /guide is
+# mounted only under /p/<project>/, so this script composes the two halves itself: the server from
+# the environment, the project from HIVEMIND_PROJECT or — read at call time, so a mid-session
+# /hivemind:project switch is picked up — the session pin.
 set -u
 SECTION="core"
 while [ $# -gt 0 ]; do
@@ -36,7 +41,8 @@ install_script() {           # $1 = file in this directory, $2 = destination pat
   return 0
 }
 install_script bus-listen.py "${HIVEMIND_LISTENER:-$HOME/.hivemind/bus-listen.py}"
-install_script hivemind-project.py "${HIVEMIND_PIN_HELPER:-$HOME/.hivemind/hivemind-project.py}"
+PIN_HELPER="${HIVEMIND_PIN_HELPER:-$HOME/.hivemind/hivemind-project.py}"
+install_script hivemind-project.py "$PIN_HELPER"
 CACHE_DIR="${HIVEMIND_CACHE_DIR:-$HOME/.cache/hivemind}"
 CACHE="$CACHE_DIR/guide-$SECTION.md"
 ETAG="$CACHE_DIR/guide-$SECTION.etag"
@@ -67,7 +73,35 @@ if [ -z "${HIVEMIND_SERVER_URL:-}" ] || [ -z "${HIVEMIND_TOKEN:-}" ]; then
 fi
 command -v curl >/dev/null 2>&1 || print_fallback "curl is not installed"
 
-URL="${HIVEMIND_SERVER_URL%/}/guide/$SECTION"
+BASE="${HIVEMIND_SERVER_URL%/}"
+case "$BASE" in
+  */p/*)
+    # A URL that already names a project — the pre-1.2.0 shape, or somebody's deliberate export.
+    # Used VERBATIM: HIVEMIND_PROJECT must not silently redirect a URL whose own path named one.
+    URL="$BASE/guide/$SECTION" ;;
+  *)
+    # The server root. HIVEMIND_PROJECT first (the SessionStart hook exports it from the pin), then
+    # the pin file itself — read HERE rather than at session start, because that is what follows a
+    # /hivemind:project switch made mid-session; an exported variable is frozen at the event that
+    # wrote it.
+    PROJECT="${HIVEMIND_PROJECT:-}"
+    if [ -z "$PROJECT" ] && [ -f "$PIN_HELPER" ] && command -v python3 >/dev/null 2>&1; then
+      PROJECT="$(python3 "$PIN_HELPER" --show 2>/dev/null |
+                 sed -n 's/.*"project"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+    fi
+    # Validated before it becomes a path segment: `..`, a slash or a scheme would build a URL
+    # pointing somewhere nobody pinned, and this value arrives from a hand-editable file or from the
+    # environment. The server's own rule, verbatim (projects_meta.NAME_RE).
+    #
+    # LC_ALL=C and grep rather than a `case` glob: measured, a shell bracket range is COLLATED, so
+    # `case Default in *[!a-z0-9._-]*)` does not match under a UTF-8 locale — `D` sorts inside a-z —
+    # and an uppercase name sailed through to the URL. A C-locale regex is the range it looks like.
+    printf '%s' "$PROJECT" | LC_ALL=C grep -q '^[a-z0-9][a-z0-9._-]\{0,63\}$' || PROJECT=""
+    # Named as its own cause: "unreachable" would send the reader after a network fault that is not
+    # there, and the fix is one command rather than anything to do with the server.
+    [ -n "$PROJECT" ] || print_fallback "no project for $BASE — HIVEMIND_PROJECT is unset and no session pin was readable; run /hivemind:project"
+    URL="$BASE/p/$PROJECT/guide/$SECTION" ;;
+esac
 INM=""
 [ -f "$ETAG" ] && INM="$(cat "$ETAG" 2>/dev/null)"
 
@@ -92,13 +126,13 @@ case "$CODE" in
     cat "$CACHE" ;;
   *)
     rm -f "$TMP"
-    # The server answered, so this is not unreachability. A 404 off a URL with no /p/<project> in
-    # it has one cause worth naming: only /mcp is project-neutral, and /guide is mounted under a
-    # project prefix, so the server root can never serve it however valid the token is.
+    # The server answered, so this is not unreachability. Every URL built above carries a
+    # /p/<project> prefix, so the old "that is the server root" reason is now unreachable and is
+    # gone: a 404 here is about the PROJECT, and the server answers the same 404 for one that does
+    # not exist, one this token may not see, and one whose mount has not been built yet.
     WHY="$URL answered HTTP $CODE"
-    case "$CODE:$HIVEMIND_SERVER_URL" in
-      404:*/p/*) ;;
-      404:*) WHY="$WHY — that is the server root; /guide is only mounted under /p/<project>/" ;;
+    case "$CODE" in
+      404) WHY="$WHY — no project answered there: it does not exist, this token cannot see it, or it was created since the server last started (the /p/<name>/ mounts are built at startup)" ;;
     esac
     print_fallback "$WHY" ;;
 esac

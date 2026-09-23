@@ -101,7 +101,7 @@ listen` lives in the separate `hivemind-client` package and needs a third-party 
 dependency on top, so for a plugin-only agent `bus_connect` used to return a command its shell
 could not find. (`hivemind bus listen` also reads `HIVEMIND_SERVER_URL`/`HIVEMIND_TOKEN`, which
 nothing on such a machine exported until the plugin's `SessionStart` hook began publishing its own
-config to the session's shell — plugin 1.1.1. The listener below needs neither: its URL and its
+config to the session's shell — plugin 1.1.1, which 1.2.0 extends with HIVEMIND_PROJECT. The listener below needs neither: its URL and its
 credential are in argv.)
 
 So the plugin carries `skills/hivemind/scripts/bus-listen.py`: a stdlib-only RFC 6455 client, no

@@ -119,7 +119,7 @@ server and install the plugin there — no server or checkout needed on the clie
 hivemind-admin mint-token --user <name> --device laptop          # on the server
 claude plugin marketplace add tsytsarkin/hivemind                # on the new machine
 claude plugin install hivemind@hivemind-marketplace --scope user \
-  --config server_url=http://<server-ip>:8787/p/default --config api_token=hm_…
+  --config server_url=http://<server-ip>:8787 --config api_token=hm_…
 ```
 Or skip installing altogether — `scripts/hivemind-claude` prompts for an address (default
 `localhost:8787`) and a token, loads the plugin for that session only via `--plugin-dir`, and

@@ -8,7 +8,8 @@ The CLI exists for the work that should not travel through a model: moving large
 the agent bus.
 
 ```sh
-export HIVEMIND_SERVER_URL=http://<host>:8787/p/<project>
+export HIVEMIND_SERVER_URL=http://<host>:8787      # the server
+export HIVEMIND_PROJECT=<project>                 # or pass --project <name>
 export HIVEMIND_TOKEN=<token>
 hivemind health
 hivemind artifact put <file>                 # -> a sha256:… digest to attach
@@ -17,11 +18,16 @@ hivemind tool publish <script.py> --id <rdns> --version <semver>
 
 - Requires Python ≥3.9, so it runs on a stock system interpreter with nothing installed.
   Dependencies: `httpx` and `websockets`, both pure-Python wheels.
-- The URL must name a project: the CLI has no `--project` flag and acts in whatever project its URL
-  names.
-- Those two variables are how it is configured (or `--url`/`--token`). Inside a Claude Code session
-  with the Hivemind plugin installed, the plugin's `SessionStart` hook already exports both from the
-  plugin's own config for that session's shell — anything you export yourself takes precedence, which
-  is what you need if the plugin's URL is the server root rather than a project base.
+- The URL is the server. Which project a command acts in comes from `--project <name>` or
+  `$HIVEMIND_PROJECT`, and a command that reaches the graph or the blob store with neither is
+  refused rather than defaulted into a project nobody named. A URL that already names one
+  (`http://<host>:8787/p/<project>`) still works and needs no flag; `--project` overrides it.
+- Those variables are how it is configured (or `--url`/`--token`/`--project`). Inside a Claude Code
+  session with the Hivemind plugin installed, the plugin's `SessionStart` hook already exports the
+  URL and token from the plugin's own config and `HIVEMIND_PROJECT` from the session pin — anything
+  you export yourself takes precedence.
+- `hivemind health` reads `/healthz` off the server root, which takes no token: it answers `{"ok":
+  true}` even with no project and a rejected token, so it is liveness only, never a check that the
+  rest is configured.
 - Source and documentation: <https://github.com/tsytsarkin/hivemind>
 - Apache-2.0.

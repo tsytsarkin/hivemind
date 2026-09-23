@@ -54,19 +54,23 @@ pip install -U pip
 pip install ./packages/hivemind-client                    # deps: httpx + websockets (pure wheels)
 hivemind --help
 ```
-Then point it at your project:
+Then point it at your server and name a project:
 ```sh
-export HIVEMIND_SERVER_URL=http://<lan-or-tailscale-ip>:8787/p/default
+export HIVEMIND_SERVER_URL=http://<lan-or-tailscale-ip>:8787       # the server
+export HIVEMIND_PROJECT=default                                    # or pass --project <name>
 export HIVEMIND_TOKEN=<token from `hivemind-admin mint-token`>
 hivemind health
 ```
-The URL must name a **project** — the CLI has no `--project` flag, and `/blobs` lives under the
-project prefix. `hivemind health` only proves the server is up: it reads `/healthz` off the server
-root, which takes no token, so it answers `{"ok": true}` even for a root URL or a bad token. In a
-Claude Code session with the plugin installed you usually need neither export — the plugin's
-`SessionStart` hook sets both for that session's shell from its own config
+The URL is the **server**; the project comes from `--project` or `HIVEMIND_PROJECT`, and the CLI
+builds `/p/<project>/blobs/…` from the two. A command that reaches the graph or the blob store with
+no project is refused rather than defaulted — the tool call by the server, the REST path by the
+client. A URL that already names a project still works and needs no flag. `hivemind health` only
+proves the server is up: it reads `/healthz` off the server root, which takes no token, so it answers
+`{"ok": true}` even with no project and a bad token. In a Claude Code session with the plugin
+installed you usually need none of these exports — the plugin's `SessionStart` hook sets the URL and
+the token from its own config and the project from the session pin
 ([clients.md](../docs/clients.md#where-the-url-and-the-token-come-from)); export them here for a
-plain terminal, or to override a plugin configured with a root URL.
+plain terminal, or to override.
 
 > Note: `pip install -U pip` first — the pip bundled with an old system Python can fail to
 > resolve modern package metadata. The exact-pin `requirements-*.txt` files assume the same
@@ -89,8 +93,8 @@ run is *not* reachable from other machines. To serve a LAN/Tailscale network set
 
 Being on the LAN is not authorization. Every `/p/<project>` request needs a bearer token with
 exactly two exceptions, both on a **shared** project and neither exposing project data: the endpoint
-index `/p/<name>/` and the health probe `/p/<name>/healthz` answer `200` without one, because clients
-hold only a project base URL and a healthy server must not look dead to them. Everything else there
+index `/p/<name>/` and the health probe `/p/<name>/healthz` answer `200` without one, because a client
+may hold only a project base URL and a healthy server must not look dead to it. Everything else there
 is `401`. A **private** project answers `404` to an unauthenticated caller on every path, its own
 health included — indistinguishable from a project that does not exist. The allowlist is exactly two
 entries and `test_a_shared_projects_open_tails_are_exactly_two` pins both halves of that; widening it
