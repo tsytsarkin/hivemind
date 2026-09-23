@@ -40,6 +40,50 @@ class BlobStore:
         _, hexd = self.parse_digest(digest)
         return self.root / "sha256" / hexd[:2] / hexd[2:4] / hexd
 
+    MIN_PREFIX = 8    # below this, a prefix collides by luck rather than by content
+
+    def resolve_digest(self, maybe_prefix: str) -> str:
+        """Accept a full digest or a unique prefix; refuse anything ambiguous or absent.
+
+        A listing shows a shortened digest, so a prefix is what a caller actually has in hand. The
+        alternative — treating a short digest as a literal that simply matches nothing — made a
+        truncated lookup indistinguishable from a real orphan, and the natural response to a false
+        orphan report is to re-upload the artifact (eight PoCs, all of them attached, were
+        reported orphaned this way).
+
+        A FULL 64-character digest is checked for existence too, and not just waved through: a
+        digest that was never uploaded would otherwise come back as the same silent empty answer
+        the short one did. "Orphaned" means stored and unreferenced — never absent.
+        """
+        raw = maybe_prefix or ""
+        if ":" in raw:
+            algo, raw = raw.split(":", 1)
+            if algo.strip().lower() != "sha256":
+                raise Invalid(f"only sha256 digests are supported, not {algo.strip()!r}")
+        raw = raw.strip().lower()
+        if not raw or not all(c in "0123456789abcdef" for c in raw):
+            raise Invalid(f"not a sha256 digest or hex prefix: {maybe_prefix!r}")
+        if len(raw) > 64:
+            raise Invalid(f"digest {raw!r} is longer than a sha256 (64 hex characters)")
+        if len(raw) < self.MIN_PREFIX:
+            raise Invalid(f"digest prefix {raw!r} is shorter than {self.MIN_PREFIX} characters; "
+                          f"paste more of it — a short prefix matches by luck, not by content")
+        # One query for both cases: for 64 characters LIKE can match at most the primary key, so
+        # this doubles as the existence check the full-length branch needs.
+        with self.db.read() as cur:
+            hits = [r[0] for r in cur.execute(
+                "SELECT digest FROM blob WHERE digest LIKE ? LIMIT 2", (f"sha256:{raw}%",))]
+        if not hits:
+            if len(raw) == 64:
+                raise NotFound(f"no blob sha256:{raw} is stored here — it was never uploaded, or "
+                               f"it has been garbage-collected. This is not the same as orphaned, "
+                               f"which means stored and unreferenced")
+            raise NotFound(f"no stored blob starts with {raw!r}")
+        if len(hits) > 1:
+            raise Invalid(f"digest prefix {raw!r} is ambiguous ({len(hits)}+ matches); "
+                          f"paste the full 64-character digest")
+        return hits[0]
+
     def exists(self, digest: str) -> bool:
         return self.path_for(digest).exists()
 
@@ -145,7 +189,8 @@ class BlobStore:
     # ── references + attach ─────────────────────────────────────────────────────────
     def attach(self, agent_id: str, digest: str, from_version_id: str, *,
                role: str = "attachment", filename: Optional[str] = None) -> dict:
-        self.stat(digest)                                 # ensure the blob exists
+        digest = self.resolve_digest(digest)              # a prefix is what a listing gives you
+        self.stat(digest)                                 # ensure the bytes are on disk too
         with self.db.write(agent_id, "blob_attach") as tx:
             _require_version(tx.cur, from_version_id)
             tx.cur.execute(
@@ -155,11 +200,22 @@ class BlobStore:
         return {"digest": digest, "from_version_id": from_version_id, "role": role}
 
     def refs(self, digest: str) -> list[dict]:
+        """The versions that reference a blob. An empty list means orphaned, and nothing else.
+
+        Routed through resolve_digest so the three inputs that used to produce an identical `[]`
+        — a truncated digest, a malformed one, and a digest that was never stored — each say
+        which one they are. `WHERE digest=?` on a 17-character string is a well-formed query that
+        matches nothing; it reported eight attached PoCs as orphans.
+        """
+        digest = self.resolve_digest(digest)     # raises on malformed, ambiguous or absent
         with self.db.read() as cur:
             return [dict(r) for r in cur.execute(
                 "SELECT from_version_id, role, filename FROM blob_ref WHERE digest=?", (digest,))]
 
     def pin(self, agent_id: str, digest: str, reason: str = "") -> dict:
+        # Same reason as refs(): a pin on a digest nobody stored used to be a foreign-key error
+        # at best and a pin protecting nothing at worst.
+        digest = self.resolve_digest(digest)
         with self.db.write(agent_id, "blob_pin") as tx:
             tx.cur.execute("INSERT INTO blob_pin(digest,reason) VALUES(?,?) "
                            "ON CONFLICT(digest) DO UPDATE SET reason=excluded.reason",
@@ -267,7 +323,11 @@ class BlobStore:
         deleted = 0
         if not dry_run:
             for digest in collected:
-                if self.refs(digest) or digest in mentioned:   # re-check without holding a lock
+                try:                                           # re-check without holding a lock
+                    referenced = bool(self.refs(digest))
+                except NotFound:
+                    continue    # another sweep removed the row under us; nothing left to delete
+                if referenced or digest in mentioned:
                     continue
                 # Delete the row FIRST. If anything still references the blob, the foreign key
                 # rejects it and the bytes stay on disk; unlinking first would orphan a live file

@@ -37,9 +37,12 @@ def attach(mcp) -> None:
     # ── artifact tools (bytes go over REST; these manage references) ────────────────
     @mcp.tool(annotations=RO,
               description="Resolve a stored artifact by digest: returns size, media type, and a "
-                          "resource_link URL to fetch the bytes over REST (not inline).")
+                          "resource_link URL to fetch the bytes over REST (not inline). A unique "
+                          "digest PREFIX (8+ hex characters, as a listing shows) is accepted; an "
+                          "unknown or ambiguous one is an error, never an empty answer.")
     @_envelope
     def artifact_ref(digest: str) -> dict:
+        digest = store.resolve_digest(digest)    # a prefix is what a listing actually gives you
         meta = store.stat(digest)
         href = f"{_base()}/blobs/{digest.replace(':', '/', 1)}"
         return {"digest": digest, "size": meta["size"], "media_type": meta.get("media_type"),
@@ -48,7 +51,8 @@ def attach(mcp) -> None:
     @mcp.tool(annotations=WRITE,
               description="Attach an already-uploaded artifact (by digest) to a node/edge VERSION "
                           "with a role label (e.g. 'binary','crashlog','poc'). Upload bytes first "
-                          "via `PUT /blobs/<algo>/<hex>` (the hivemind CLI does this).")
+                          "via `PUT /blobs/<algo>/<hex>` (the hivemind CLI does this). A unique "
+                          "digest prefix (8+ hex characters) is accepted here too.")
     @_envelope
     def artifact_attach(digest: str, version_id: str, role: str = "attachment",
                         filename: Optional[str] = None, agent: str = "agent") -> dict:
@@ -65,10 +69,19 @@ def attach(mcp) -> None:
         return store.orphans(older_than_hours=older_than_hours, limit=limit)
 
     @mcp.tool(annotations=RO,
-              description="List the node/edge versions that reference an artifact digest.")
+              description="List the node/edge versions that reference an artifact digest. A "
+                          "unique digest PREFIX (8+ hex characters — what a listing displays) is "
+                          "accepted and resolved; the full digest it matched comes back in the "
+                          "reply. An unknown, ambiguous or malformed digest is an ERROR, not an "
+                          "empty result: an empty `refs` list means the blob is stored and "
+                          "orphaned, and nothing else.")
     @_envelope
     def artifact_refs(digest: str) -> dict:
-        return {"digest": digest, "refs": store.refs(digest)}
+        # Resolve first and echo what was matched: a caller that pasted a prefix needs the full
+        # digest back, and a caller whose digest matched nothing needs to be told so rather than
+        # shown the empty list that means 'orphaned'.
+        resolved = store.resolve_digest(digest)
+        return {"digest": resolved, "refs": store.refs(resolved)}
 
     # ── tool-registry tools (implemented in task 6 / registry.py) ───────────────────
     reg.attach_tools(mcp, db, _envelope, RO, WRITE)
