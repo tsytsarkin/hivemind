@@ -152,18 +152,24 @@ recorded in the script's header comment.
 
 `server_url` is used as `${server_url}/mcp`, and **both forms work**:
 
-| Form | What a call with no `project=` does | Blobs and the bus |
-|---|---|---|
-| `http://<ip>:8787/p/default` (recommended) | acts in `default` — the URL named it | work, under that prefix |
-| `http://<ip>:8787` | is **refused**, reads and writes alike | **not reachable** |
+| Form | What a call with no `project=` does | REST (blobs, guide, catalogs) | The bus |
+|---|---|---|---|
+| `http://<ip>:8787/p/default` (recommended) | acts in `default` — the URL named it | works, under that prefix | works |
+| `http://<ip>:8787` | is **refused**, reads and writes alike | **404** — see below | works |
 
 The root form is the project-neutral endpoint: one connection reaches every project the token may
 access, by passing `project=<name>` on each call, and a call that names none is refused rather than
 defaulted. It needs a server-level identity token (a legacy per-project one gets `401`). What it
-does *not* carry is the REST surface: `PUT`/`GET /blobs/…`, the guide and the catalogs all need a
-project the root URL has not named, so the router 404s them there, and the bus WebSocket has no root
-route at all. So point the CLI — whose reason to exist is large artifacts — at a **project base
-URL**, and pick the root only for an MCP-only client that genuinely works across projects.
+does *not* carry is the **REST** surface: `PUT`/`GET /blobs/…`, the guide and the catalogs all need
+a project the root URL has not named, so the router 404s them there.
+
+The bus is the exception, and the reason is worth knowing: `bus_connect` is an MCP call, so it
+works on the root form, and what it hands back is a **project-scoped** `ws://…/p/<name>/bus/ws` URL
+that the listener connects to directly. The socket never goes through the root. So an MCP-only
+client on the root URL can still join the bus — measured, not inferred.
+
+Point the CLI — whose reason to exist is large artifacts — at a **project base URL**, and pick the
+root for an MCP client that genuinely works across projects.
 
 **A brand-new project has no project base URL yet.** The `/p/<name>/` mounts are built once at
 startup, so a project you just created with `project_create` answers `404` on every path under its

@@ -26,7 +26,8 @@ live guide). Meaning is data — shipped as a swappable **domain pack** (`packs/
 | `plugin/` | The Claude Code plugin: MCP config, the self-updating bootstrap skill, a schema-authoring skill, the `/hivemind:project` command and a `SessionStart` hook. |
 | `packs/` | Optional, swappable, **layerable** domain packs (schema + guide). Ships `security-research`, `ios-macos-attack-surface` and `research-workflow`. See [docs/packs.md](docs/packs.md). |
 | `deploy/` | Deploy docs, systemd unit, daily backup + restore, bootstrap + relock scripts. |
-| `docs/` | Data model, API, the agent bus, guide authoring, security notes. |
+| `docs/` | [User guide](docs/user-guide.md), data model, API, the agent bus, guide authoring, security notes. |
+| `scripts/` | `hivemind-claude` — run Claude Code with the plugin for one session, without installing it. |
 
 ## Two versioning axes (core concept)
 
@@ -100,6 +101,13 @@ code required; open a PR under `packs/`, or fork and publish your own.
 
 See [docs/packs.md](docs/packs.md) and the [full docs](docs/) (data model, API, security, guides).
 
+## Using it
+
+**[docs/user-guide.md](docs/user-guide.md)** is the guide for the person at the keyboard: both ways
+to connect (installed, or not), what to do in the first five minutes, how to choose between a
+shared, private or scratch project, and the one rule worth internalising — always pass
+`project=<name>`, because whether omitting it fails depends on which endpoint you are on.
+
 ## Adding machines
 
 **One server, many clients** — don't run a second server per machine (each has its own database,
@@ -124,7 +132,8 @@ scripts/hivemind-claude --url <host>:8787 --resume
 Nothing is written to your permanent configuration, and the token lives in a `0600` file that is
 removed when the session ends. Good for a borrowed machine or a VM.
 
-Full walkthrough incl. secure token transfer: **[docs/clients.md](docs/clients.md)**.
+Both routes, step by step: **[docs/user-guide.md](docs/user-guide.md)**.
+Minting and moving tokens, and revocation: **[docs/clients.md](docs/clients.md)**.
 
 ## Reproducible dependencies
 
