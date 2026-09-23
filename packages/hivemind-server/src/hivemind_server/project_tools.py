@@ -92,7 +92,10 @@ def _existing(name: str, meta, requested: str) -> dict:
     if meta.visibility != requested:
         raise Invalid(f"{name} already exists and is {meta.visibility}, not {requested}. Use it as "
                       f"it is (pass project={name}) or choose another name.")
-    return {"project": name, "existing": True, "visibility": meta.visibility}
+    # `owner` is in the answer because visibility agreeing is not the same as the project being
+    # yours: a private project in your own namespace that somebody else owns and shared with you
+    # passes every guard above, and the caller has to be able to see that it is not theirs.
+    return {"project": name, "existing": True, "visibility": meta.visibility, "owner": meta.owner}
 
 
 def _build(reg, who: Identity, name: str, visibility: str, *, label: str, session: Optional[str],
@@ -160,9 +163,13 @@ def _adopt(reg, who: Identity, name: str, visibility: str) -> dict:
     meta = pm.load(reg.root / name, name)
     if not pm.can_access(who, meta):
         raise Invalid(DENIED)
-    out = _existing(name, meta, visibility)     # same mismatch guard as the registry branch
+    # Published BEFORE the mismatch guard runs, so the refusal's own advice ("use it as it is, pass
+    # project=<name>") is true: ProjectRegistry.get is memory-only and envelope.resolve_project
+    # denies a name it cannot find there, so raising first left an accessible project unusable until
+    # the next restart. Publishing grants nothing — can_access already said this caller may reach it,
+    # and startup discovery would have registered it anyway.
     reg.create(name)
-    return out
+    return _existing(name, meta, visibility)     # same mismatch guard as the registry branch
 
 
 def listing(reg, who: Identity) -> dict:
@@ -269,7 +276,10 @@ def attach(mcp, registry, identities) -> None:
 
     @mcp.tool(annotations=WRITE,
               description="Create a project. visibility='private' (only you, must be named "
-                          "<you>.<suffix>) or 'shared' (everyone). schema='inherit' copies the "
+                          "<you>.<suffix>) or 'shared' (everyone). A DOTTED name is a user's "
+                          "namespace at either visibility, so a shared project is named without a "
+                          "dot (`team`) or with your own prefix (`<you>.team`); `someoneelse.x` is "
+                          "refused. schema='inherit' copies the "
                           "node/edge types of the project you are working in, else of the default "
                           "one (default); 'interview' creates it empty and tells you to run the "
                           "hivemind-schema skill, which asks the user about their work and builds "

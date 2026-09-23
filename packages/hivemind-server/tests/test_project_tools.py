@@ -264,6 +264,51 @@ def test_a_private_create_never_hands_back_a_shared_project(reg, discovered):
     assert reg.get("nik.own").meta.visibility == "private"
 
 
+def test_the_mismatch_refusal_names_a_project_that_really_resolves(reg):
+    """The message tells the caller to "pass project=<name>", so that must work. The disk-only
+    branch used to refuse before publishing the project into the registry, and
+    envelope.resolve_project denies a name ProjectRegistry.get cannot find — so the advice was false
+    until the next restart.
+    """
+    from hivemind_server import envelope
+    from hivemind_server.identity import set_identity
+
+    d = reg.root / "nik.ondisk"
+    d.mkdir()
+    pm.save(d, pm.ProjectMeta(name="nik.ondisk", visibility="shared", owner="nik"))
+    with pytest.raises(Invalid) as e:
+        pt.create(reg, NIK, "nik.ondisk", visibility="private")
+    assert "project=nik.ondisk" in str(e.value)
+    assert reg.get("nik.ondisk") is not None, "the advice needs the project in the registry"
+    # Follow the advice for real. The contextvars are set with reset tokens rather than the public
+    # setter, which has no getter to restore from — a stray require_auth would leak into later tests.
+    tok_reg = envelope._REGISTRY.set(reg)
+    tok_auth = envelope._REQUIRE_AUTH.set(True)
+    set_identity(NIK)
+    try:
+        assert envelope.resolve_project("nik.ondisk", requires=True).name == "nik.ondisk"
+    finally:
+        set_identity(None)
+        envelope._REQUIRE_AUTH.reset(tok_auth)
+        envelope._REGISTRY.reset(tok_reg)
+
+
+def test_the_existing_answer_says_who_owns_it(reg):
+    """Visibility agreeing is not the same as the project being yours: a private project in your own
+    namespace that ana owns and shared with you (a pre-rule squat, or a hand-made directory) passes
+    every guard, so the answer has to show whose it is."""
+    d = reg.root / "nik.notmine"
+    d.mkdir()
+    pm.save(d, pm.ProjectMeta(name="nik.notmine", visibility="private", owner="ana",
+                              members=["nik"]))
+    disk = pt.create(reg, NIK, "nik.notmine", visibility="private")          # the _adopt branch
+    assert (disk["existing"], disk["visibility"], disk["owner"]) == (True, "private", "ana")
+    again = pt.create(reg, NIK, "nik.notmine", visibility="private")         # the registry branch
+    assert again["owner"] == "ana"
+    assert pt.create(reg, NIK, "nik.mineown", visibility="private")["existing"] is False
+    assert pt.create(reg, NIK, "nik.mineown", visibility="private")["owner"] == "nik"
+
+
 def test_the_refusal_is_the_exact_sentence_the_middleware_uses():
     """Two literals in two files. The moment they drift, "no such project" and "not yours" become
     distinguishable again and the existence oracle this plan spent a task removing is back."""
@@ -462,6 +507,11 @@ async def test_the_lifecycle_tools_work_over_mcp(served):
             "no injected project argument, or it would shadow the one these tools mean"
         assert "project" in tools["project_info"]["inputSchema"]["required"], \
             "and theirs is their own, mandatory argument"
+        # The description has to state the rules it enforces; an agent that learns the dotted-name
+        # rule only from a refusal spends a round trip on it, and these consumers read literally.
+        desc = tools["project_create"]["description"]
+        assert "<you>.<suffix>" in desc and "dot" in desc.lower()
+        assert "ASK THE USER" in desc
 
         out = _call(await _post(c, "", nik, "tools/call", {
             "name": "project_create",
