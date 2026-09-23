@@ -105,6 +105,40 @@ claude mcp list
 `api_token` is declared `sensitive`, so Claude Code stores it in the OS keychain rather than in a
 settings file.
 
+### Without installing anything: `scripts/hivemind-claude`
+
+Installing writes the plugin and its token into the machine's permanent configuration. On a
+borrowed machine, a throwaway VM, or a box you are only debugging from, that is the wrong
+footprint. The launcher loads the plugin for **one session** instead:
+
+```sh
+scripts/hivemind-claude                      # prompts for address (default localhost:8787) + token
+scripts/hivemind-claude --url <host>:8787 --project scratch
+scripts/hivemind-claude --resume             # anything it does not recognise goes to claude
+scripts/hivemind-claude -- --model sonnet    # or be explicit with --
+```
+
+It needs the repo (or just a copy of `plugin/` plus the script) and nothing else — no install, no
+marketplace, no change to your settings. `HIVEMIND_SERVER_URL` and `HIVEMIND_TOKEN` are used as the
+defaults, so setting both makes it non-interactive. A bare `host:port` is expanded to
+`http://host:port/p/<project>`; a URL that already names a project is left alone.
+
+Before starting, it checks `/healthz` and then fetches `/guide` with your token, so a wrong address
+or a rejected token is a line of output rather than a silent MCP failure ten minutes later. `--dry-run`
+prints what it would run — the token redacted — and `--no-check` skips the preflight.
+
+How the token reaches the plugin, since there is no install step to collect it: the script writes
+`pluginConfigs.hivemind.options` to a temporary settings file and passes `--plugin-dir` and
+`--settings`. Three things about that are measured rather than assumed, and
+`packages/hivemind-server/tests/test_launcher.py` pins them:
+
+- the `pluginConfigs` key for a `--plugin-dir` plugin is the **bare** plugin name. The
+  `name@marketplace` forms are accepted and then ignored, so a rename there would silently fall
+  back to the `userConfig` defaults instead of erroring;
+- `--settings` **merges**, so your model, theme and other plugins are unaffected;
+- the token is written only to a `0600` file inside a `0700` directory, removed when the session
+  ends, and never placed on the `claude` command line — `ps` is world-readable.
+
 ### `server_url`: a project base, or the server root
 
 `server_url` is used as `${server_url}/mcp`, and **both forms work**:

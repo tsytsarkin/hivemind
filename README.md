@@ -113,6 +113,17 @@ claude plugin marketplace add tsytsarkin/hivemind                # on the new ma
 claude plugin install hivemind@hivemind-marketplace --scope user \
   --config server_url=http://<server-ip>:8787/p/default --config api_token=hm_…
 ```
+Or skip installing altogether — `scripts/hivemind-claude` prompts for an address (default
+`localhost:8787`) and a token, loads the plugin for that session only via `--plugin-dir`, and
+forwards any other arguments to `claude`:
+
+```sh
+scripts/hivemind-claude                      # prompt, then launch
+scripts/hivemind-claude --url <host>:8787 --resume
+```
+Nothing is written to your permanent configuration, and the token lives in a `0600` file that is
+removed when the session ends. Good for a borrowed machine or a VM.
+
 Full walkthrough incl. secure token transfer: **[docs/clients.md](docs/clients.md)**.
 
 ## Reproducible dependencies
