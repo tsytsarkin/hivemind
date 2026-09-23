@@ -12,6 +12,10 @@ metadata:
 
 # Designing a Hivemind schema
 
+> If you find yourself drafting type names before the user has answered a single question, stop.
+> Inventing a vocabulary before you understand the work is the exact failure this skill exists to
+> prevent, and it is the one mistake the engine will not let you take back.
+
 A project's node and edge **types are its meaning** — the engine itself knows only mechanics. A
 project with no types cannot be written to at all: every write is validated against a type, and an
 unknown type is refused. A project with the *wrong* types is worse, because schema changes are
@@ -24,10 +28,6 @@ half of it.
 costs ten minutes to prevent here, and afterwards there is no remedy — nothing deletes a type, so
 the best anyone can do later is stop using one and leave it in the schema forever. That is what
 this skill is for.
-
-> If you find yourself drafting type names before the user has answered a single question, stop.
-> Inventing a vocabulary before you understand the work is the exact failure this skill exists to
-> prevent, and it is the one mistake the engine will not let you take back.
 
 ## Do not propose a schema before you understand the work
 
@@ -94,7 +94,8 @@ field.**
 Before proposing anything:
 
 - `schema_get()` — if the project inherited or already holds types, extend them rather than
-  duplicate. `graph_types()` shows which of them actually carry data.
+  duplicate. `graph_types()` shows which of the **node** types actually carry data; there is no
+  edge-type census, so read the edge types out of `schema_get` itself.
 - `guide_get()` — a deployment's guide sections carry its own naming conventions; follow them
   instead of inventing a parallel set.
 - Read every proposed name against the existing ones for near-synonyms. `schema_propose` refuses a

@@ -22,8 +22,10 @@ Defaults matter: an edge type you declare with no traits is `versioned`, `direct
 ## Gotchas worth knowing before you choose
 
 - **Bulk loads skip validation.** `graph_bulk_load` does not validate edge props against the type's
-  schema, does not check `src_types`/`dst_types`, and does not run the `acyclic` guard. Only
-  `graph_link` does all three. A bulk type is a fast import path, not a checked one.
+  schema, does not check `src_types`/`dst_types`, does not run the `acyclic` guard, and does not
+  canonicalise a `symmetric` type's orientation — so A→B and B→A in the same import stay two rows,
+  where `graph_link` would have folded them into one. Only `graph_link` does all four. A bulk type
+  is a fast import path, not a checked one.
 - **A bulk edge's identity includes its `source_tag`**, so the same pair imported under two tags is
   two rows — that is what makes re-importing one tool's output replace only its own edges.
 - **Node types have a `parent` field that the engine records and never applies.** Props are
@@ -31,8 +33,10 @@ Defaults matter: an edge type you declare with no traits is `versioned`, `direct
   needs. Do not model inheritance you are relying on.
 - **Additive-only is a floor, not a lock.** Adding an optional property, dropping a `required`
   entry or widening an enum is accepted; adding a required field, removing a property, narrowing an
-  enum or tightening `additionalProperties` is refused as destructive. Nothing deletes a type at
-  all — which is why an unnecessary type is forever.
+  enum or tightening `additionalProperties` is refused as destructive — *unless the caller passes*
+  `force`, which `schema_apply` exposes and `schema_propose` does not, and which invalidates data
+  already in the graph. Nothing deletes a type at all, with or without `force` — which is why an
+  unnecessary type is forever.
 
 ## The two axes are not edges
 
