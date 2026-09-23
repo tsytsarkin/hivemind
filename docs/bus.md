@@ -68,11 +68,11 @@ From a shell: `hivemind bus connect <label>` · `listen --url …` · `peers` ·
 |---|---|---|
 | Presence | the socket | A peer is connected exactly while its WebSocket is open. No TTL, no reaper — the two things that made v1 lose messages. |
 | State | in memory | Bus traffic is ephemeral; persisting chat meant provenance rows outliving the messages they described. A restart is a clean slate. |
-| Offline messages | bounded queue (100 / 1 h) | A message sent during a brief disconnect survives the reconnect. Bounded, because unbounded retention is how the blob store reached 94 GB. The reference implementation drops these entirely. |
+| Offline messages | bounded queue (100 frames / 1 h / 8 MiB of body) | A message sent during a brief disconnect survives the reconnect. Bounded on all three axes, because unbounded retention is how the blob store reached 94 GB. The byte bound counts **real UTF-8 bytes**, not `len()` on a `str` — see *The byte caps are bytes* below. The reference implementation drops these entirely. |
 | Long bodies | kept locally in full (4 MiB, one rotation); also retained ~1 h server-side | A notification is clipped near 512 characters, so the wire frame cannot be the only copy. The listener appends every frame to a local JSONL inbox and the line points at both routes; `bus_message(id)` returns the rest from the server. The local file is bounded for the same reason the offline queue is: an append-only file nobody prunes is how the blob store reached 94 GB. |
 | Identity | stable per label | A reconnect reuses the same peer, so queued mail is not orphaned and peers keep addressing the same name. |
 | Displaced sockets | closed with 4409 | A second connection for one identity supersedes the first instead of leaving a ghost peer "online" forever. |
-| Caller-supplied names | truncated to `LABEL_CAP` (64) at the send path | The queue and the recent buffer both account for what they hold as `sum(len(frame["body"]))`, so any *other* caller-controlled field is footprint those caps cannot see. `from` is the `agent` argument of `bus_send`; before it was normalised, an authenticated peer could park ~200 MB per offline peer and ~1 GB in the recent buffer with both caps reading it as zero. Truncated rather than refused, matching the ticket mints and the renderers' `_label()`. |
+| Caller-supplied names | truncated to `LABEL_CAP` (64) at the send path | The queue and the recent buffer account for the **body** of each frame and nothing else, so any *other* caller-controlled field is footprint those caps cannot see. `from` is the `agent` argument of `bus_send`; before it was normalised, an authenticated peer could park ~200 MB per offline peer and ~1 GB in the recent buffer with both caps reading it as zero. What the cap leaves uncounted afterwards is 3 fields x 64 code points x 4 bytes = 768 B per frame, i.e. at most 75 KiB on top of `QUEUE_BYTES` per peer and 375 KiB on top of `RECENT_BYTES` — under a thousandth of either. Truncated rather than refused, matching the ticket mints and the renderers' `_label()`. |
 | Auth | reusable signed listen key (7 d), or a single-use 60 s ticket | The listener connects by URL and cannot set an `Authorization` header, so an authenticated MCP call mints a ticket. The long-lived bearer token never lands in a URL, a shell history or an access log. The default is the **listen key**: HMAC-signed over (label, expiry) with a per-project secret in `<project>/bus_secret`, so verification needs no table and a key keeps working across a server restart — a listener reconnects on its own instead of dying until a human notices. It grants only "join the bus as this label", expires, and is revoked wholesale by deleting the secret. |
 
 ## The listener is shipped by the plugin, not the CLI
@@ -203,8 +203,48 @@ broadcast — through `_norm_label`: stripped, truncated to `LABEL_CAP` (64), fa
 This is a memory bound rather than cosmetics, and the tests pin the consequence rather than the
 size: `test_the_offline_queue_counts_what_it_actually_holds` and
 `test_the_recent_buffer_counts_what_it_actually_holds` assert that what those buffers physically
-hold is within the byte caps that exist to bound them. Both fail without the normalisation, which
-is the point — the accounting bug is what a refactor would silently reintroduce, not the cap.
+hold is within the byte caps that exist to bound them, *plus* the 768 B/frame the name fields are
+allowed to add on top (stated as arithmetic in the test, so it moves with `LABEL_CAP`). Both fail
+without the normalisation, which is the point — the accounting bug is what a refactor would
+silently reintroduce, not the cap.
+
+## The byte caps are bytes
+
+`RECENT_BYTES` (32 MiB) and `QUEUE_BYTES` (8 MiB) are counted in **real UTF-8 bytes**:
+`_body_bytes` encodes, because `len()` on a `str` counts *code points* and UTF-8 spends up to four
+bytes on one. They used to be counted in code points, which made both 4x looser than their own
+names. Measured, driving the largest bodies the server accepts — `MAX_BODY` code points of
+U+1F600, 1.00 MiB of UTF-8 each:
+
+| | accounted | really held | after the fix |
+|---|---|---|---|
+| recent buffer | 32.00 MiB (`RECENT_BYTES`) | **128.00 MiB** | 32.00 MiB — 32 frames |
+| offline queue | 8.00 MiB (`QUEUE_BYTES`) | **32.00 MiB** | 8.00 MiB — 8 frames |
+
+The fix is the **unit**, not the values. `len(x.encode())` is exact for every body; dividing the
+constants by four would be exact only at the 4-byte extreme, and would cut ASCII retention
+four-fold (128 recent frames to 32) for traffic that already fitted. Nothing changes for an ASCII
+body: `len()` and `len(x.encode())` agree, and the same 128 frames are retained.
+
+Two things this does *not* change:
+
+* **`MAX_BODY` stays a code-point cap**, and says so in its refusal. The listener's inbox ceiling
+  above is derived from exactly that — a body of astral characters is legal and `ensure_ascii`
+  writes each as a surrogate pair — and `test_both_halves_agree_on_the_cap` pins the derivation.
+  It bounds one frame; the two above bound a buffer.
+* **The per-frame byte count is cached** on the stored frame as `_b` rather than recomputed inside
+  the trim loop. The loop runs on every send, and re-encoding the whole retained set each time
+  would be up to 32 MiB of encoding per message on a path whose budget is milliseconds. `_b` and
+  `_t` are stripped by `_public()` on every egress — by prefix, so a third internal field cannot
+  be added later and silently shipped on the wire.
+
+`test_the_byte_caps_are_counted_in_bytes` is what holds this, and it is deliberately the only test
+here that drives a multi-byte **body**: the two named above park their payload in the *name* field
+and leave the body empty, so nothing in the suite exercised the trim loop with a body whose byte
+count differs from its length. Reverting `_body_bytes` to `len()` fails it with
+"the recent buffer physically holds 128.00 MiB against a 32.00 MiB cap"; reverting the test's own
+measurement at the same time makes it pass again, which is exactly the self-agreeing assertion
+this section exists to describe.
 
 Truncation, not rejection: a send that failed because a caller passed a long agent name would be a
 worse outcome than one recorded under a shortened name, and refusing would be a behaviour change

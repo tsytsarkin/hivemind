@@ -118,14 +118,33 @@ async def test_offline_queue_is_bounded(hub):
 
 
 def _caller_bytes(frame):
-    """The bytes of a frame that a caller chose. Everything else is fixed-width envelope."""
-    return sum(len(frame.get(k) or "") for k in ("body", "from", "to", "room"))
+    """The BYTES of a frame that a caller chose. Everything else is fixed-width envelope.
+
+    `.encode()`, not `len()`. This helper used to measure in the same unit as the accounting it
+    was checking — code points — so the assertions below read "the accounting agrees with itself"
+    while docs/bus.md claimed they pinned what the buffers *physically hold*. Measured before the
+    fix, with MAX_BODY-sized bodies of U+1F600: the recent buffer accounted 32.00 MiB and held
+    128.00 MiB, an offline queue accounted 8.00 MiB and held 32.00 MiB.
+    """
+    return sum(len((frame.get(k) or "").encode()) for k in ("body", "from", "to", "room"))
+
+
+def _body_bytes(frames):
+    """Just the bodies, in bytes — the part the caps actually account for."""
+    return sum(len((f.get("body") or "").encode()) for f in frames)
+
+
+# What the name fields can add on top of a body cap: three caller-chosen fields at LABEL_CAP code
+# points, up to 4 UTF-8 bytes each. Stated as arithmetic rather than a slack constant, so it moves
+# if LABEL_CAP does — and so the assertions below are exactly true rather than approximately so.
+def _label_allowance(frames):
+    return len(frames) * 3 * bus_ws.LABEL_CAP * 4
 
 
 @pytest.mark.anyio
 async def test_the_offline_queue_counts_what_it_actually_holds(hub):
-    """The byte cap counts BODIES — `sum(len(f["body"]))` — so any other caller-controlled field
-    is footprint it cannot see.
+    """The byte cap counts BODIES — and nothing else — so any other caller-controlled field is
+    footprint it cannot see.
 
     Measured before the send path normalised them: `from` comes straight from the `agent`
     argument of bus_send and nothing capped it, so MAX_QUEUE frames with an empty body and a
@@ -138,10 +157,53 @@ async def test_the_offline_queue_counts_what_it_actually_holds(hub):
         await hub.send(payload, "receiver", "")
         await hub.broadcast(payload, "", room=payload)
 
+    # Two assertions, each exactly true, because together they are the whole rule. The caps
+    # account for BODIES, so that is what QUEUE_BYTES bounds; the name fields are bounded
+    # separately by LABEL_CAP, and stating their allowance is what makes the first assertion a
+    # measurement of reality rather than a restatement of the accounting.
+    assert _body_bytes(b.queue) <= bus_ws.QUEUE_BYTES, \
+        "the bodies the queue holds must be within the byte cap that accounts for them"
     held = sum(_caller_bytes(f) for f in b.queue)
-    assert held <= bus_ws.QUEUE_BYTES, \
-        "the queue must hold no more than its own accounting believes it holds"
+    assert held <= bus_ws.QUEUE_BYTES + _label_allowance(b.queue), \
+        f"the queue physically holds {held} caller-chosen bytes, past the cap plus the names"
     assert all(len(f["from"]) <= bus_ws.LABEL_CAP for f in b.queue), "the name is a name"
+
+
+@pytest.mark.anyio
+async def test_the_byte_caps_are_counted_in_bytes(hub):
+    """The caps are named in bytes, stated in bytes by docs/bus.md, and were counted in CODE
+    POINTS — so both were 4x looser than they read.
+
+    This is the test the two above could not be: they park their payload in the NAME field and
+    leave the body empty, so nothing in the suite ever drove a multi-byte BODY through the trim
+    loop. Measured before the fix, with the largest bodies the server accepts (MAX_BODY code
+    points of U+1F600, 1.00 MiB each):
+
+        recent buffer:  accounted 32.00 MiB (RECENT_BYTES)  real UTF-8  128.00 MiB
+        offline queue:  accounted  8.00 MiB (QUEUE_BYTES)   real UTF-8   32.00 MiB
+
+    The fix is the unit, not the values: `len(x.encode())` is exact for every body, where dividing
+    the constants by four would be exact only at the 4-byte extreme and would cut ASCII retention
+    four-fold for nothing.
+    """
+    b, _, _ = connect(hub, "receiver")                      # never attached, so everything queues
+    body = "\U0001F600" * bus_ws.MAX_BODY                   # the largest body send() accepts
+    assert len(body.encode()) == 4 * bus_ws.MAX_BODY, "the premise: 4 UTF-8 bytes per code point"
+    for _ in range(bus_ws.RECENT_MAX + 20):                 # past both byte ceilings
+        await hub.send("s", "receiver", body)
+
+    recent = _body_bytes(hub._recent)
+    assert recent <= bus_ws.RECENT_BYTES, (
+        f"the recent buffer physically holds {recent / 1048576:.2f} MiB against a "
+        f"{bus_ws.RECENT_BYTES / 1048576:.2f} MiB cap")
+    queued = _body_bytes(b.queue)
+    assert queued <= bus_ws.QUEUE_BYTES, (
+        f"the offline queue physically holds {queued / 1048576:.2f} MiB against a "
+        f"{bus_ws.QUEUE_BYTES / 1048576:.2f} MiB cap")
+    # Not vacuous: trimming to nothing would satisfy both assertions above.
+    assert len(hub._recent) >= 1 and len(b.queue) >= 1, "trimming must not empty the buffers"
+    assert recent > bus_ws.RECENT_BYTES // 2 and queued > bus_ws.QUEUE_BYTES // 2, \
+        "the buffers must still be doing their job — this must not pass by holding almost nothing"
 
 
 @pytest.mark.anyio
@@ -155,9 +217,11 @@ async def test_the_recent_buffer_counts_what_it_actually_holds(hub):
     for _ in range(40):                                     # 40 Mi, against a 32 MiB ceiling
         await hub.send(payload, "receiver", "")
 
+    assert _body_bytes(hub._recent) <= bus_ws.RECENT_BYTES, \
+        "the bodies the recent buffer holds must be within the byte cap that accounts for them"
     held = sum(_caller_bytes(f) for f in hub._recent)
-    assert held <= bus_ws.RECENT_BYTES, \
-        "the recent buffer must hold no more than its own accounting believes it holds"
+    assert held <= bus_ws.RECENT_BYTES + _label_allowance(hub._recent), \
+        f"the recent buffer physically holds {held} caller-chosen bytes, past cap plus names"
 
 
 @pytest.mark.anyio
@@ -433,9 +497,9 @@ async def test_retention_is_bounded_by_bytes_not_just_count(hub):
     for _ in range(400):
         await hub.send("s", "offline-peer", big)
 
-    recent_bytes = sum(len(f.get("body") or "") for f in hub._recent)
+    recent_bytes = _body_bytes(hub._recent)
     assert recent_bytes <= bus_ws.RECENT_BYTES, f"recent held {recent_bytes} bytes"
-    queue_bytes = sum(len(f.get("body") or "") for f in b.queue)
+    queue_bytes = _body_bytes(b.queue)
     assert queue_bytes <= bus_ws.QUEUE_BYTES, f"queue held {queue_bytes} bytes"
     assert len(b.queue) >= 1, "trimming must not empty the queue entirely"
 

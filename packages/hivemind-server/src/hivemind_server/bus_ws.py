@@ -19,8 +19,10 @@ Design notes that are load-bearing:
   definition; anything durable belongs in the graph. Keeping it in memory also means a restart is
   a clean slate rather than a pile of dead sessions.
 * **The offline queue is bounded.** A message sent while a peer is briefly disconnected is held
-  and delivered on reconnect, but only `MAX_QUEUE` of them and only for `QUEUE_TTL`. Unbounded
-  retention is how the blob store quietly grew to 94 GB; a chat buffer gets a hard cap.
+  and delivered on reconnect, but only `MAX_QUEUE` of them, only for `QUEUE_TTL`, and only up to
+  `QUEUE_BYTES` of body — counted in real UTF-8 bytes, because `len()` on a `str` counts code
+  points and UTF-8 spends up to four bytes on one. Unbounded retention is how the blob store
+  quietly grew to 94 GB; a chat buffer gets a hard cap, and a cap has to be in the unit it names.
 * **Auth is a ticket, not a header.** The listener connects over a URL, not an authenticated HTTP
   call, so an authenticated MCP call mints a single-use, short-lived ticket and the long-lived
   bearer token never appears in a URL, a shell history or an access log.
@@ -68,13 +70,13 @@ PROTOCOL_VERSION = 1
 TICKET_TTL = 60.0            # seconds a mint stays redeemable; single use
 MAX_QUEUE = 100              # per-peer offline messages
 QUEUE_TTL = 3600.0           # seconds an undelivered message is worth keeping
-MAX_BODY = 256 * 1024        # per-frame body cap; big payloads belong in the blob store
+MAX_BODY = 256 * 1024        # per-frame body cap, in CODE POINTS; big payloads belong in blobs
 LABEL_CAP = 64               # agent labels and room names; see _norm_label for why it is a cap
 HEARTBEAT = 30.0             # server->client ping interval
 RECENT_MAX = 500             # recent frames kept retrievable by id
 RECENT_TTL = 3600.0          # ...and for how long
-RECENT_BYTES = 32 * 1024 * 1024   # ...and never more than this in total
-QUEUE_BYTES = 8 * 1024 * 1024     # per-peer offline queue byte ceiling
+RECENT_BYTES = 32 * 1024 * 1024   # ...and never more than this in total, in REAL UTF-8 bytes
+QUEUE_BYTES = 8 * 1024 * 1024     # per-peer offline queue ceiling, also real UTF-8 bytes
 LISTEN_KEY_TTL = 7 * 86400   # a listener's own credential: long-lived, reusable, revocable
 
 # The user recorded in a credential minted with no identity in scope (auth off, or a test driving
@@ -175,14 +177,45 @@ def _norm_label(value: Optional[str], default: str) -> str:
     its message delivered under a shortened one rather than refused — which is what `_label()` in
     the renderers already does downstream, and what the ticket mints have always done here.
 
-    This is a memory bound, not cosmetics. `_remember` and the offline queue both account for the
-    bytes they hold as `sum(len(frame["body"]))`, so any OTHER caller-controlled field on a frame
-    is footprint those caps cannot see: before this was applied at the send path, an authenticated
-    peer could park ~200 MB per offline peer in `from`, and ~1 GB in the recent buffer, with both
-    caps reading it as zero. An identifier longer than this is not a name, it is a payload wearing
-    one.
+    This is a memory bound, not cosmetics. `_remember` and the offline queue account for the BODY
+    of each frame and nothing else, so any OTHER caller-controlled field is footprint those caps
+    cannot see: before this was applied at the send path, an authenticated peer could park ~200 MB
+    per offline peer in `from`, and ~1 GB in the recent buffer, with both caps reading it as zero.
+    An identifier longer than this is not a name, it is a payload wearing one.
+
+    What remains uncounted after this cap is bounded and small, and the number is worth writing
+    down because the caps are stated in bytes: three caller-chosen name fields (`from`, `to`,
+    `room`) at LABEL_CAP code points, up to 4 UTF-8 bytes each, is at most 768 B per frame — so
+    768 x MAX_QUEUE = 75 KiB on top of QUEUE_BYTES per offline peer, and 768 x RECENT_MAX = 375 KiB
+    on top of RECENT_BYTES process-wide. Under a thousandth of either cap, against the megabytes
+    this cap removed.
     """
     return (value or default).strip()[:LABEL_CAP] or default
+
+
+def _body_bytes(frame: dict) -> int:
+    """What a frame's body will actually occupy, in BYTES.
+
+    `len()` on a `str` counts code points, and UTF-8 spends up to four bytes on one of them. The
+    two memory caps here used to account in that unit, so both were 4x looser than their own names:
+    measured with the largest bodies the server accepts (MAX_BODY code points of U+1F600), the
+    recent buffer accounted 32.00 MiB while physically holding 128.00 MiB, and an offline queue
+    accounted 8.00 MiB while holding 32.00 MiB.
+
+    Computed once per frame and cached as `_b`, not recomputed inside the trim loop: the loop runs
+    on every send and encoding the whole retained set each time would mean up to 32 MiB of encoding
+    per message, on a path whose budget is milliseconds.
+    """
+    return len((frame.get("body") or "").encode())
+
+
+def _public(frame: dict) -> dict:
+    """A stored frame as it goes back out, without the internal bookkeeping.
+
+    `_t` (arrival time) and `_b` (body bytes) are ours. Stripped by PREFIX rather than by name so
+    that a third one cannot be added later and silently shipped on the wire.
+    """
+    return {k: v for k, v in frame.items() if not k.startswith("_")}
 
 
 class BusError(Exception):
@@ -246,14 +279,14 @@ class Hub:
         self._recent: deque = deque(maxlen=RECENT_MAX)
 
     def _remember(self, frame: dict) -> None:
-        # Bounding the COUNT is not enough: 500 frames at the 256 KB body cap is 128 MB held for
-        # an hour. Trim by bytes as well, oldest first, so retention cannot become a slow leak.
+        # Bounding the COUNT is not enough: RECENT_MAX frames at the MAX_BODY cap is 500 MiB held
+        # for an hour (500 x 256 Ki code points x 4 bytes). Trim by bytes as well, oldest first, so
+        # retention cannot become a slow leak. Real bytes, not code points — see _body_bytes.
         with self._guard:
-            self._recent.append({**frame, "_t": _now()})
-            total = sum(len(f.get("body") or "") for f in self._recent)
+            self._recent.append({**frame, "_t": _now(), "_b": _body_bytes(frame)})
+            total = sum(f["_b"] for f in self._recent)
             while total > RECENT_BYTES and len(self._recent) > 1:
-                dropped = self._recent.popleft()
-                total -= len(dropped.get("body") or "")
+                total -= self._recent.popleft()["_b"]
 
     def message(self, message_id: str) -> dict:
         """Full text of a recent message, by id — the out-of-band half of a clipped notification."""
@@ -262,7 +295,7 @@ class Hub:
             if f.get("_t", 0) < cutoff:
                 break
             if f.get("id") == message_id or str(f.get("id", ""))[-8:] == message_id:
-                out = {k: v for k, v in f.items() if k != "_t"}
+                out = _public(f)
                 out["chars"] = len(out.get("body") or "")
                 return out
         raise BusError(
@@ -427,7 +460,7 @@ class Hub:
             except Exception:
                 pass
         cutoff = _now() - QUEUE_TTL
-        drained = [m for m in peer.queue if m.get("_t", 0) >= cutoff]
+        drained = [_public(m) for m in peer.queue if m.get("_t", 0) >= cutoff]
         peer.queue.clear()
         return drained
 
@@ -470,18 +503,22 @@ class Hub:
                 # message survives a reconnect rather than evaporating.
                 peer.ws = None
                 peer.connected_at = None
-        peer.queue.append({**frame, "_t": _now()})
-        # Same reasoning per peer: maxlen caps the count, this caps the footprint.
-        qbytes = sum(len(f.get("body") or "") for f in peer.queue)
+        peer.queue.append({**frame, "_t": _now(), "_b": _body_bytes(frame)})
+        # Same reasoning per peer: maxlen caps the count, this caps the footprint — in bytes.
+        qbytes = sum(f["_b"] for f in peer.queue)
         while qbytes > QUEUE_BYTES and len(peer.queue) > 1:
-            qbytes -= len(peer.queue.popleft().get("body") or "")
+            qbytes -= peer.queue.popleft()["_b"]
         return False
 
     async def send(self, sender: str, to: str, body: str,
                    kind: str = "message", data: Optional[dict] = None) -> dict:
         sender = _norm_label(sender, "agent")
+        # Code points, deliberately, and the message says so: docs/bus.md derives the listener's
+        # inbox ceiling from `MAX_BODY` being a code-point cap (a body of astral characters is
+        # legal and `ensure_ascii` writes each as a surrogate pair). The BUFFER caps below are the
+        # ones that count real bytes; this one bounds one frame, not a buffer.
         if len(body) > MAX_BODY:
-            raise BusError(f"body is {len(body)} bytes; cap is {MAX_BODY}. "
+            raise BusError(f"body is {len(body)} characters; cap is {MAX_BODY}. "
                            f"Upload large payloads as an artifact and send the digest.")
         target = self.peer(to)
         if target is None:
@@ -505,7 +542,7 @@ class Hub:
         sender = _norm_label(sender, "agent")
         room = _norm_label(room, "lobby")
         if len(body) > MAX_BODY:
-            raise BusError(f"body is {len(body)} bytes; cap is {MAX_BODY}")
+            raise BusError(f"body is {len(body)} characters; cap is {MAX_BODY}")
         frame = {"v": PROTOCOL_VERSION, "type": "broadcast", "id": ulid(), "from": sender,
                  "to": None, "room": room, "body": body, "ts": _iso()}
         if data:
@@ -687,7 +724,8 @@ async def websocket_endpoint(ws: Any, project_name: str, project_dir: Path, *,
         "queued": len(queued), "ts": _iso(),
     }, ensure_ascii=False))
     for m in queued:
-        m.pop("_t", None)
+        # Already public: Hub.attach strips the internal fields, so there is exactly one place
+        # that has to know which they are.
         await ws.send_text(json.dumps(m, ensure_ascii=False))
     await hub.presence(peer, "connected")
 
