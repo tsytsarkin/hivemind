@@ -175,7 +175,20 @@ server. The checklist fast-forwards `main` first and then verifies that the remo
 Use `deploy/restart.sh`. Killing and immediately relaunching loses the bind race: the new
 instance exits with *address already in use* while a wrapper process lingers, so `pgrep` reports
 "running" while nothing is listening. The script kills by pattern **and** by port, waits for the
-port to free, then verifies the server is actually serving.
+port to free, then verifies the server is actually serving. **It exits non-zero if the server did
+not come up**, so a scripted deploy cannot report success after a failed start.
+
+It runs on Linux and on macOS, picking whichever tool the host has at each step — `ss` or `lsof` or
+`netstat` to see the port, `setsid` or `nohup` to detach — and it takes the port and the data
+directory from `hivemind.env` rather than assuming 8787. Two knobs:
+
+| variable | default | what it does |
+| --- | --- | --- |
+| `HIVEMIND_HOME` | the checkout this script lives in | which checkout to restart |
+| `HIVEMIND_START_TIMEOUT` | `30` | seconds to wait for `/healthz`; raise it for a cold `uv run` |
+
+`packages/hivemind-server/tests/test_restart.py` covers both install layouts and all three silent
+failures. It stubs out `pkill`, so running the suite on the deploy host cannot kill the live server.
 
 ## Maintenance (daily, automatic)
 
