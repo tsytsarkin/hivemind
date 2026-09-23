@@ -234,9 +234,13 @@ fi
 set -- --plugin-dir "$PLUGIN_DIR" --settings "$SETTINGS" ${CLAUDE_ARGS+"${CLAUDE_ARGS[@]}"}
 
 if [ "$DRY" = 1 ]; then
+    # GNU first, BSD second, and the order is the whole point: `-f` means "mode format" to BSD stat
+    # but "filesystem status" to GNU, which SUCCEEDS on Linux and prints the filesystem instead of
+    # the mode. BSD has no `-c` at all, so it fails cleanly and falls through. Reversed, this
+    # reported `File: "…" ID: … Type: btrfs` as the mode on every Linux host.
     printf 'server_url=%s\nplugin_dir=%s\nsettings_mode=%s\n' \
         "$URL" "$PLUGIN_DIR" \
-        "$(stat -f '%OLp' "$SETTINGS" 2>/dev/null || stat -c '%a' "$SETTINGS")"
+        "$(stat -c '%a' "$SETTINGS" 2>/dev/null || stat -f '%OLp' "$SETTINGS")"
     printf 'argv=claude'; printf ' %s' "$@"; printf '\n'
     printf 'settings=%s' "$(settings_json '***')"
     exit 0

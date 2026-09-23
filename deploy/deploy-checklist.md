@@ -239,10 +239,16 @@ curl -s "$ROOT/"                     # index; must NOT list project names
 > `deploy/hivemind.env` survives the reset — it is gitignored, so it is untracked and `--hard`
 > leaves it alone. Nothing else hand-edited in that checkout does, which is what 1d is for.
 
-> `restart.sh` launches with `uv run --package hivemind-server` via `setsid`, so it survives SSH
-> logout but **not a reboot**. The systemd unit is still not installed, and `bootstrap-labbox.sh`
-> does not install it either — it only prints the commands. `bash deploy/install-service.sh` is what
-> renders [hivemind.service](hivemind.service) for this user and repo path and enables it;
+> `restart.sh` prefers `uv run --package hivemind-server` and falls back to
+> `./.venv/bin/hivemind-server` when uv is not installed; it detaches with `setsid` on Linux and
+> `nohup` on macOS. Either way it survives SSH logout but **not a reboot**. It now exits non-zero
+> when the server does not come up, so `ssh "$BOX" '… && bash deploy/restart.sh' && echo deployed`
+> no longer prints "deployed" after a failed start — before that fix its exit status was not
+> evidence, so verify a deploy with `/healthz` and a real call either way.
+>
+> The systemd unit is still **not installed**, and `bootstrap-labbox.sh` does not install it either
+> — it only prints the commands. `bash deploy/install-service.sh` is what renders
+> [hivemind.service](hivemind.service) for this user and repo path and enables it;
 > `systemctl is-enabled hivemind` is the check, and `not-found` means there is no unit at all.
 
 ## Step 2: tighten the modes on files that already exist
