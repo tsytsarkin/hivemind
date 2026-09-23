@@ -605,7 +605,22 @@ async def test_the_handshake_checks_the_acl_on_the_ticket_path_too(tmp_path):
 async def test_a_live_socket_is_dropped_when_its_user_loses_access(tmp_path, monkeypatch):
     """A handshake-only check would in practice never fire: the listener opens one socket and
     holds it for days, reconnecting only on a blip. So the socket has to be re-checked while it
-    is open, not just when it is opened."""
+    is open, not just when it is opened.
+
+    Both the revoke trigger and the escape hatch hang off `send_text`, and that is the whole point
+    of this test's shape. They used to hang off `receive_text`, which made this the only guard on
+    the re-check AND a test that could not fail: disabling the re-check leaves `recheck_at` frozen
+    in the past, the wait below it collapses to `asyncio.wait_for(ws.receive_text(), timeout=0.0)`,
+    and on this interpreter that cancels the coroutine before it is ever entered (measured: 0
+    entries in 50 trials, against 50/50 at timeout=0.01). So `receive_text` never ran, the revoke
+    never happened, the `waits > 20` bail-out was dead code, and the loop span at 100% CPU
+    appending a ping per iteration — three such processes were found running 2h15m each at
+    7.0/7.1/10.6 GB RSS.
+
+    `send_text` is on the other side of that timeout and is reached on every iteration, so a
+    counter there bounds the loop under any mutation of the check. `pytest-timeout` in
+    pyproject.toml is the backstop for the next one of these, not the fix for this one.
+    """
     import asyncio as _asyncio
 
     monkeypatch.setattr(bus_ws, "HEARTBEAT", 0.01)
@@ -614,18 +629,29 @@ async def test_a_live_socket_is_dropped_when_its_user_loses_access(tmp_path, mon
     k = hub.mint_listen_key("ana-box", user="ana")["listen_key"]
 
     class SilentWS(HandshakeWS):
-        waits = 0
+        sends = 0
+        runaway = False
+
+        async def send_text(self, text):
+            await super().send_text(text)
+            self.sends += 1
+            if self.sends == 1:
+                # The hello frame: accepted, attached, socket up. Revoking here is "revoked while
+                # the socket is open" and needs nothing from the read side to happen first.
+                _revoke(proj_dir)
+            if self.sends > 50:
+                # ~50 heartbeat pings at HEARTBEAT=0.01 is half a second; the unmutated path sends
+                # two frames in total. Raising lands in the loop's `except Exception: break`, so
+                # the endpoint returns and the assertions below run instead of the suite wedging.
+                self.runaway = True
+                raise ConnectionError("the ACL re-check never fired; the heartbeat loop span")
 
         async def receive_text(self):
-            self.waits += 1
-            if self.waits == 1:
-                _revoke(proj_dir)          # revoked while the socket is up
-            if self.waits > 20:
-                raise ConnectionError("recheck never fired")
             await _asyncio.sleep(3600)     # a listener sends nothing; the heartbeat wakes the loop
 
     ws = SilentWS(key=k)
     await bus_ws.websocket_endpoint(ws, "nik.private", proj_dir)
+    assert ws.runaway is False, "the re-check never fired; the loop span until the hatch stopped it"
     assert ws.accepted is True, "it was authorised when it connected"
     assert ws.closed_with == 4401, "a revoked user's open socket must be closed, not left feeding"
 
@@ -714,20 +740,30 @@ async def test_a_socket_dropped_for_unreadable_metadata_says_so_in_the_log(tmp_p
     k = hub.mint_listen_key("ana-box", user="ana")["listen_key"]
 
     class SilentWS(HandshakeWS):
-        waits = 0
+        # Trigger and escape hatch both on send_text, for the reason spelled out in
+        # test_a_live_socket_is_dropped_when_its_user_loses_access: with the re-check disabled the
+        # wait collapses to timeout=0.0 and receive_text is cancelled before it is entered, so a
+        # counter there never advances and this test hangs instead of failing.
+        sends = 0
+        runaway = False
+
+        async def send_text(self, text):
+            await super().send_text(text)
+            self.sends += 1
+            if self.sends == 1:
+                (proj_dir / "project.json").write_text("{ truncated mid-write")
+            if self.sends > 50:
+                self.runaway = True
+                raise ConnectionError("the ACL re-check never fired; the heartbeat loop span")
 
         async def receive_text(self):
-            self.waits += 1
-            if self.waits == 1:
-                (proj_dir / "project.json").write_text("{ truncated mid-write")
-            if self.waits > 20:
-                raise ConnectionError("recheck never fired")
             await _asyncio.sleep(3600)
 
     ws = SilentWS(key=k)
     with caplog.at_level(logging.WARNING, logger="hivemind_server.bus_ws"):
         await bus_ws.websocket_endpoint(ws, "nik.private", proj_dir)
 
+    assert ws.runaway is False, "the re-check never fired; the loop span until the hatch stopped it"
     assert ws.closed_with == 4401, "unreadable metadata must still fail closed"
     assert any("project.json" in r.getMessage() and "ana-box" in r.getMessage()
                for r in caplog.records), \
