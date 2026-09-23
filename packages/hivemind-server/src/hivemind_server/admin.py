@@ -93,11 +93,16 @@ def _legacy_author_sql(row_tx: str) -> str:
     either: a tx row that is missing, or whose label is NULL or blank, collapses to the same
     `legacy:unknown` that every read path already shows for a NULL column.
 
-    The double-prefix this command prevents is a second RUN turning `legacy:cli` into
-    `legacy:legacy:cli`, and that is the `WHERE ... IS NULL` filter's doing rather than this
-    expression's. A row whose original agent LABEL was itself `legacy:cli` does come out
-    `legacy:legacy:cli`, deliberately: the prefix marks what the server can vouch for, and a label
-    claiming to be legacy was still only a string its writer chose.
+    A second run cannot double-prefix `legacy:cli` into `legacy:legacy:cli`, and the `WHERE ...
+    IS NULL` filter is not what stops it: the value is a function of `tx.agent_id` and the row's
+    own tx column alone, never of the column being written, so recomputing it over a row that is
+    already filled yields a byte-identical string. That holds with or without the filter. What
+    the filter protects is the values this command did NOT write — real usernames, and the live
+    `legacy:unknown` literal.
+
+    A row whose original agent LABEL was itself `legacy:cli` does come out `legacy:legacy:cli`,
+    deliberately: the prefix marks what the server can vouch for, and a label claiming to be
+    legacy was still only a string its writer chose.
     """
     return ("'legacy:' || COALESCE((SELECT CASE WHEN TRIM(COALESCE(agent_id,''), "
             # One-argument TRIM strips U+0020 and nothing else, so a label of "\t\n" came out as
@@ -157,8 +162,9 @@ def backfill_authors(db, *, dry_run: bool = True, batch: int = _BATCH) -> dict:
     Only a NULL column is in scope. NULL means "written before the column existed", while the
     literal `legacy:unknown` means a write that DID happen since, by no principal the server could
     resolve; those two have to stay distinguishable, so every non-NULL value is left exactly as it
-    was — real usernames included. That is also what makes a second run a no-op instead of
-    `legacy:legacy:cli`.
+    was — real usernames included. A second run is a no-op for a separate reason and not this
+    one: the value it would write is computed from the row's own tx rather than from the column,
+    so re-running could only ever write the same string back (see _legacy_author_sql).
     """
     counts = {}
     for table, column, tx_column in _AUTHOR_COLUMNS:
