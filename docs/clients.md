@@ -110,6 +110,42 @@ claude mcp list
 `api_token` is declared `sensitive`, so Claude Code stores it in the OS keychain rather than in a
 settings file.
 
+### Where the URL and the token come from
+
+The MCP connection is the easy half: `.mcp.json` interpolates `${user_config.server_url}` and
+`${user_config.api_token}` straight into it, and reads no environment variable at all. But
+`plugin/skills/hivemind/scripts/guide.sh` (the live guide), the `hivemind` CLI and `hivemind bus
+listen` are *shell* consumers, and they read `HIVEMIND_SERVER_URL` / `HIVEMIND_TOKEN` from the
+environment. There are three sources, in precedence order:
+
+1. **An export already in the shell wins.** The environment is the override, so a machine
+   deliberately pointed at a different server or token is never quietly redirected.
+2. **Otherwise the plugin's own config supplies it.** Claude Code hands a `SessionStart` hook the
+   user config as `CLAUDE_PLUGIN_OPTION_SERVER_URL` / `CLAUDE_PLUGIN_OPTION_API_TOKEN`, and
+   `$CLAUDE_ENV_FILE` is a shell fragment that later **Bash tool calls in that session source**.
+   `plugin/hooks/session-start` appends an `export` line for whichever of the two is unset. Each
+   variable is decided on its own, so a shell that exports only the URL still gets the token.
+   Neither `CLAUDE_PLUGIN_OPTION_*` nor `$CLAUDE_ENV_FILE` is visible to a plain Bash tool call —
+   measured — which is why a script cannot read the plugin config itself and the hook has to be the
+   bridge. That file holds a bearer token and Claude Code creates it `0644`, so the hook `chmod
+   600`s it *before* writing. `packages/hivemind-server/tests/test_session_env_bridge.py` pins all
+   of that, including the override direction and the mode.
+3. **Nothing.** Then those tools degrade: `guide.sh` prints its cached or bundled copy (naming the
+   reason), and the CLI exits with *"set HIVEMIND_SERVER_URL and HIVEMIND_TOKEN"*.
+
+**Do not over-read the bridge.** It fires on SessionStart, so it covers Bash tool calls made later
+in that session and nothing else. A plain terminal, a cron job, a machine where the plugin is not
+installed, and a session that started before the plugin was updated all still need a manual
+`export` — as does any use of the CLI outside Claude Code, which is most of them. MCP tool calls are
+unaffected in every one of those cases.
+
+The URL's shape follows from the same mechanism: the hook exports whatever `server_url` holds, so a
+**root-form** URL is exported too, and the two shell consumers cannot use one. `guide.sh` builds
+`<url>/guide/<section>`, which off the root is not a route — the server answers `404 {"error": "no
+such endpoint; only /mcp is project-neutral…"}` before it ever looks at the token, and the helper
+prints a cached copy with `answered HTTP 404 — that is the server root` on its first line. The CLI
+hits the same wall on `/blobs`. Keep the project-path form unless you have a reason not to.
+
 ### Without installing anything: `scripts/hivemind-claude`
 
 Installing writes the plugin and its token into the machine's permanent configuration. On a
@@ -148,6 +184,15 @@ the trap that removes the token file cannot fire after one). The third is Claude
 behaviour, which no test in this repo can hold — it was measured against Claude Code 2.1.280 and is
 recorded in the script's header comment.
 
+So the launcher's token arrives exactly the way an installed plugin's does, and from there the
+`SessionStart` hook exports it to the session's shell like any other plugin config — the launcher
+itself exports nothing. One asymmetry to know: its own `HIVEMIND_SERVER_URL` only pre-fills the
+prompt, and `claude` inherits that variable from your shell **verbatim**, before the launcher's
+normalisation. Give it a bare `box.local:8787` and the plugin gets
+`http://box.local:8787/p/default` while the session's Bash calls still see `box.local:8787` — a root
+URL, which the hook will not override and `guide.sh` cannot use. Export the full project URL, or let
+the prompt collect it.
+
 ### `server_url`: a project base, or the server root
 
 `server_url` is used as `${server_url}/mcp`, and **both forms work**:
@@ -161,7 +206,8 @@ The root form is the project-neutral endpoint: one connection reaches every proj
 access, by passing `project=<name>` on each call, and a call that names none is refused rather than
 defaulted. It needs a server-level identity token (a legacy per-project one gets `401`). What it
 does *not* carry is the **REST** surface: `PUT`/`GET /blobs/…`, the guide and the catalogs all need
-a project the root URL has not named, so the router 404s them there.
+a project the root URL has not named, so the router 404s them there — and because the `SessionStart`
+hook exports this field verbatim, that 404 is what the session's own live-guide helper gets too.
 
 The bus is the exception, and the reason is worth knowing: `bus_connect` is an MCP call, so it
 works on the root form, and what it hands back is a **project-scoped** `ws://…/p/<name>/bus/ws` URL
@@ -182,7 +228,11 @@ A project base URL is not a restriction either way: `project=<name>` on an indiv
 it, so `/p/default/mcp` still reaches `nik.private` if the token may. That is a property of the tool
 layer — the MCP client and `hivemind.Client.call(tool, {"project": …})`. **The `hivemind` CLI has no
 `--project` flag** and never sends one, so it acts in whatever project its URL names, and against the
-server root every one of its commands is refused. Give the CLI a project base URL.
+server root every command that reaches the graph or the blob store fails — the tool calls refused for
+naming no project, `/blobs` and `/guide` 404. `hivemind health` is the exception, and a misleading
+one: it resolves `/healthz` from the root whatever the base URL is, and that path takes no token, so
+it answers `{"ok": true}` for a root URL and for a rejected token both. Give the CLI a project base
+URL, and check it with something that authenticates.
 
 ### Picking the project for a session
 
@@ -207,4 +257,7 @@ export HIVEMIND_TOKEN=hm_…
 hivemind health
 ```
 The same URL rule as above applies: bytes move over `/p/<project>/blobs/…`, so the CLI wants a
-project base URL, not the server root.
+project base URL, not the server root. The two exports are what a **plain terminal** needs; inside a
+Claude Code session with the plugin configured, the `SessionStart` hook has already set both from the
+plugin's config for your Bash calls (see [Where the URL and the token come from](#where-the-url-and-the-token-come-from))
+— export them there only to override, which a root-form `server_url` makes necessary.

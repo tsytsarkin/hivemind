@@ -22,6 +22,14 @@
 #
 # The token is written only to a 0600 file inside a 0700 private directory, removed on exit, and is
 # never passed on the `claude` command line, where `ps` would show it to every user on the host.
+#
+# This script exports nothing. The values it collects reach the plugin as `pluginConfigs`, exactly as
+# an installed plugin's do, and from there the plugin's own SessionStart hook is what publishes them
+# to the session's shell for `guide.sh` and the `hivemind` CLI. HIVEMIND_SERVER_URL/HIVEMIND_TOKEN
+# below are only defaults for the two prompts — but note that `claude` also INHERITS them from this
+# shell, where they outrank the plugin config, and inherits them un-normalised: exporting a bare
+# `box.local:8787` gives the plugin `http://box.local:8787/p/default` while the session's shell still
+# sees a root URL, whose /guide is not a route. Export the full project URL if you export at all.
 set -euo pipefail
 
 PROG=${0##*/}
@@ -52,6 +60,9 @@ So "$PROG --resume" and "$PROG -- --model sonnet" both work.
 environment:
   HIVEMIND_SERVER_URL   default for --url   (set both this and HIVEMIND_TOKEN to
   HIVEMIND_TOKEN        default for --token  skip both prompts entirely)
+                        Both are inherited by the session as you set them, where
+                        they outrank the plugin's own config — so export a full
+                        http://host:port/p/<project> URL, not a bare host:port.
 
 examples:
   $PROG                                   # prompt for address and token, then launch

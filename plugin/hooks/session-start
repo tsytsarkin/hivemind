@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# Re-inject this session's Hivemind project pin. Registered for startup, clear, compact, resume and
-# fork — the compact matcher is the point: a compaction rebuilds the context and drops the choice,
-# and a dropped choice plus a defaulted write is how private work reaches the shared graph.
+# Two jobs: re-inject this session's Hivemind project pin (below), and publish the plugin's own
+# server URL and token to the session's shell (the second block). Registered for startup, clear,
+# compact, resume and fork — the compact matcher is the point: a compaction rebuilds the context
+# and drops the choice, and a dropped choice plus a defaulted write is how private work reaches
+# the shared graph.
 #
 # `resume` and `fork` are in the list because the pin is keyed by session id and the helper's own
 # docstring says the pin exists so that a `--resume` lands back on the same project. A resume
@@ -9,10 +11,11 @@
 # FORK does not, so without it a forked session gets nothing at all while the pin file sits there
 # unread — the one case where the file says one thing and the context says nothing.
 #
-# Local state only. Listing projects needs the API token, and project_list over MCP is already
-# authenticated, so this hook never talks to the server. Every path below prints valid JSON (or
-# nothing at all) and exits 0: a SessionStart hook that failed would delay or break a session over
-# a pin that is only an aide-memoire.
+# Local state only, in both jobs: listing projects needs the API token and project_list over MCP is
+# already authenticated, so this hook never talks to the server — it only reads a pin file and
+# appends to an env file. Every path below prints valid JSON (or nothing at all) and exits 0: a
+# SessionStart hook that failed would delay or break a session over a pin that is only an
+# aide-memoire.
 set -u
 
 # $HOME first. The skill installs the helper there (skills/hivemind/scripts/guide.sh), and that is
@@ -24,10 +27,12 @@ HELPER="${HIVEMIND_PIN_HELPER:-${HOME:-}/.hivemind/hivemind-project.py}"
 [ -f "$HELPER" ] || HELPER="${CLAUDE_PLUGIN_ROOT:-}/skills/hivemind/scripts/hivemind-project.py"
 
 # ── publish the plugin's own config to the session's shell, without overriding a real export ─────
-# Why this exists: `skills/hivemind/scripts/guide.sh`, the bus listener command and the `hivemind`
-# CLI all read HIVEMIND_SERVER_URL / HIVEMIND_TOKEN from the environment, and on a plugin-only
-# machine nobody exports them — so the live guide silently fell back to its cached copy while the
-# plugin held the URL and the token all along.
+# Why this exists: `skills/hivemind/scripts/guide.sh`, the `hivemind` CLI (including `bus listen`,
+# which builds a client before it connects) read HIVEMIND_SERVER_URL / HIVEMIND_TOKEN from the
+# environment, and on a plugin-only machine nobody exports them — so the live guide silently fell
+# back to its cached copy while the plugin held the URL and the token all along. NOT the listener
+# `bus_connect` hands back: that one carries its ws URL and its listen key in argv and needs neither
+# variable.
 #
 # Measured against Claude Code 2.1.x, because none of it is guessable: a SessionStart hook is given
 # the user config as CLAUDE_PLUGIN_OPTION_<KEY-UPPERCASED>, and `$CLAUDE_ENV_FILE` is a shell

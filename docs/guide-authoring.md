@@ -5,7 +5,10 @@ The **guide** is how domain knowledge reaches agents at runtime (the on-disk ski
 - Sections are markdown in `guide_section`, budget-capped (~5k tokens). `core` is seeded with the
   framework guide. Add domain sections via a pack's `guide/*.md` or `hivemind-admin set-guide`.
 - Agents call `guide_get()` / `guide_get(section)`; the skill also dynamic-injects `core` via
-  `guide.sh` (best-effort, never fails).
+  `guide.sh` (best-effort, never fails). That helper is the one guide path that needs the
+  **environment** — a token and a *project-base* URL, since `/guide` is mounted under `/p/<project>/`
+  — which the plugin's `SessionStart` hook supplies from its own config; when it cannot, the helper
+  prints a cached or bundled copy and names why. `guide_get` over MCP needs none of it.
 - **Firewall**: agents `guide_propose`; an operator `hivemind-admin merge-guide <id>` publishes it,
   bumping `guide_version`. Keep instructions out of the agent-writable graph.
 

@@ -59,6 +59,36 @@ def test_guide_sh_live_then_304(server, tmp_path):
     assert "unchanged" in r2.stdout            # ETag 304 hit
 
 
+def test_guide_sh_says_why_it_fell_back(server, tmp_path):
+    """The fallback line names the cause, because it is almost never unreachability.
+
+    Both cases below reach the same `print_fallback`, and both used to print "server unreachable":
+    a shell with no credentials (which a plugin-only machine had until the SessionStart hook began
+    exporting the plugin's config) and a **root-form** server URL, whose `/guide/<section>` is not a
+    route at all — only `/mcp` is project-neutral. Sending someone to check the network for either
+    is what this pins against.
+    """
+    base, tok, _ = server
+    root = base.rsplit("/p/", 1)[0]
+    env = dict(os.environ, HOME=str(tmp_path / "home"),
+               HIVEMIND_CACHE_DIR=str(tmp_path / "cache"))
+    env.pop("HIVEMIND_SERVER_URL", None)
+    env.pop("HIVEMIND_TOKEN", None)
+
+    r = subprocess.run(["bash", str(PLUGIN_GUIDE_SH)], capture_output=True, text=True, env=env)
+    first = r.stdout.splitlines()[0]
+    assert r.returncode == 0 and "HIVEMIND_SERVER_URL" in first, first
+    assert "unreachable" not in first, first
+
+    r2 = subprocess.run(["bash", str(PLUGIN_GUIDE_SH)], capture_output=True, text=True,
+                        env=dict(env, HIVEMIND_SERVER_URL=root, HIVEMIND_TOKEN=tok,
+                                 HIVEMIND_CACHE_DIR=str(tmp_path / "cache2")))
+    line = r2.stdout.splitlines()[0]
+    assert r2.returncode == 0, r2.stderr
+    assert "404" in line and "/p/<project>" in line, line
+    assert "unreachable" not in line, line
+
+
 def test_guide_propose_merge_firewall(server):
     base, tok, proj = server
     c = Client(base, tok, agent="agentA")

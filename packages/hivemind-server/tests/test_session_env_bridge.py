@@ -1,9 +1,10 @@
 """The SessionStart hook publishes the plugin's config to the session's shell.
 
-Why this exists at all: `skills/hivemind/scripts/guide.sh`, the bus listener command and the
-`hivemind` CLI all read `HIVEMIND_SERVER_URL` / `HIVEMIND_TOKEN` from the environment. On a
-plugin-only machine nobody exports them, so the live guide fell back to its cached copy while the
-plugin held the URL and the token the whole time.
+Why this exists at all: `skills/hivemind/scripts/guide.sh` and the `hivemind` CLI (`bus listen`
+included — it builds a client before it opens the socket) read `HIVEMIND_SERVER_URL` /
+`HIVEMIND_TOKEN` from the environment. On a plugin-only machine nobody exports them, so the live
+guide fell back to its cached copy while the plugin held the URL and the token the whole time. The
+listener `bus_connect` returns is not one of them: its URL and listen key are in argv.
 
 Two facts about Claude Code make the hook the only possible bridge, and both were measured rather
 than assumed (2.1.x):

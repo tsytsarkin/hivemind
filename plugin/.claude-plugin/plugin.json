@@ -21,13 +21,13 @@
     "server_url": {
       "type": "string",
       "title": "Hivemind server URL",
-      "description": "Your Hivemind server, used as ${server_url}/mcp. Two forms work. WITH a project path (http://<host>:8787/p/default) the URL names the project, so calls that omit project= act in it. WITHOUT one (http://<host>:8787) every call must pass project= \u2014 reads as well as writes \u2014 which is stricter and needs a token minted with --user. Keep the project path unless you have a reason not to: the SessionStart hook exports this value as HIVEMIND_SERVER_URL for the session, and the live guide and the hivemind CLI both need a project base to reach /guide and /blobs.",
+      "description": "Your Hivemind server, used as ${server_url}/mcp. Two forms work. WITH a project path (http://<host>:8787/p/default) the URL names the project, so calls that omit project= act in it. WITHOUT one (http://<host>:8787) every call must pass project= \u2014 reads as well as writes \u2014 which is stricter and needs a token minted with --user. Keep the project path unless you have a reason not to: the SessionStart hook exports this value as HIVEMIND_SERVER_URL for the session's Bash calls (one you exported yourself wins), and the live guide and the hivemind CLI both need a project base to reach /guide and /blobs — off the root they get a 404.",
       "default": "http://127.0.0.1:8787/p/default"
     },
     "api_token": {
       "type": "string",
       "title": "API token",
-      "description": "Bearer token from `hivemind-admin mint-token --user <you> --device <machine>`, kept in the server's identities.json. It names a person, which is what puts an author on your writes, and it reaches every project that person may access. An older per-project token (the server's tokens.json) still works, but only with the project-path form of the URL above.",
+      "description": "Bearer token from `hivemind-admin mint-token --user <you> --device <machine>`, kept in the server's identities.json. It names a person, which is what puts an author on your writes, and it reaches every project that person may access. An older per-project token (the server's tokens.json) still works, but only with the project-path form of the URL above. The SessionStart hook also exports it as HIVEMIND_TOKEN for the session's Bash calls, so the live guide and the hivemind CLI can authenticate; that file is narrowed to 0600 before the token is written to it.",
       "sensitive": true
     }
   }

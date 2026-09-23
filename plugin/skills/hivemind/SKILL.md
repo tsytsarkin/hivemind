@@ -219,8 +219,14 @@ Fetched now (may be newer than this file; if the fetch failed you'll see an offl
 
 !`${CLAUDE_SKILL_DIR}/scripts/guide.sh --section core`
 
-The line above is best-effort (it needs `HIVEMIND_SERVER_URL` + `HIVEMIND_TOKEN` in the env). The
-**reliable** way to read the live guide and this project's schema is the MCP tools themselves:
+The line above is best-effort. It reads `HIVEMIND_SERVER_URL` + `HIVEMIND_TOKEN` from the shell,
+and the plugin's `SessionStart` hook exports both from the plugin's own config for this session's
+Bash calls (a value you exported yourself always wins), so on a plugin-only machine it normally
+works. It still falls back to a cached or bundled copy when the plugin holds neither value, and when
+the configured URL is the **server root** — `/guide` is mounted only under `/p/<project>/`, so a root
+URL answers 404. The fallback line names which happened; don't read it as the server being down. The
+**reliable** way to read the live guide and this project's schema is the MCP tools themselves, which
+use none of that environment:
 
 - `guide_get()` — index of guide sections; `guide_get(section="core")` — the framework guide;
   other sections carry this deployment's **domain** vocabulary.
@@ -287,7 +293,11 @@ Every other tool also takes `project=<name>`: see **Every call names a project**
 
 Big binaries and tool bytes go over REST, not through the model. Install once:
 `uv tool install --from <repo>/packages/hivemind-client hivemind` (or the pip/venv path in
-DEPLOY.md). Point it at your project: `export HIVEMIND_SERVER_URL=… HIVEMIND_TOKEN=…`.
+DEPLOY.md). It reads `HIVEMIND_SERVER_URL` + `HIVEMIND_TOKEN` from the environment, which the
+plugin's `SessionStart` hook has already set for your Bash calls from the plugin's own config — so
+in a configured session the CLI just runs. Export them yourself in a plain terminal, on a machine
+without the plugin, or when the plugin's URL is the server root: the CLI has **no `--project`
+flag** and needs a project base (`http://<host>:8787/p/<name>`) to reach `/blobs`.
 
 - `hivemind artifact put <file>` → prints a `sha256:…` digest to attach.
 - `hivemind artifact get <digest> <dest>` → downloads + verifies.

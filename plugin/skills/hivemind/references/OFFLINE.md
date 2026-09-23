@@ -1,8 +1,12 @@
 # Hivemind — framework guide (offline snapshot)
 
-> This is a bundled fallback used only when the live server can't be reached. The authoritative
-> version is `guide_get(section="core")` on the server. Domain-specific vocabulary is NOT here —
-> it lives in the server's guide sections + schema.
+> This is a bundled fallback, printed whenever the live fetch returned no section — and not only
+> when the server is down. The line above it names the actual cause: no `HIVEMIND_SERVER_URL` /
+> `HIVEMIND_TOKEN` in that shell, or a status the server answered with (a `401` for a rejected
+> token; a `404` when the URL is the server root, because `/guide` is mounted only under
+> `/p/<project>/`). The authoritative version is `guide_get(section="core")` — an **MCP** call, which
+> reads none of that environment and works in every one of those cases. Domain-specific vocabulary
+> is NOT here — it lives in the server's guide sections + schema.
 
 Hivemind is a shared, versioned knowledge graph + artifact store + tool registry. It is
 domain-agnostic: node and edge **types are defined at runtime in the schema**. Before writing,

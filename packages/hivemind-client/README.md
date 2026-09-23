@@ -19,5 +19,9 @@ hivemind tool publish <script.py> --id <rdns> --version <semver>
   Dependencies: `httpx` and `websockets`, both pure-Python wheels.
 - The URL must name a project: the CLI has no `--project` flag and acts in whatever project its URL
   names.
+- Those two variables are how it is configured (or `--url`/`--token`). Inside a Claude Code session
+  with the Hivemind plugin installed, the plugin's `SessionStart` hook already exports both from the
+  plugin's own config for that session's shell — anything you export yourself takes precedence, which
+  is what you need if the plugin's URL is the server root rather than a project base.
 - Source and documentation: <https://github.com/tsytsarkin/hivemind>
 - Apache-2.0.

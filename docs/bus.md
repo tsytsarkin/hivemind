@@ -99,7 +99,10 @@ refusal and the control: the same call on a project that *was* mounted still ret
 A machine that installed the Claude Code plugin has the MCP tools and nothing else. `hivemind bus
 listen` lives in the separate `hivemind-client` package and needs a third-party `websockets`
 dependency on top, so for a plugin-only agent `bus_connect` used to return a command its shell
-could not find. It also had no `HIVEMIND_SERVER_URL`/`HIVEMIND_TOKEN` in its environment.
+could not find. (`hivemind bus listen` also reads `HIVEMIND_SERVER_URL`/`HIVEMIND_TOKEN`, which
+nothing on such a machine exported until the plugin's `SessionStart` hook began publishing its own
+config to the session's shell — plugin 1.1.1. The listener below needs neither: its URL and its
+credential are in argv.)
 
 So the plugin carries `skills/hivemind/scripts/bus-listen.py`: a stdlib-only RFC 6455 client, no
 dependencies, any `python3`. Loading the skill copies it to `$HOME/.hivemind/bus-listen.py`, and

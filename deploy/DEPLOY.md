@@ -60,6 +60,13 @@ export HIVEMIND_SERVER_URL=http://<lan-or-tailscale-ip>:8787/p/default
 export HIVEMIND_TOKEN=<token from `hivemind-admin mint-token`>
 hivemind health
 ```
+The URL must name a **project** — the CLI has no `--project` flag, and `/blobs` lives under the
+project prefix. `hivemind health` only proves the server is up: it reads `/healthz` off the server
+root, which takes no token, so it answers `{"ok": true}` even for a root URL or a bad token. In a
+Claude Code session with the plugin installed you usually need neither export — the plugin's
+`SessionStart` hook sets both for that session's shell from its own config
+([clients.md](../docs/clients.md#where-the-url-and-the-token-come-from)); export them here for a
+plain terminal, or to override a plugin configured with a root URL.
 
 > Note: `pip install -U pip` first — the pip bundled with an old system Python can fail to
 > resolve modern package metadata. The exact-pin `requirements-*.txt` files assume the same

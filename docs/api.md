@@ -129,9 +129,13 @@ carries its own credential and enforces the same ACL itself — see below.)
 ## Clients
 - `hivemind` CLI (`health/node/edge/search/neighbors/schema/artifact/tool/skill/trap/guide/bus`; incl.
   `schema apply <pack.json>`, `skill publish|search|get|yank`, `trap record|search|get|status`),
-  config from `HIVEMIND_SERVER_URL` + `HIVEMIND_TOKEN`. It has **no `--project` flag** and never
-  sends one, so it acts in the project its URL names — give it a project base URL, not the server
-  root, where every command would be refused for naming no project.
+  config from `HIVEMIND_SERVER_URL` + `HIVEMIND_TOKEN` (which the Claude Code plugin's `SessionStart`
+  hook exports from its own config for in-session Bash calls; export them yourself anywhere else).
+  It has **no `--project` flag** and never sends one, so it acts in the project its URL names — give
+  it a project base URL, not the server root, where every tool call is refused for naming no project
+  and `/blobs`, `/guide` and the catalogs 404. `hivemind health` is the one exception and not a
+  reassuring one: it resolves `/healthz` from the root either way, and that path needs no token, so
+  it prints `{"ok": true}` for a root URL and for a bogus token alike.
 - `hivemind.Client` (Python): `.call(tool, args)`, `.upsert/.get/.link/.search/.schema/.guide`,
   `.artifacts.put/get`, `.tool_publish/get/search`.
   `.call` raises `HivemindError` when the tool refuses (`ok:false`), carrying `error_kind` as
