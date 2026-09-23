@@ -167,7 +167,7 @@ class BlobStore:
         return {"digest": digest, "pinned": True}
 
     # ── orphan accounting: the upstream cause of a bloated blob store ────────────────
-    def orphans(self, *, by_agent: bool = True, older_than_hours: int = 0,
+    def orphans(self, *, by_uploader: bool = True, older_than_hours: int = 0,
                 limit: int = 20) -> dict:
         """Blobs that were uploaded and never attached to anything.
 
@@ -188,7 +188,7 @@ class BlobStore:
                 "JOIN tx t ON t.tx_id = b.created_tx "
                 "WHERE b.digest NOT IN (SELECT digest FROM blob_ref)",
                 (LEGACY_USER,)).fetchall()
-        per_agent: dict = {}
+        per_uploader: dict = {}
         total_n = total_b = 0
         for r in rows:
             if r["digest"] in mentioned:
@@ -196,18 +196,18 @@ class BlobStore:
             if older_than_hours and _iso_epoch(r["tx_time"]) > cutoff:
                 continue
             key = (r["user_id"], r["agent_id"])
-            a = per_agent.setdefault(key, {"user": r["user_id"], "agent": r["agent_id"],
-                                           "blobs": 0, "bytes": 0})
+            a = per_uploader.setdefault(key, {"user": r["user_id"], "agent": r["agent_id"],
+                                              "blobs": 0, "bytes": 0})
             a["blobs"] += 1
             a["bytes"] += r["size"] or 0
             total_n += 1
             total_b += r["size"] or 0
-        ranked = sorted(per_agent.values(), key=lambda d: d["bytes"], reverse=True)[:limit]
+        ranked = sorted(per_uploader.values(), key=lambda d: d["bytes"], reverse=True)[:limit]
         for a in ranked:
             a["gb"] = round(a["bytes"] / 1073741824, 2)
         return {"unattached_blobs": total_n, "bytes": total_b,
                 "gb": round(total_b / 1073741824, 2),
-                "by_agent": ranked if by_agent else [],
+                "by_uploader": ranked if by_uploader else [],
                 "hint": ("attach uploads with artifact_attach(digest, version_id, role) or record "
                          "the digest in the node's props; unattached bytes are garbage-collected")}
 

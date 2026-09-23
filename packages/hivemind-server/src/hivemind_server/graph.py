@@ -119,7 +119,10 @@ def _stamp_author(out: dict, cur, row: Optional[dict]) -> None:
     string the caller passed, kept so "which job was this" survives but is never mistaken for
     identity.
     """
-    out["author"] = (row["author_user"] if row else None) or LEGACY_USER
+    # None, not LEGACY_USER, when there is no version at all (an as_of predating the node):
+    # LEGACY_USER means "written before authorship existed", which would claim an anonymous author
+    # for a row that does not exist — and would disagree with agent_label, which is None here.
+    out["author"] = (row["author_user"] or LEGACY_USER) if row else None
     r = (cur.execute("SELECT agent_id FROM tx WHERE tx_id=?", (row["tx_from"],)).fetchone()
          if row else None)
     out["agent_label"] = r["agent_id"] if r else None
@@ -184,9 +187,9 @@ def upsert_node(db: Database, agent_id: str, node_type: str, props: dict, *,
             raise Invalid(f"node {nid} has no current version (corrupt)")
         if expected_head is not None and head["version_id"] != expected_head:
             raise Conflict(
-                f"stale write: head is {head['version_id']}, you sent {expected_head}. Someone "
-                f"superseded this node; graph_get(node_id) for the current version, then retry "
-                f"with expected_head set to it."
+                f"stale write: head is {head['version_id']}, you sent {expected_head} — "
+                f"someone superseded this node. The call is graph_get(node_id) and the field is "
+                f"expected_head."
             )
         if head["content_hash"] == ch:
             return {"node_id": nid, "version_id": head["version_id"], "seq": head["seq"],
@@ -231,7 +234,8 @@ def get_node(db: Database, *, node_id: Optional[str] = None, subject_key: Option
         out = {"node_id": node_id, "node_type": nrow["node_type"],
                "subject_key": nrow["subject_key"], "subject_version": nrow["subject_version"],
                "subject_order": nrow["subject_order"], "flags": node_flags(cur, node_id),
-               # created_by is the FIRST author, distinct from `author` below (the last one).
+               # created_by is the FIRST author, distinct from `author` below, which is the
+               # author of the version being RETURNED (the head, or the as-of one).
                "created_by": nrow["created_by"] or LEGACY_USER,
                "contributors": _contributors(cur, node_id)}
 
@@ -397,8 +401,8 @@ def upsert_edge(db: Database, agent_id: str, edge_type: str, src_node_id: str, d
         head = dict(head)
         if expected_head is not None and head["version_id"] != expected_head:
             raise Conflict(
-                f"stale edge write: head is {head['version_id']}, you sent {expected_head}. "
-                f"Re-read the edge and retry with expected_head set to the current version.")
+                f"stale edge write: head is {head['version_id']}, you sent {expected_head} — "
+                f"expected_head must be the edge's current version_id.")
         if head["content_hash"] == ch:
             return {"edge_id": eid, "version_id": head["version_id"], "seq": head["seq"],
                     "created": False, "superseded": False, "noop": True, "src": src, "dst": dst}

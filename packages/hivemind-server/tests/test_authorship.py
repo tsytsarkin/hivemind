@@ -124,12 +124,49 @@ def test_a_skill_a_trap_and_a_tool_all_record_the_user_beside_the_label(db, tmp_
     assert traps.get(db, t["trap_id"])["author_user"] == "nik"
 
 
+def test_a_read_that_returns_no_version_has_no_author_at_all(db):
+    """legacy:unknown means "written before authorship existed" — never "this row is absent".
+
+    An as_of predating the node returns current=None, so claiming an anonymous author there would
+    also disagree with agent_label, which is None for the same nonexistent row.
+    """
+    with db.read() as cur:
+        before = cur.execute("SELECT MAX(tx_id) FROM tx").fetchone()[0]
+    out = graph.upsert_node(db, "j", "component", {"title": "x"}, reason="create")
+    got = graph.get_node(db, node_id=out["node_id"], as_of=before)
+    assert got["current"] is None
+    assert got["author"] is None
+    assert got["agent_label"] is None
+    # ...while the node-level facts, which are not about one version, still answer.
+    assert got["created_by"] == "nik" and got["contributors"] == ["nik"]
+
+
+def test_an_admin_cli_write_names_the_operator_not_legacy_unknown(projects_dir, monkeypatch):
+    """legacy:unknown is for the principal-less paths; a human ran hivemind-admin.
+
+    Drives admin.main() rather than _cli_identity() directly: the claim is about the WIRING, and a
+    test that called the helper itself passed even with the set_identity() call deleted.
+    """
+    from hivemind_server import admin
+    from hivemind_server.db import Database
+    from hivemind_server.identity import USERNAME_RE
+    monkeypatch.setattr(admin.getpass, "getuser", lambda: "opsperson")
+    assert admin.main(["reindex"]) in (0, None)
+    d = Database(projects_dir / "default" / "hivemind.db")
+    with d.read() as cur:
+        rows = [tuple(r) for r in cur.execute(
+            "SELECT agent_id, user_id FROM tx ORDER BY tx_id DESC LIMIT 1")]
+    assert rows[0] == ("reindex", "cli:opsperson")
+    # The prefix is what makes it uncollidable with a real username, same as legacy:.
+    assert not USERNAME_RE.fullmatch("cli:opsperson")
+
+
 def test_an_orphan_upload_names_the_person_not_just_the_job(db, tmp_path):
     """A 94 GB leak attributed only to a self-chosen label names a job, not anyone answerable."""
     from hivemind_server import blobs
     store = blobs.BlobStore(tmp_path / "blobs", db, max_bytes=1 << 20, grace_seconds=0)
     store.put_stream([b"nobody attached me"], agent_id="upload-job")
-    rows = store.orphans()["by_agent"]
+    rows = store.orphans()["by_uploader"]
     assert [(r["user"], r["agent"], r["blobs"]) for r in rows] == [("nik", "upload-job", 1)]
 
 

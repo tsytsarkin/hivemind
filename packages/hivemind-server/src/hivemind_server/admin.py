@@ -4,12 +4,14 @@ Mint tokens, create projects, apply packs, promote schema, merge guide, GC, rein
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
 import sys
 from pathlib import Path
 
 from . import guide, schemas, search
 from .config import config
+from .identity import set_identity
 from .project import ProjectRegistry, projects_root_from_env, valid_name
 
 
@@ -33,6 +35,27 @@ def _project(reg, name):
 
 def _out(o):
     print(json.dumps(o, indent=2, ensure_ascii=False))
+
+
+def _cli_identity():
+    """Who is at the keyboard, as `cli:<shell-user>`.
+
+    Every subcommand here is human-initiated, so its writes must not land in `legacy:unknown` —
+    that sentinel is for the genuinely principal-less paths (startup seeding, reindex, GC sweeps),
+    and lumping an operator in with them loses the one fact that is knowable. The `cli:` prefix
+    cannot collide with a real username because identity.USERNAME_RE forbids `:`, the same
+    property that makes `legacy:` safe. This is for AUTHORSHIP only: nothing under admin.py
+    authorizes against the contextvar (project-share builds its own actor), and the role stays
+    `member` so it carries no authority it did not already have from host access.
+    """
+    from .identity import Identity
+    try:
+        user = getpass.getuser()
+    except Exception:
+        # No passwd entry and no USER/LOGNAME in the environment (a bare container). Still not
+        # legacy:unknown: a human ran this.
+        user = "unknown"
+    return Identity(user=f"cli:{user}", device="admin-cli")
 
 
 def main(argv=None) -> int:
@@ -70,6 +93,9 @@ def main(argv=None) -> int:
     sub.add_parser("autolink")
 
     args = ap.parse_args(argv)
+    # Before _registry()/_project(), which can create a project and seed its guide section — those
+    # writes belong to the operator who asked for them too.
+    set_identity(_cli_identity())
     reg = _registry()
     cfg = config()
 
