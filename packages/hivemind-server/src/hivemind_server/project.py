@@ -3,23 +3,23 @@ schema, and guide — all under one directory, fully separated from the code. On
 can host many projects (mounted at /p/<name>/...), each isolated; or you can run one server per
 project for physical isolation. Either way the data lives outside the repo.
 
-Layout:  <projects_root>/<name>/{hivemind.db, blobs/, tokens.json}
+Layout:  <projects_root>/<name>/{hivemind.db, blobs/, tokens.json, project.json}
 """
 from __future__ import annotations
 
 import os
-import re
 from pathlib import Path
 from typing import Optional
 
+from . import projects_meta
 from .auth import TokenStore
 from .db import Database
 
-_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
-
 
 def valid_name(name: str) -> bool:
-    return bool(_NAME_RE.match(name))
+    # One regex for project names, owned by projects_meta (which also has to raise Invalid on a bad
+    # one for the MCP tools); a second copy here drifted from it silently.
+    return bool(projects_meta.NAME_RE.fullmatch(name))
 
 
 class Project:
@@ -37,6 +37,17 @@ class Project:
         self._max_blob_bytes = max_blob_bytes
         self._blob_grace_seconds = blob_grace_seconds
         self._blobs = None
+        if not (self.dir / "project.json").exists():
+            # A project that predates metadata is a shared one — that is what it has been all
+            # along, since any token for it opened all of it. Written once and never re-stamped.
+            projects_meta.save(self.dir, projects_meta.ProjectMeta(
+                name=name, visibility="shared", owner=None))
+
+    @property
+    def meta(self):
+        """Read through the stamped cache every time: a share made in another process (or by
+        editing project.json on the server) must take effect without a restart."""
+        return projects_meta.load(self.dir, self.name)
 
     @property
     def blobs(self):
