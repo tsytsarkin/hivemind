@@ -160,6 +160,66 @@ def test_pin_refuses_a_digest_it_cannot_resolve_and_accepts_a_prefix(store):
     assert store.pin("test", d[:19])["digest"] == d
 
 
+def test_the_full_length_fast_path_still_proves_existence(store):
+    """A 64-character digest resolves by primary key rather than by scanning with LIKE — but it
+    must still QUERY. Returning f"sha256:{raw}" unchecked is the short-circuit that let a digest
+    nobody ever uploaded answer exactly like a stored orphan. This pins the fast path against
+    being "optimised" back into that bug."""
+    d = _put(store, b"hello")
+    assert store.resolve_digest(d) == d
+    for absent in ("sha256:" + "ab" * 32, "ab" * 32):        # qualified and bare, both absent
+        with pytest.raises(NotFound):
+            store.resolve_digest(absent)
+
+
+def test_a_non_sha256_algorithm_is_refused(store):
+    """Dropping the algorithm and keeping the hex would let md5:<hex> resolve against a sha256
+    blob — validation that exists one method away in parse_digest and was not being called, which
+    is the same shape as the bug this whole task is about."""
+    _put(store, b"hello")
+    with pytest.raises(Invalid):
+        store.resolve_digest("md5:" + "ab" * 16)
+    with pytest.raises(Invalid):
+        store.refs("md5:" + "ab" * 32)
+
+
+def test_a_digest_longer_than_a_sha256_is_refused(store):
+    """66 hex characters is not a prefix of anything; NotFound would misdescribe the input."""
+    with pytest.raises(Invalid):
+        store.resolve_digest("ab" * 33)
+
+
+def test_an_empty_refs_list_does_not_mean_orphaned(store, db):
+    """refs() == [] is strictly NARROWER than orphaned, and the docs must not conflate them.
+
+    A digest recorded only in a node's props has no blob_ref row at all, yet it is a GC root —
+    282 blobs (1.8 GB) on the live graph are reachable only that way. An agent told that an empty
+    refs list means "orphaned, about to be collected" re-uploads or re-attaches a blob that was
+    never at risk: the same false-orphan cost this task exists to kill, one level up.
+    """
+    d = _put(store, b"hello")
+    graph.upsert_node(db, "test", "finding", {"title": "evidence", "artifact": d})
+    assert store.refs(d) == []                              # nothing ATTACHED it, but ...
+    assert store.orphans()["unattached_blobs"] == 0         # ... it is not orphaned, and
+    assert store.gc(dry_run=True)["kept_referenced_in_props"] == 1     # ... GC keeps it
+
+
+def test_gc_survives_a_blob_row_whose_digest_is_not_well_formed(tmp_path, db):
+    """refs() now RAISES where it used to return []. One junk row must not abort the sweep.
+
+    A negative grace puts the cutoff in the future so every row is eligible, which makes the
+    sweep certainly reach the junk row instead of keeping it as 'young'.
+    """
+    from hivemind_server.blobs import BlobStore
+    s = BlobStore(tmp_path / "blobs-gc", db, max_bytes=1 << 20, grace_seconds=-86400)
+    d = _put(s, b"hello")
+    _seed_blob_rows(s, ["sha256:not-a-digest"])
+    out = s.gc(dry_run=False)                   # Invalid on the junk row: must not propagate
+    assert out["unreferenced"] == 2             # both rows were considered ...
+    assert out["deleted"] == 1                  # ... and the real one was still collected
+    assert not s.path_for(d).exists()
+
+
 # ── 15b. Range is honoured, or it stops being advertised ──────────────────────────────
 @pytest.mark.anyio
 async def test_a_ranged_get_returns_206_and_only_that_range(client_for_blobs):
@@ -188,6 +248,10 @@ async def test_an_unsatisfiable_range_is_416_with_the_real_size(client_for_blobs
                     headers={"Range": f"bytes={len(body) + 10}-"})
     assert r.status_code == 416
     assert r.headers["content-range"] == f"bytes */{len(body)}"
+    # The blob is still immutable and still the same entity, so a 416 keeps the cache identity
+    # the 200 and the 206 carry — the brief asks for these on every path.
+    assert "immutable" in r.headers["cache-control"]
+    assert r.headers["etag"] == f'"{digest}"'
 
 
 @pytest.mark.anyio

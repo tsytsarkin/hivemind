@@ -69,19 +69,22 @@ def attach(mcp) -> None:
         return store.orphans(older_than_hours=older_than_hours, limit=limit)
 
     @mcp.tool(annotations=RO,
-              description="List the node/edge versions that reference an artifact digest. A "
-                          "unique digest PREFIX (8+ hex characters — what a listing displays) is "
-                          "accepted and resolved; the full digest it matched comes back in the "
-                          "reply. An unknown, ambiguous or malformed digest is an ERROR, not an "
-                          "empty result: an empty `refs` list means the blob is stored and "
-                          "orphaned, and nothing else.")
+              description="List the node/edge versions that ATTACH an artifact digest (its "
+                          "blob_ref rows). A unique digest PREFIX (8+ hex characters — what a "
+                          "listing displays) is accepted and resolved; the full digest it "
+                          "matched comes back in the reply. An unknown, ambiguous or malformed "
+                          "digest is an ERROR, not an empty result. An empty `refs` list means "
+                          "only that nothing ATTACHED it — it does NOT mean orphaned or "
+                          "about-to-be-collected: a digest recorded in a node's props, or "
+                          "published as a tool artifact, is still a GC root and has no blob_ref "
+                          "row. Use artifact_orphans for what is genuinely unreferenced.")
     @_envelope
     def artifact_refs(digest: str) -> dict:
-        # Resolve first and echo what was matched: a caller that pasted a prefix needs the full
-        # digest back, and a caller whose digest matched nothing needs to be told so rather than
-        # shown the empty list that means 'orphaned'.
-        resolved = store.resolve_digest(digest)
-        return {"digest": resolved, "refs": store.refs(resolved)}
+        # One resolve, not two: a caller that pasted a prefix needs the full digest echoed back,
+        # and a caller whose digest matched nothing needs to be told so rather than handed an
+        # empty list. Resolving here and again inside refs() cost two index scans per call.
+        resolved, rows = store.resolve_and_refs(digest)
+        return {"digest": resolved, "refs": rows}
 
     # ── tool-registry tools (implemented in task 6 / registry.py) ───────────────────
     reg.attach_tools(mcp, db, _envelope, RO, WRITE)

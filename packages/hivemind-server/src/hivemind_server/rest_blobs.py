@@ -193,10 +193,11 @@ def register_blob_routes(mcp) -> None:
         rng = _parse_range(req.headers.get("range", ""), size)
         if rng == "unsatisfiable":
             # 416 carries the real size so the caller can recompute its range instead of guessing.
-            return Response(status_code=416, headers={"Content-Range": f"bytes */{size}",
-                                                      "Accept-Ranges": "bytes",
-                                                      "ETag": headers["ETag"],
-                                                      "Content-Length": "0"})
+            return Response(status_code=416,
+                            headers={"Content-Range": f"bytes */{size}",
+                                     "Accept-Ranges": "bytes", "ETag": headers["ETag"],
+                                     "Cache-Control": headers["Cache-Control"],
+                                     "Content-Length": "0"})
         first, last = rng if rng else (0, size - 1)
         length = (last - first + 1) if size else 0
         if rng:

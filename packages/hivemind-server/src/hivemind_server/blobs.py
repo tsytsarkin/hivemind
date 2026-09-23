@@ -68,11 +68,22 @@ class BlobStore:
         if len(raw) < self.MIN_PREFIX:
             raise Invalid(f"digest prefix {raw!r} is shorter than {self.MIN_PREFIX} characters; "
                           f"paste more of it — a short prefix matches by luck, not by content")
-        # One query for both cases: for 64 characters LIKE can match at most the primary key, so
-        # this doubles as the existence check the full-length branch needs.
+        # A full digest resolves through the primary key; only a prefix has to scan. Sharing one
+        # LIKE between them was not a harmless simplification: `LIKE 'sha256:<64hex>%'` cannot use
+        # the index (SCAN, not SEARCH), which is ~450x slower per lookup — and gc() calls refs()
+        # once per collected digest, so it made the sweep O(n^2) (3.3x at 5000 blobs), with
+        # attach() paying a scan on every REST upload as well.
+        #
+        # The full-length branch still QUERIES, and must keep querying. Returning f"sha256:{raw}"
+        # unchecked is precisely the short-circuit that let a digest nobody ever uploaded answer
+        # like a stored orphan; "orphaned" has to mean stored and unreferenced, never absent.
         with self.db.read() as cur:
-            hits = [r[0] for r in cur.execute(
-                "SELECT digest FROM blob WHERE digest LIKE ? LIMIT 2", (f"sha256:{raw}%",))]
+            if len(raw) == 64:
+                hits = [r[0] for r in cur.execute(
+                    "SELECT digest FROM blob WHERE digest = ?", (f"sha256:{raw}",))]
+            else:
+                hits = [r[0] for r in cur.execute(
+                    "SELECT digest FROM blob WHERE digest LIKE ? LIMIT 2", (f"sha256:{raw}%",))]
         if not hits:
             if len(raw) == 64:
                 raise NotFound(f"no blob sha256:{raw} is stored here — it was never uploaded, or "
@@ -199,18 +210,35 @@ class BlobStore:
                 (digest, from_version_id, role, filename))
         return {"digest": digest, "from_version_id": from_version_id, "role": role}
 
+    def _refs_rows(self, digest: str) -> list[dict]:
+        """blob_ref rows for an ALREADY-RESOLVED digest. Outside callers want refs()."""
+        with self.db.read() as cur:
+            return [dict(r) for r in cur.execute(
+                "SELECT from_version_id, role, filename FROM blob_ref WHERE digest=?", (digest,))]
+
+    def resolve_and_refs(self, digest: str) -> tuple[str, list[dict]]:
+        """Resolve once, then list — for callers that need BOTH the digest that was matched and
+        its rows. Calling resolve_digest() and then refs() resolves twice, which on the prefix
+        path is two index scans for one answer."""
+        digest = self.resolve_digest(digest)     # raises on malformed, ambiguous or absent
+        return digest, self._refs_rows(digest)
+
     def refs(self, digest: str) -> list[dict]:
-        """The versions that reference a blob. An empty list means orphaned, and nothing else.
+        """The versions that ATTACH this blob, i.e. the blob_ref rows pointing at it.
+
+        An empty list means exactly that — no blob_ref row — and NOT that the blob is orphaned.
+        A digest recorded in a node/edge's props, or carried by tool_version.artifact_digest, is
+        a GC root that has no blob_ref row at all: see _digests_mentioned_in_graph(), where 282
+        blobs (1.8 GB) on the live graph are reachable only that way and reading an empty refs
+        list as "collectable" once deleted a live tool artifact. orphans() (the artifact_orphans
+        tool) is the accounting that covers those roots; this method is not.
 
         Routed through resolve_digest so the three inputs that used to produce an identical `[]`
         — a truncated digest, a malformed one, and a digest that was never stored — each say
         which one they are. `WHERE digest=?` on a 17-character string is a well-formed query that
         matches nothing; it reported eight attached PoCs as orphans.
         """
-        digest = self.resolve_digest(digest)     # raises on malformed, ambiguous or absent
-        with self.db.read() as cur:
-            return [dict(r) for r in cur.execute(
-                "SELECT from_version_id, role, filename FROM blob_ref WHERE digest=?", (digest,))]
+        return self.resolve_and_refs(digest)[1]
 
     def pin(self, agent_id: str, digest: str, reason: str = "") -> dict:
         # Same reason as refs(): a pin on a digest nobody stored used to be a foreign-key error
@@ -325,8 +353,12 @@ class BlobStore:
             for digest in collected:
                 try:                                           # re-check without holding a lock
                     referenced = bool(self.refs(digest))
-                except NotFound:
-                    continue    # another sweep removed the row under us; nothing left to delete
+                except (NotFound, Invalid):
+                    # NotFound: another sweep removed the row under us. Invalid: the row's digest
+                    # is not well-formed (rows can be inserted directly). refs() raises where it
+                    # used to return [], so without Invalid here one junk row aborts every
+                    # remaining deletion in the sweep.
+                    continue
                 if referenced or digest in mentioned:
                     continue
                 # Delete the row FIRST. If anything still references the blob, the foreign key
