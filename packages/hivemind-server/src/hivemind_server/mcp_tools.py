@@ -1,18 +1,18 @@
-"""MCP tool surface. `build_mcp(project)` returns an MCPServer whose tools/routes are bound to
-that project's data. Few powerful, namespaced tools; read tools annotated read-only; every tool
-returns a uniform envelope so agents get actionable errors instead of opaque failures.
+"""MCP tool surface. `build_mcp` returns ONE MCPServer for every project the registry holds: each
+tool takes a `project` argument, and the `db` used in the bodies below is a proxy onto whatever
+that resolved to for the call in flight (see envelope). Few powerful, namespaced tools;
+read tools annotated read-only; every tool returns a uniform envelope so agents get actionable
+errors instead of opaque failures.
 """
 from __future__ import annotations
 
-import functools
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
 from mcp.server import MCPServer
-from mcp.types import ToolAnnotations
 
 from . import graph, guide, schemas, skills, traps
-from .db import Conflict, Invalid, NotFound
-from .project import Project
+from .envelope import (RO, WRITE, CurrentDb, ProjectAware, envelope as _envelope,
+                       set_registry)
 
 INSTRUCTIONS = (
     "Hivemind REPLACES local memory for this fleet: read it before doing any work, and persist "
@@ -30,6 +30,8 @@ INSTRUCTIONS = (
     "trap_search — before building a tool or working out a procedure; build only if they come "
     "back empty. Publish what you build (tool_publish/skill_publish) and trap_record an "
     "approach the moment you abandon it. Search is hybrid lexical+semantic. "
+    "Every tool takes a `project` argument saying which graph to act in; a tool that WRITES "
+    "refuses to guess it, so pass it explicitly unless your endpoint URL already names a project. "
     "Separately from the graph there is an AGENT BUS for live peer-to-peer coordination: call "
     "bus_connect ONCE at session start and run the Monitor snippet it returns — messages from "
     "other agents then arrive as notifications with no polling. bus_send / bus_broadcast reach "
@@ -37,41 +39,33 @@ INSTRUCTIONS = (
     "still goes in the graph."
 )
 
-RO = ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True)
-WRITE = ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=False)
 
-
-def _envelope(fn: Callable) -> Callable:
-    """Run a tool body; convert engine exceptions into an actionable, self-correctable result."""
-    @functools.wraps(fn)
-    def wrap(*a, **k):
-        try:
-            out = fn(*a, **k)
-            if isinstance(out, dict) and "ok" not in out:
-                out = {"ok": True, **out}
-            return out
-        except Conflict as e:
-            return {"ok": False, "error_kind": "conflict",
-                    "error": f"{e}. Re-read the node (graph_get) and retry with the current head."}
-        except NotFound as e:
-            return {"ok": False, "error_kind": "not_found", "error": str(e)}
-        except Invalid as e:
-            return {"ok": False, "error_kind": "invalid", "error": str(e)}
-    return wrap
-
-
-def build_mcp(project: Project, *, instructions: str = INSTRUCTIONS) -> MCPServer:
-    db = project.db
-    mcp = MCPServer(name=f"hivemind:{project.name}", instructions=instructions, version="0.1.0")
+def build_mcp(registry, identities, *, instructions: str = INSTRUCTIONS) -> MCPServer:
+    """One project-neutral MCP server. `identities` is threaded in for the project tools
+    (project_share has to check the grantee exists before writing a name nobody can hold)."""
+    # A default for any caller that is not an HTTP request. ProjectAuthMiddleware re-publishes both
+    # per request and THAT is the authoritative one; require_auth stays strict here because
+    # build_mcp does not know the deployment's mode.
+    set_registry(registry)
+    # Resolved per call, so none of the 47 tool bodies below has to know the project exists: the
+    # alternative was editing every one of them to take it as an argument. A body that needs the
+    # project itself rather than its database adds `project = CurrentProject()` the same way.
+    db = CurrentDb()
+    real = MCPServer(name="hivemind", instructions=instructions, version="1.1.0")
+    # Registration goes through the proxy so a tool cannot be added without project resolution.
+    mcp = ProjectAware(real)
 
     # ── graph reads ──────────────────────────────────────────────────────────────
-    @mcp.tool(annotations=RO, description="Search nodes by text and/or BY TYPE. Pass types=[...] to restrict, and an EMPTY query with types to browse every node of that type (returns total_of_type). graph_types() lists the types that have data. props_filter={'gated': true, 'kind': 'mach-service'} filters on exact FIELD VALUES - the only way to match booleans and numbers, since text search cannot tell gated=true from gated=false (null matches absent). Paginated: pass the next_cursor from a reply back as cursor; has_more says when to stop.")
+    @mcp.tool(annotations=RO, description="Search nodes by text and/or BY TYPE. Pass types=[...] to restrict, and an EMPTY query with types to browse every node of that type (returns total_of_type). graph_types() lists the types that have data. props_filter={'gated': true, 'kind': 'mach-service'} filters on exact FIELD VALUES - the only way to match booleans and numbers, since text search cannot tell gated=true from gated=false (null matches absent). Each hit carries a 200-character `snippet` by default. fields=[\"title\",\"status\"] instead returns just those keys per hit as real `props` plus that hit's `author`, and is the cheap, precise way to read structure across a page; props=true returns every key the same way. BOTH of those modes are bounded: any one node's props over 4000 characters is replaced by a `_prefix` marker naming its real size (graph_get that node for the rest), and a page STOPS EARLY once 40000 characters of props have been shipped - so at the default limit=25 a fields= page over long props can come back with ~11 hits. props=true additionally caps the page at 10 hits, so prefer fields unless you genuinely need the lot. A shortened reply says props_clamped and names which bound fired in props_clamped_by; has_more/next_cursor then carry the rest, so page on rather than reading a short page as the end. Paginated: pass the next_cursor from a reply back as cursor; has_more says when to stop. author='<user>' restricts to rows whose CURRENT version that identity wrote; see contributors on graph_get for everyone who ever revised a node.")
     @_envelope
     def graph_search(query: str = "", types: Optional[list[str]] = None,
                      limit: int = 25, cursor: int = 0,
-                     props_filter: Optional[dict] = None) -> dict:
+                     props_filter: Optional[dict] = None,
+                     fields: Optional[list[str]] = None, props: bool = False,
+                     author: Optional[str] = None) -> dict:
         out = graph.search_nodes(db, query, types=types, limit=limit, cursor=cursor,
-                                 props_filter=props_filter)
+                                 props_filter=props_filter, fields=fields, props=props,
+                                 author=author)
         if query:                       # surface known dead-ends for this query, unprompted
             rel = traps.search(db, query, limit=3)["traps"]
             if rel:
@@ -134,7 +128,8 @@ def build_mcp(project: Project, *, instructions: str = INSTRUCTIONS) -> MCPServe
               description="Create a node, or supersede an existing one. Give subject_key+"
                           "subject_version to target a subject cell (new cell = create, existing "
                           "= supersede). Pass expected_head for optimistic concurrency (409 on "
-                          "conflict). `agent` labels the writer for provenance.")
+                          "conflict). `agent` is a free-form LABEL for the job; the author is "
+                          "taken from your token and cannot be set from here.")
     @_envelope
     def graph_upsert(type: str, props: dict, agent: str = "agent",
                      subject_key: Optional[str] = None, subject_version: Optional[str] = None,
@@ -217,11 +212,16 @@ def build_mcp(project: Project, *, instructions: str = INSTRUCTIONS) -> MCPServe
     @mcp.tool(annotations=RO,
               description="Search the mini-skill registry — procedures other agents wrote down "
                           "(how to do a complex action, with the gotchas). ALWAYS search here "
-                          "before working out a non-obvious procedure from scratch. mode: hybrid (default, lexical+semantic fused), lexical, or semantic.")
+                          "before working out a non-obvious procedure from scratch. mode: hybrid (default, lexical+semantic fused), lexical, or semantic. "
+                          "author='<user>' restricts to skills whose LATEST version that "
+                          "identity published: one they wrote and someone else has since revised "
+                          "leaves their list, though both immutable versions still exist.")
     @_envelope
     def skill_search(query: str = "", tags: Optional[list[str]] = None, limit: int = 20,
-                     response_format: str = "concise", mode: str = "hybrid") -> dict:
-        return skills.search(db, query, tags=tags, limit=limit, format=response_format, mode=mode)
+                     response_format: str = "concise", mode: str = "hybrid",
+                     author: Optional[str] = None) -> dict:
+        return skills.search(db, query, tags=tags, limit=limit, format=response_format, mode=mode,
+                             author=author)
 
     @mcp.tool(annotations=RO,
               description="Browse the whole mini-skill library: topics with counts plus a one-line "
@@ -294,13 +294,14 @@ def build_mcp(project: Project, *, instructions: str = INSTRUCTIONS) -> MCPServe
     # ── traps: recorded dead-ends ─────────────────────────────────────────────────
     @mcp.tool(annotations=RO,
               description="Search recorded dead-ends (approaches that wasted time and why). "
-                          "Check this BEFORE starting a non-trivial approach.")
+                          "Check this BEFORE starting a non-trivial approach. "
+                          "author='<user>' restricts to the traps that identity recorded.")
     @_envelope
     def trap_search(query: str = "", node_id: Optional[str] = None,
                     include_retired: bool = False, limit: int = 20,
-                    response_format: str = "concise") -> dict:
+                    response_format: str = "concise", author: Optional[str] = None) -> dict:
         return traps.search(db, query, node_id=node_id, include_retired=include_retired,
-                            limit=limit, format=response_format)
+                            limit=limit, format=response_format, author=author)
 
     @mcp.tool(annotations=RO, description="Fetch one trap in full.")
     @_envelope
@@ -352,8 +353,12 @@ def build_mcp(project: Project, *, instructions: str = INSTRUCTIONS) -> MCPServe
         return guide.propose_section(db, agent, section, body, why=why)
 
     from . import registry_tools  # attach artifact + tool-registry tools (added incrementally)
-    registry_tools.attach(mcp, project)
+    registry_tools.attach(mcp)
+    from . import project_tools    # the project lifecycle: create/list/info/share/unshare
+    # On `real`, NOT the proxy: these tools are about projects rather than in one, and the `project`
+    # argument they carry themselves would be shadowed by the injected per-call one.
+    project_tools.attach(real, registry, identities)
     from . import bus_ws_tools    # agent bus: WebSocket push, deliberately outside the graph
     from .config import config as _config
-    bus_ws_tools.attach(mcp, project, _config())
-    return mcp
+    bus_ws_tools.attach(mcp, _config())
+    return real                   # mount the real server; the proxy only wraps registration

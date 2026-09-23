@@ -112,8 +112,17 @@ def upsert(db: Database, kind: str, item_id: str, text: str, agent_id: str = "em
             (kind, item_id, e.name, e.dim, _pack(vec), tx.tx_id))
 
 
-def query(db: Database, kind: str, text: str, limit: int = 20) -> list:
-    """Brute-force cosine over one kind. Returns [(item_id, score)] best first."""
+def query(db: Database, kind: str, text: str, limit: int = 20,
+          ids: Optional[set] = None) -> list:
+    """Brute-force cosine over one kind. Returns [(item_id, score)] best first.
+
+    `ids`, when given, restricts scoring to those item_ids. It is applied BEFORE the top-`limit`
+    cut, which is the whole point: a caller that filtered the result afterwards would get nothing
+    back whenever the items it can accept rank below the cut. Measured with an author filter over
+    71 skills: the one that qualified sat outside the top 60 and the reply was empty while a
+    lexical search on the same query returned it. The scan reads every row of the kind anyway, so
+    restricting it costs nothing and keeps the ranking honest (best N *of the allowed items*).
+    """
     e = embedder()
     qv = e.encode([text])[0]
     with db.read() as cur:
@@ -122,6 +131,8 @@ def query(db: Database, kind: str, text: str, limit: int = 20) -> list:
             (kind, e.name)).fetchall()
     scored = []
     for r in rows:
+        if ids is not None and r["item_id"] not in ids:
+            continue
         v = _unpack(r["vec"], r["dim"])
         if len(v) != len(qv):
             continue

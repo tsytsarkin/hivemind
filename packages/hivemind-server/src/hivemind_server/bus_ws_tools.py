@@ -6,28 +6,12 @@ left is: get connected, send, see who is there, leave.
 """
 from __future__ import annotations
 
-import functools
 from typing import Optional
 
-from mcp.types import ToolAnnotations
-
-from .bus_ws import BusError, MAX_BODY, current_origin, hub_for, register_secret
-
-RO = ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True)
-WRITE = ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=False)
-
-
-def _envelope(fn):
-    @functools.wraps(fn)
-    def wrap(*a, **k):
-        try:
-            out = fn(*a, **k)
-            if isinstance(out, dict) and "ok" not in out:
-                out = {"ok": True, **out}
-            return out
-        except BusError as e:
-            return {"ok": False, "error_kind": "bus", "error": str(e)}
-    return wrap
+from .bus_ws import (BusError, MAX_BODY, current_origin, hub_for, is_mounted, not_mounted_error,
+                     register_secret)
+from .envelope import RO, WRITE, current_project, envelope as _envelope
+from .identity import current_identity
 
 
 # Where the skill installs the dependency-free listener. It must be an absolute path that any
@@ -36,9 +20,18 @@ def _envelope(fn):
 LISTENER = "$HOME/.hivemind/bus-listen.py"
 
 
-def attach(mcp, project, cfg) -> None:
-    hub = hub_for(project.name)
-    register_secret(project.name, project.dir / "bus_secret")
+def attach(mcp, cfg) -> None:
+    def _hub():
+        """The hub of the project this CALL is for — one server now answers for every project, so
+        binding a hub at attach time would push every message onto one project's bus.
+
+        register_secret is idempotent (it reads the key back off disk) and is repeated here for a
+        project created after startup, which build_app never looped over.
+        """
+        p = current_project()
+        register_secret(p.dir)
+        return hub_for(p.dir)
+
     def _ws_url() -> str:
         """Build a ws:// URL from the address THIS caller used, falling back to config.
 
@@ -50,7 +43,7 @@ def attach(mcp, project, cfg) -> None:
         if "://" in base:
             scheme, _, hostport = base.partition("://")
             base = ("wss://" if scheme == "https" else "ws://") + hostport
-        return f"{base}/p/{project.name}/bus/ws"
+        return f"{base}/p/{current_project().name}/bus/ws"
 
     @mcp.tool(annotations=WRITE,
               description="Join the agent bus and start receiving messages from other agents. "
@@ -61,8 +54,22 @@ def attach(mcp, project, cfg) -> None:
                           "stable and descriptive (the machine or the job, not a random id).")
     @_envelope
     def bus_connect(label: str, meta: Optional[dict] = None) -> dict:
-        k = hub.mint_listen_key(label, meta)
-        t = hub.mint_ticket(label, meta)
+        # Before anything is minted. A project created after startup has no /p/<name>/ prefix at
+        # all, so every credential handed out here would open a URL that 404s — and the listener
+        # reads that 403 as `refused` and tells its agent to call bus_connect for a fresh URL,
+        # which produces the same dead URL. Refusing with the restart named is the only answer
+        # that terminates.
+        project = current_project()
+        if not is_mounted(project.dir):
+            raise not_mounted_error(project.name)
+        hub = _hub()
+        # Both credentials record WHO asked for them, from the token rather than from an argument.
+        # The WS handshake re-checks that user against the project ACL, which is the only thing
+        # standing between a removed member and this project's traffic.
+        who = current_identity()
+        user = who.user if who else None
+        k = hub.mint_listen_key(label, meta, user=user)
+        t = hub.mint_ticket(label, meta, user=user)
         ws_url = _ws_url()
         return {
             "peer": k["label"],
@@ -97,29 +104,43 @@ def attach(mcp, project, cfg) -> None:
                           "EPHEMERAL — anything worth keeping goes in the graph.")
     @_envelope
     def bus_send(to: str, body: str, agent: str = "agent") -> dict:
-        return _run(hub.send(agent, to, body))
+        out = _run(_hub().send(agent, to, body))
+        # "queued for reconnect" is a promise, and on an unmounted project it is one the server
+        # cannot keep: there is no ws route for a listener to reconnect THROUGH, so the message
+        # sits in the queue until QUEUE_TTL drops it. Say that instead. Hub.send stays unaware of
+        # mounts — it answers for a bus, not for a URL space.
+        if out.get("queued") and not is_mounted(current_project().dir):
+            out["note"] = ("peer offline, and this project has no /p/<name>/ bus route to "
+                           "reconnect through until the server is restarted — the message will "
+                           "expire in the queue rather than arrive. Restart the server, then have "
+                           "the peer call bus_connect.")
+        return out
 
     @mcp.tool(annotations=WRITE,
               description="Send a message to every other connected peer in a room (default "
                           "'lobby'). Use sparingly: every recipient pays attention for it.")
     @_envelope
     def bus_broadcast(body: str, room: str = "lobby", agent: str = "agent") -> dict:
-        return _run(hub.broadcast(agent, body, room))
+        return _run(_hub().broadcast(agent, body, room))
 
     @mcp.tool(annotations=RO,
               description="Fetch the FULL text of a bus message by id. Notifications are clipped "
                           "at ~512 characters, so a long message arrives truncated with its id — "
-                          "call this to read the rest. Ids stay resolvable for about an hour.")
+                          "call this to read the rest. Ids stay resolvable for about an hour. A "
+                          "listener also appends every message it received to "
+                          "~/.hivemind/bus-inbox.jsonl in full (size-capped, one rotation to "
+                          "`.1`), which is the route that still works when this tool is "
+                          "unavailable or the id has aged out of the server.")
     @_envelope
     def bus_message(message_id: str) -> dict:
-        return hub.message(message_id)
+        return _hub().message(message_id)
 
     @mcp.tool(annotations=RO,
               description="Who is on the bus right now, and whether each peer is currently "
                           "connected. Check this before sending, so you address a real label.")
     @_envelope
     def bus_peers(online_only: bool = False) -> dict:
-        peers = hub.peers(online_only=online_only)
+        peers = _hub().peers(online_only=online_only)
         return {"peers": peers, "count": len(peers),
                 "hint": "bus_send(to=<peer>, body=…)" if peers else
                         "nobody is connected; run bus_connect to join"}
@@ -129,6 +150,7 @@ def attach(mcp, project, cfg) -> None:
                           "bus_peers. Stop the Monitor task as well.")
     @_envelope
     def bus_disconnect(label: str) -> dict:
+        hub = _hub()
         p = hub.peer(label)
         if p is None:
             raise BusError(f"no peer {label!r}")

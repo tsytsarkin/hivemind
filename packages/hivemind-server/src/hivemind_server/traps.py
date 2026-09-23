@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from .db import Database, Invalid, NotFound
+from .db import LEGACY_USER, Database, Invalid, NotFound
 from .ids import ulid
 
 VALID_STATUS = ("active", "retired", "disputed")
@@ -31,6 +31,8 @@ def _index(cur, trap_id: str, *parts: Optional[str]) -> None:
 def _row(r) -> dict:
     d = dict(r)
     d.pop("created_tx", None); d.pop("updated_tx", None)
+    # NULL means the trap predates authorship; say so rather than handing back a bare None.
+    d["author_user"] = d.get("author_user") or LEGACY_USER
     return d
 
 
@@ -54,12 +56,14 @@ def record(db: Database, agent_id: str, *, title: str, what_failed: str, symptom
             if cur.execute("SELECT 1 FROM node WHERE node_id=?", (node_id,)).fetchone() is None:
                 raise Invalid(f"node {node_id!r} not found — omit node_id for a project-wide trap")
         cur.execute(
+            # `author` is the agent LABEL the caller passed; `author_user` is the token's user.
             "INSERT INTO trap(trap_id,title,what_failed,symptom,root_cause,instead,node_id,"
             "subject_key,subject_version,cost_minutes,evidence,verified_how,confidence,status,"
-            "author,created_tx,updated_tx) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'active',?,?,?)",
+            "author,author_user,created_tx,updated_tx) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'active',?,?,?,?)",
             (tid, title, what_failed, symptom, root_cause, instead, node_id, subject_key,
              subject_version, cost_minutes, evidence, verified_how, confidence, agent_id,
-             tx.tx_id, tx.tx_id))
+             tx.user, tx.tx_id, tx.tx_id))
         _index(cur, tid, title, what_failed, symptom, root_cause, instead, subject_key)
     return {"trap_id": tid, "title": title, "scope": "node" if node_id else "project",
             "status": "active"}
@@ -93,18 +97,25 @@ def for_node(db: Database, node_id: str, *, subject_key: Optional[str] = None,
 
 def search(db: Database, query: str = "", *, node_id: Optional[str] = None,
            include_retired: bool = False, limit: int = 20,
-           format: str = "concise") -> dict:
+           format: str = "concise", author: Optional[str] = None) -> dict:
     limit = max(1, min(limit, 100))
-    from .search import _fts_query
+    from .search import _fts_query, author_filter
+    # In SQL, not in the loop below: applied after the candidate LIMIT it would report "no traps by
+    # this author" whenever busier authors filled the pool.
+    a_pred, a_args = author_filter("t.author_user", author)
+    a_join = " JOIN trap t ON t.trap_id = f.trap_id" if a_pred else ""
+    a_and, a_where = (f" AND {a_pred}", f" WHERE {a_pred}") if a_pred else ("", "")
     with db.read() as cur:
         if query:
             m = _fts_query(query)
             ids = [r["trap_id"] for r in cur.execute(
-                "SELECT trap_id FROM trap_fts WHERE trap_fts MATCH ? ORDER BY rank LIMIT ?",
-                (m, limit * 3))] if m else []
+                f"SELECT f.trap_id AS trap_id FROM trap_fts f{a_join} "
+                f"WHERE trap_fts MATCH ?{a_and} ORDER BY f.rank LIMIT ?",
+                (m, *a_args, limit * 3))] if m else []
         else:
             ids = [r["trap_id"] for r in cur.execute(
-                "SELECT trap_id FROM trap ORDER BY created_tx DESC LIMIT ?", (limit * 3,))]
+                f"SELECT t.trap_id AS trap_id FROM trap t{a_where} "
+                f"ORDER BY t.created_tx DESC LIMIT ?", (*a_args, limit * 3))]
         out = []
         for tid in ids:
             r = cur.execute("SELECT * FROM trap WHERE trap_id=?", (tid,)).fetchone()

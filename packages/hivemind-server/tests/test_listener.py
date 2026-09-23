@@ -66,7 +66,7 @@ FRAMES = [
 ]
 
 
-def test_listener_render_matches_the_client_exactly():
+def test_listener_render_matches_the_client_exactly(tmp_path):
     """Two copies of the rendering rules exist because the plugin cannot import the client
     package. This test is what keeps them from drifting apart."""
     from hivemind.bus import render as client_render
@@ -75,14 +75,26 @@ def test_listener_render_matches_the_client_exactly():
         assert listener_render(f) == client_render(f), f
     assert listener_render({"type": "ping"}) is None
 
-
-def test_listener_never_emits_a_clippable_line():
-    listener_render = _load_listener().render
+    # The local inbox travels with the rendering rules: a clipped line names the file it was
+    # appended to, so an implementation that forgot to record would say so in its own output.
+    # One shared path, since the pointer names it and two paths would differ only there.
+    inbox = tmp_path / "bus-inbox.jsonl"
     for f in FRAMES:
-        line = listener_render(f)
-        if line is not None:
-            assert len(line) <= 512, (len(line), f)
-            assert "\n" not in line
+        assert listener_render(f, inbox=inbox) == client_render(f, inbox=inbox), f
+    lines = inbox.read_text().splitlines()
+    assert lines and lines[0::2] == lines[1::2], "both halves must record the same bytes"
+
+
+def test_listener_never_emits_a_clippable_line(tmp_path):
+    listener_render = _load_listener().render
+    inbox = tmp_path / "bus-inbox.jsonl"
+    for f in FRAMES:
+        # With an inbox the pointer names two routes, so the tail is longer and `room` smaller;
+        # the budget is what must hold, whichever way the line was built.
+        for line in (listener_render(f), listener_render(f, inbox=inbox)):
+            if line is not None:
+                assert len(line) <= 512, (len(line), f)
+                assert "\n" not in line
 
 
 def test_guide_sh_installs_the_listener(tmp_path, monkeypatch):
@@ -102,9 +114,9 @@ def hub():
 
 
 def test_listen_key_round_trips(hub):
-    k = hub.mint_listen_key("mac")["listen_key"]
-    peer = hub.redeem_key(k)
-    assert peer is not None and peer.label == "mac"
+    k = hub.mint_listen_key("mac", user="nik")["listen_key"]
+    peer, user = hub.redeem_key(k)
+    assert peer is not None and peer.label == "mac" and user == "nik"
 
 
 def test_listen_key_is_reusable(hub):
@@ -114,24 +126,31 @@ def test_listen_key_is_reusable(hub):
     assert hub.redeem_key(k) is not None
 
 
-def test_listen_key_survives_a_server_restart(hub, tmp_path):
+def test_listen_key_survives_a_server_restart(tmp_path):
     """A fresh Hub with the same on-disk secret must still admit an existing listener."""
-    path = tmp_path / "bus_secret"
-    bus_ws.register_secret("restart", path)
-    k = bus_ws.Hub("restart").mint_listen_key("mac")["listen_key"]
+    scope = bus_ws._scope(tmp_path)
+    bus_ws.register_secret(tmp_path)
+    k = bus_ws.Hub(scope).mint_listen_key("mac", user="nik")["listen_key"]
 
-    bus_ws._SECRETS.pop("restart", None)          # simulate the process going away
-    bus_ws.register_secret("restart", path)       # ...and coming back on the same data dir
-    fresh = bus_ws.Hub("restart")
-    peer = fresh.redeem_key(k)
+    bus_ws._SECRETS.pop(scope, None)              # simulate the process going away
+    bus_ws.register_secret(tmp_path)              # ...and coming back on the same data dir
+    fresh = bus_ws.Hub(scope)
+    peer, user = fresh.redeem_key(k)
     assert peer is not None and peer.label == "mac", "a restart must not orphan every listener"
+    assert user == "nik", "and it must still know whose access to check"
 
 
 def test_tampered_or_foreign_listen_key_is_refused(hub, tmp_path):
-    k = hub.mint_listen_key("mac")["listen_key"]
-    scheme, label, exp, sig = k.split(".")
-    assert hub.redeem_key(f"{scheme}.{label}.{int(exp) + 86400}.{sig}") is None, "expiry is signed"
-    assert hub.redeem_key(f"{scheme}.{bus_ws._b64(b'root')}.{exp}.{sig}") is None, "label is signed"
+    k = hub.mint_listen_key("mac", user="nik")["listen_key"]
+    scheme, label, user, exp, sig = k.split(".")
+    assert hub.redeem_key(f"{scheme}.{label}.{user}.{int(exp) + 86400}.{sig}") is None, \
+        "expiry is signed"
+    assert hub.redeem_key(f"{scheme}.{bus_ws._b64(b'root')}.{user}.{exp}.{sig}") is None, \
+        "label is signed"
+    assert hub.redeem_key(f"{scheme}.{label}.{bus_ws._b64(b'root')}.{exp}.{sig}") is None, \
+        "user is signed"
+    assert hub.redeem_key(f"{scheme}.{label}.{exp}.{sig}") is None, \
+        "a pre-user key names nobody, so there is no access to re-check"
     assert hub.redeem_key("garbage") is None
     assert hub.redeem_key("") is None
     assert bus_ws.Hub("other-project").redeem_key(k) is None, "keys must not cross projects"
@@ -144,12 +163,12 @@ def test_expired_listen_key_is_refused(hub, monkeypatch):
 
 
 def test_secret_file_is_owner_only(tmp_path):
+    bus_ws.register_secret(tmp_path)
     path = tmp_path / "bus_secret"
-    bus_ws.register_secret("perm", path)
     assert path.stat().st_mode & 0o077 == 0, "the bus signing key must not be group/world readable"
 
 
-def test_bus_connect_returns_a_command_a_plugin_only_machine_can_run():
+def test_bus_connect_returns_a_command_a_plugin_only_machine_can_run(tmp_path):
     """The regression this file exists for. The command must run with python3 against a path built
     from $HOME, and must NOT name the `hivemind` CLI: that ships in hivemind-client, which a
     machine holding only the Claude Code plugin has not installed."""
@@ -164,14 +183,30 @@ def test_bus_connect_returns_a_command_a_plugin_only_machine_can_run():
                 return fn
             return deco
 
+    # Under tmp_path, NOT beside this file: bus_connect calls register_secret(dir), which mints a
+    # real 32-byte HMAC key into whatever directory it is handed. Pointed at the source tree it
+    # wrote a live secret into the working copy on every run — one such key has already reached
+    # origin that way. .gitignore covers it, but an ignore rule is the second line of defence and
+    # this is the first.
     class FakeProject:
         name = "plugin-only"
-        dir = pathlib.Path(__file__).resolve().parent / "_tmp_plugin_only"
+        dir = tmp_path / "plugin-only"
 
-    FakeProject.dir.mkdir(exist_ok=True)
-    bus_ws_tools.attach(FakeMCP(), FakeProject, type("C", (), {"public_url": "http://box:8787"}))
+    FakeProject.dir.mkdir()
+    # build_app does this for every project it mounts; this test stands in for build_app, and
+    # bus_connect now refuses a project with no /p/<name>/ prefix rather than handing back a URL
+    # that 404s. test_bus_connect_refuses_a_project_that_has_no_routes_yet covers the other side.
+    bus_ws.register_mount(FakeProject.dir)
+    bus_ws_tools.attach(FakeMCP(), type("C", (), {"public_url": "http://box:8787"}))
 
-    out = captured["bus_connect"](label="remote-session")
+    # The hub and the ws URL are resolved per CALL now, from the project of the call in flight —
+    # published by envelope.with_project on the real path, which this FakeMCP stands in for.
+    from hivemind_server import envelope
+    tok = envelope._PROJECT.set(FakeProject)
+    try:
+        out = captured["bus_connect"](label="remote-session")
+    finally:
+        envelope._PROJECT.reset(tok)
     cmd = out["monitor_command"]
     assert cmd.startswith("python3 "), cmd
     assert "$HOME/.hivemind/bus-listen.py" in cmd, cmd

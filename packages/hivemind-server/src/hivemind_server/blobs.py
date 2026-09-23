@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 from typing import BinaryIO, Iterable, Optional
 
-from .db import Database, Invalid, NotFound
+from .db import LEGACY_USER, Database, Invalid, NotFound
 
 
 class BlobStore:
@@ -39,6 +39,61 @@ class BlobStore:
     def path_for(self, digest: str) -> Path:
         _, hexd = self.parse_digest(digest)
         return self.root / "sha256" / hexd[:2] / hexd[2:4] / hexd
+
+    MIN_PREFIX = 8    # below this, a prefix collides by luck rather than by content
+
+    def resolve_digest(self, maybe_prefix: str) -> str:
+        """Accept a full digest or a unique prefix; refuse anything ambiguous or absent.
+
+        A listing shows a shortened digest, so a prefix is what a caller actually has in hand. The
+        alternative — treating a short digest as a literal that simply matches nothing — made a
+        truncated lookup indistinguishable from a real orphan, and the natural response to a false
+        orphan report is to re-upload the artifact (eight PoCs, all of them attached, were
+        reported orphaned this way).
+
+        A FULL 64-character digest is checked for existence too, and not just waved through: a
+        digest that was never uploaded would otherwise come back as the same silent empty answer
+        the short one did. "Orphaned" means stored and unreferenced — never absent.
+        """
+        raw = maybe_prefix or ""
+        if ":" in raw:
+            algo, raw = raw.split(":", 1)
+            if algo.strip().lower() != "sha256":
+                raise Invalid(f"only sha256 digests are supported, not {algo.strip()!r}")
+        raw = raw.strip().lower()
+        if not raw or not all(c in "0123456789abcdef" for c in raw):
+            raise Invalid(f"not a sha256 digest or hex prefix: {maybe_prefix!r}")
+        if len(raw) > 64:
+            raise Invalid(f"digest {raw!r} is longer than a sha256 (64 hex characters)")
+        if len(raw) < self.MIN_PREFIX:
+            raise Invalid(f"digest prefix {raw!r} is shorter than {self.MIN_PREFIX} characters; "
+                          f"paste more of it — a short prefix matches by luck, not by content")
+        # A full digest resolves through the primary key; only a prefix has to scan. Sharing one
+        # LIKE between them was not a harmless simplification: `LIKE 'sha256:<64hex>%'` cannot use
+        # the index (SCAN, not SEARCH), which is ~450x slower per lookup — and gc() calls refs()
+        # once per collected digest, so it made the sweep O(n^2) (3.3x at 5000 blobs), with
+        # attach() paying a scan on every REST upload as well.
+        #
+        # The full-length branch still QUERIES, and must keep querying. Returning f"sha256:{raw}"
+        # unchecked is precisely the short-circuit that let a digest nobody ever uploaded answer
+        # like a stored orphan; "orphaned" has to mean stored and unreferenced, never absent.
+        with self.db.read() as cur:
+            if len(raw) == 64:
+                hits = [r[0] for r in cur.execute(
+                    "SELECT digest FROM blob WHERE digest = ?", (f"sha256:{raw}",))]
+            else:
+                hits = [r[0] for r in cur.execute(
+                    "SELECT digest FROM blob WHERE digest LIKE ? LIMIT 2", (f"sha256:{raw}%",))]
+        if not hits:
+            if len(raw) == 64:
+                raise NotFound(f"no blob sha256:{raw} is stored here — it was never uploaded, or "
+                               f"it has been garbage-collected. This is not the same as orphaned, "
+                               f"which means stored and unreferenced")
+            raise NotFound(f"no stored blob starts with {raw!r}")
+        if len(hits) > 1:
+            raise Invalid(f"digest prefix {raw!r} is ambiguous ({len(hits)}+ matches); "
+                          f"paste the full 64-character digest")
+        return hits[0]
 
     def exists(self, digest: str) -> bool:
         return self.path_for(digest).exists()
@@ -145,7 +200,8 @@ class BlobStore:
     # ── references + attach ─────────────────────────────────────────────────────────
     def attach(self, agent_id: str, digest: str, from_version_id: str, *,
                role: str = "attachment", filename: Optional[str] = None) -> dict:
-        self.stat(digest)                                 # ensure the blob exists
+        digest = self.resolve_digest(digest)              # a prefix is what a listing gives you
+        self.stat(digest)                                 # ensure the bytes are on disk too
         with self.db.write(agent_id, "blob_attach") as tx:
             _require_version(tx.cur, from_version_id)
             tx.cur.execute(
@@ -154,12 +210,40 @@ class BlobStore:
                 (digest, from_version_id, role, filename))
         return {"digest": digest, "from_version_id": from_version_id, "role": role}
 
-    def refs(self, digest: str) -> list[dict]:
+    def _refs_rows(self, digest: str) -> list[dict]:
+        """blob_ref rows for an ALREADY-RESOLVED digest. Outside callers want refs()."""
         with self.db.read() as cur:
             return [dict(r) for r in cur.execute(
                 "SELECT from_version_id, role, filename FROM blob_ref WHERE digest=?", (digest,))]
 
+    def resolve_and_refs(self, digest: str) -> tuple[str, list[dict]]:
+        """Resolve once, then list — for callers that need BOTH the digest that was matched and
+        its rows. Calling resolve_digest() and then refs() resolves twice, which on the prefix
+        path is two index scans for one answer."""
+        digest = self.resolve_digest(digest)     # raises on malformed, ambiguous or absent
+        return digest, self._refs_rows(digest)
+
+    def refs(self, digest: str) -> list[dict]:
+        """The versions that ATTACH this blob, i.e. the blob_ref rows pointing at it.
+
+        An empty list means exactly that — no blob_ref row — and NOT that the blob is orphaned.
+        A digest recorded in a node/edge's props, or carried by tool_version.artifact_digest, is
+        a GC root that has no blob_ref row at all: see _digests_mentioned_in_graph(), where 282
+        blobs (1.8 GB) on the live graph are reachable only that way and reading an empty refs
+        list as "collectable" once deleted a live tool artifact. orphans() (the artifact_orphans
+        tool) is the accounting that covers those roots; this method is not.
+
+        Routed through resolve_digest so the three inputs that used to produce an identical `[]`
+        — a truncated digest, a malformed one, and a digest that was never stored — each say
+        which one they are. `WHERE digest=?` on a 17-character string is a well-formed query that
+        matches nothing; it reported eight attached PoCs as orphans.
+        """
+        return self.resolve_and_refs(digest)[1]
+
     def pin(self, agent_id: str, digest: str, reason: str = "") -> dict:
+        # Same reason as refs(): a pin on a digest nobody stored used to be a foreign-key error
+        # at best and a pin protecting nothing at worst.
+        digest = self.resolve_digest(digest)
         with self.db.write(agent_id, "blob_pin") as tx:
             tx.cur.execute("INSERT INTO blob_pin(digest,reason) VALUES(?,?) "
                            "ON CONFLICT(digest) DO UPDATE SET reason=excluded.reason",
@@ -167,7 +251,7 @@ class BlobStore:
         return {"digest": digest, "pinned": True}
 
     # ── orphan accounting: the upstream cause of a bloated blob store ────────────────
-    def orphans(self, *, by_agent: bool = True, older_than_hours: int = 0,
+    def orphans(self, *, by_uploader: bool = True, older_than_hours: int = 0,
                 limit: int = 20) -> dict:
         """Blobs that were uploaded and never attached to anything.
 
@@ -175,33 +259,39 @@ class BlobStore:
         pointing at them are invisible to every other agent and are what the GC eventually
         reclaims. 94 GB (80% of the store) accumulated this way before anyone noticed, so this
         makes the leak visible — and attributable — while it is small.
+
+        Grouped by (user, agent label), not by label alone: the label is a free-form string the
+        uploader chose, so a leak attributed only to it names a job and not a person.
         """
         mentioned = self._digests_mentioned_in_graph()
         cutoff = time.time() - older_than_hours * 3600
         with self.db.read() as cur:
             rows = cur.execute(
-                "SELECT b.digest, b.size, t.tx_time, t.agent_id FROM blob b "
+                "SELECT b.digest, b.size, t.tx_time, t.agent_id, "
+                "COALESCE(t.user_id,?) AS user_id FROM blob b "
                 "JOIN tx t ON t.tx_id = b.created_tx "
-                "WHERE b.digest NOT IN (SELECT digest FROM blob_ref)").fetchall()
-        per_agent: dict = {}
+                "WHERE b.digest NOT IN (SELECT digest FROM blob_ref)",
+                (LEGACY_USER,)).fetchall()
+        per_uploader: dict = {}
         total_n = total_b = 0
         for r in rows:
             if r["digest"] in mentioned:
                 continue
             if older_than_hours and _iso_epoch(r["tx_time"]) > cutoff:
                 continue
-            a = per_agent.setdefault(r["agent_id"], {"agent": r["agent_id"], "blobs": 0,
-                                                     "bytes": 0})
+            key = (r["user_id"], r["agent_id"])
+            a = per_uploader.setdefault(key, {"user": r["user_id"], "agent": r["agent_id"],
+                                              "blobs": 0, "bytes": 0})
             a["blobs"] += 1
             a["bytes"] += r["size"] or 0
             total_n += 1
             total_b += r["size"] or 0
-        ranked = sorted(per_agent.values(), key=lambda d: d["bytes"], reverse=True)[:limit]
+        ranked = sorted(per_uploader.values(), key=lambda d: d["bytes"], reverse=True)[:limit]
         for a in ranked:
             a["gb"] = round(a["bytes"] / 1073741824, 2)
         return {"unattached_blobs": total_n, "bytes": total_b,
                 "gb": round(total_b / 1073741824, 2),
-                "by_agent": ranked if by_agent else [],
+                "by_uploader": ranked if by_uploader else [],
                 "hint": ("attach uploads with artifact_attach(digest, version_id, role) or record "
                          "the digest in the node's props; unattached bytes are garbage-collected")}
 
@@ -261,7 +351,15 @@ class BlobStore:
         deleted = 0
         if not dry_run:
             for digest in collected:
-                if self.refs(digest) or digest in mentioned:   # re-check without holding a lock
+                try:                                           # re-check without holding a lock
+                    referenced = bool(self.refs(digest))
+                except (NotFound, Invalid):
+                    # NotFound: another sweep removed the row under us. Invalid: the row's digest
+                    # is not well-formed (rows can be inserted directly). refs() raises where it
+                    # used to return [], so without Invalid here one junk row aborts every
+                    # remaining deletion in the sweep.
+                    continue
+                if referenced or digest in mentioned:
                     continue
                 # Delete the row FIRST. If anything still references the blob, the foreign key
                 # rejects it and the bytes stay on disk; unlinking first would orphan a live file

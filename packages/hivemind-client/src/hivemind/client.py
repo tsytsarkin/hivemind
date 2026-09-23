@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import random
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterable, Optional, Tuple
 
 import httpx
 
@@ -59,7 +59,17 @@ class Client:
             return r
 
     # ── MCP tool calls ───────────────────────────────────────────────────────────
-    def call(self, tool: str, arguments: Optional[dict] = None, *, _id: int = 1) -> Any:
+    def call(self, tool: str, arguments: Optional[dict] = None, *, _id: int = 1,
+             raise_on_error: bool = True) -> Any:
+        """Invoke one MCP tool and return its payload.
+
+        A tool that refuses — `{"ok": false, ...}`, e.g. a value outside a type's enum — raises
+        `HivemindError` by default, which is what every wrapper below and the CLI are built on.
+        Pass `raise_on_error=False` to get that envelope back as data instead; it changes nothing
+        below the envelope, so auth, HTTP and JSON-RPC failures still raise either way — there is
+        no reply from the tool to return. For a batch, use `call_many`, which records a failed
+        call instead of raising it.
+        """
         arguments = dict(arguments or {})
         arguments.setdefault("agent", self.agent)
         params = {"name": tool, "arguments": arguments,
@@ -81,10 +91,52 @@ class Client:
         if "error" in result:
             raise HivemindError(result["error"].get("message", "rpc error"), kind="rpc")
         payload = _tool_payload(result["result"])
-        if isinstance(payload, dict) and payload.get("ok") is False:
+        if raise_on_error and isinstance(payload, dict) and payload.get("ok") is False:
             raise HivemindError(payload.get("error", "tool error"),
                                 kind=payload.get("error_kind"))
         return payload
+
+    def call_many(self, calls: Iterable[Tuple[str, Optional[dict]]], *,
+                  stop_on_error: bool = False) -> list:
+        """Run a batch to completion, returning one reply per call, in order.
+
+        A single refused row must not be able to abandon the rest: the failure this exists for was
+        one out-of-enum value aborting a whole reaper batch mid-run, leaving the graph
+        half-updated with no record of where it stopped. So a call that fails is recorded here
+        rather than raised. A tool's reply is passed through exactly as the server sent it,
+        refusal included; a call that raised instead is recorded in its place as
+        `{"ok": false, "error_kind": ..., "error": ...}` — the `HivemindError.kind` when it has
+        one (`auth`, `rpc`, and whatever the tool's envelope named), `"error"` when it has none
+        (an HTTP-status failure carries no kind), and `"transport"` when no usable reply came back
+        at all.
+
+        What still raises is the caller's own bug: an item that is not a `(tool, args)` pair,
+        `args` that is not a mapping, or an argument that will not serialise. Recording those as
+        failed calls would send whoever reads the batch looking at the network for a mistake in
+        their own arguments.
+
+        With `stop_on_error=True` the batch stops after the first reply that is not `ok` — however
+        it failed — and that reply is in the returned list: the record of where it stopped is the
+        point.
+        """
+        out: list = []
+        for tool, args in calls:
+            try:
+                out.append(self.call(tool, args, raise_on_error=False))
+            except HivemindError as e:
+                out.append({"ok": False, "error_kind": e.kind or "error", "error": str(e)})
+            except (httpx.HTTPError, json.JSONDecodeError, KeyError) as e:
+                # No usable reply: the connection or timeout (httpx), a body that would not
+                # decode, or one carrying neither `result` nor `error` (the KeyError). Narrow on
+                # purpose — a broad `except Exception` here stamped `TypeError: Object of type
+                # object is not JSON serializable` as a transport failure, which is a caller's bug
+                # wearing a network's clothes. The type name is kept because `str(KeyError)` is
+                # just `'result'`.
+                out.append({"ok": False, "error_kind": "transport",
+                            "error": f"{type(e).__name__}: {e}"})
+            if stop_on_error and not _is_ok(out[-1]):
+                break
+        return out
 
     # ── convenience wrappers ─────────────────────────────────────────────────────
     def upsert(self, type: str, props: dict, **kw) -> dict:
@@ -129,6 +181,21 @@ class Client:
 
     def __exit__(self, *exc):
         self.close()
+
+
+def _is_ok(reply: Any) -> bool:
+    """Did a reply from `call_many` succeed? The same test `call` raises on, negated.
+
+    Deliberately `is False` rather than a truth test on a missing key. Two replies a truth test
+    gets wrong: `_tool_payload` hands back a bare string when a tool answers with an unstructured
+    content block, and `.get` on that is an AttributeError out of a method whose whole contract is
+    that it records failures rather than raising them; and a dict with no `ok` key at all is a
+    success to `call` (it raises only on `ok is False`), so treating it as a failure here would
+    stop a batch on a reply the single-call path calls fine. The server's envelope does add
+    `ok: true` to a dict reply that carries no `ok` of its own — but the two paths have to agree
+    by construction, not because of what the other side of the wire happens to send.
+    """
+    return not (isinstance(reply, dict) and reply.get("ok") is False)
 
 
 def _backoff(attempt: int) -> float:

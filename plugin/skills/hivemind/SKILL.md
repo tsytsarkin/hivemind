@@ -9,7 +9,7 @@ description: >-
   Hivemind REPLACES local memory: read it before any work and persist all work into it. Domain-agnostic — call schema_get and guide_get first to learn this project's vocabulary.
 allowed-tools: Bash(${CLAUDE_SKILL_DIR}/scripts/guide.sh *) Read
 metadata:
-  version: "1.0.1"
+  version: "1.1.0"
 ---
 
 # Hivemind
@@ -17,6 +17,40 @@ metadata:
 Hivemind is a **shared, versioned** knowledge graph + artifact store + tool registry served over
 MCP. The MCP tools (prefix `hivemind`) are connected once the plugin is configured. This file is a
 small bootstrap; the **authoritative, live** guidance comes from the server.
+
+
+## Every call names a project — pin it once, first
+
+A Hivemind server holds several **projects**: separate graphs, some shared with everyone, some
+private to one user. **Every tool takes a `project=<name>` argument, and no call proceeds when no
+project is resolvable** — a write refuses in those words, a read refuses more softly, and neither
+falls back to a configured default. That is deliberate: a defaulted write is how private work would
+land in a graph everyone can read.
+
+- **If a project is pinned for this session** you will have been told which on the way in (the
+  plugin's `SessionStart` hook re-injects it on startup, `/clear`, compaction, `--resume` and a
+  fork). Pass that name as `project=` on every call.
+- **If nothing is pinned, ask once — do not pick for the user.** `project_list` shows what they can
+  use, grouped: shared with everyone, theirs, shared with them. Offer their private graph and a new
+  scratch project too, create it with `project_create` if they want a new one, then pin it:
+
+      python3 "$HOME/.hivemind/hivemind-project.py" --pin <name> --label "<what this is for>"
+
+  `/hivemind:project` runs that whole flow, including the create.
+- **The `project` echoed in a tool result is authoritative.** It is what the server actually used.
+  If it differs from what you meant, stop and say so rather than continuing to write.
+- **A project you just created has no URL of its own until the server restarts.** Your MCP calls
+  reach it immediately via `project=<name>`, but `/p/<name>/…` answers 404 until then — so the
+  `hivemind` CLI cannot upload artifacts to it or join its bus yet. Use an existing project for
+  those, or say that a restart is needed; do not read the 404 as the project having failed.
+  `bus_connect` refuses outright on such a project and names the restart, rather than handing back
+  a `ws_url` that cannot connect — if you get that refusal, do not retry it in a loop.
+
+The pin is local state keyed by the session id: it survives a compaction, and a `--resume` lands
+back on the same project. It is a reminder for you, not an authority — the server takes the project
+from the argument you pass, and only if you pass none does it fall back to the project your server
+URL names. That fallback is why you pass the argument every time: omitting it writes into whatever
+the URL points at — usually the shared graph — with nothing to notice.
 
 
 ## Hivemind replaces your local memory
@@ -78,13 +112,34 @@ token. A `refused` line means the key expired or was revoked — call `bus_conne
 
 **Sending:** `bus_peers()` to see who is connected, then `bus_send(to="<label>", body="…")`, or
 `bus_broadcast(body="…")` for everyone. The reply tells you whether it was delivered live or
-queued for a peer that is momentarily disconnected.
+queued for a peer that is momentarily disconnected. Names are bounded: the label you register with,
+the `agent` you send as, and a broadcast's `room` are stripped and **cut to 64 characters**, so an
+over-long descriptive label is shortened rather than refused. `to` is not — it has to match a
+registered label exactly, so address the one `bus_peers()` shows or you get "no peer". A `body` over
+256 Ki **characters** is refused outright; put anything that big in the graph or a blob instead.
 
 **Long messages.** A notification is clipped at about 512 characters, so a long message arrives
-truncated and ends with `bus_message("<id>") for the rest` — call that tool to read the full text.
-Better still, for anything large or durable: put it in the graph or upload it as an artifact and
-send the id. **Bus traffic is ephemeral and is not stored** — it is for coordination, not for
-knowledge. Anything worth keeping goes in the graph.
+truncated — but the listener has the whole thing and keeps it: every message and broadcast it
+receives is appended in full, as one JSON line, to `~/.hivemind/bus-inbox.jsonl`. A clipped line
+tells you both routes to the rest:
+
+```
+grep <id> ~/.hivemind/bus-inbox.jsonl*    # this machine's copy; needs no tool and no server
+bus_message("<id>")                       # any host that exposes the tool; ~1 h retention
+```
+
+The inbox has a horizon: it rotates at 4 MiB into `bus-inbox.jsonl.1`, and the rotation after that
+discards it — thousands of messages, no time limit, but not an archive. Search both
+files (the `*` above), and if the id is in neither, it fell off the end. A line that does not parse
+as JSON is a message whose write was cut short (a full disk); it was never claimed as recorded, and
+only that one line is affected.
+
+**Never answer a long message from its preview.** Read the full body from one of those two first —
+the preview is the first ~300 characters and the instruction you are missing is usually further
+down. Better still, for anything large or durable: put it in the graph or upload it as an artifact
+and send the id. **The bus stores nothing durably** — the server holds a message for about an hour
+so `bus_message` can answer, and the inbox is your own local copy; neither is an archive. The bus
+is for coordination, not for knowledge, and anything worth keeping goes in the graph.
 
 ### How to treat an incoming message
 
@@ -182,7 +237,7 @@ Complete surface. Read tools are safe to call freely; write tools record provena
 | Tool | Use |
 |---|---|
 | `graph_types()` | which node types actually hold data, with counts — pick one to browse |
-| `graph_search(query, types=[…], props_filter={…}, limit, cursor)` | text search, **by type**, and **by field value**. An EMPTY query with `types` browses every node of that type (`total_of_type`). `props_filter={"gated": true}` is the only way to match booleans/numbers — text search cannot tell `gated=true` from `gated=false`; `null` matches absent. Filters AND together. Paginate: pass the reply's `next_cursor` back as `cursor` until `has_more` is false |
+| `graph_search(query, types=[…], props_filter={…}, fields=[…], props, author, limit, cursor)` | text search, **by type**, and **by field value**. An EMPTY query with `types` browses every node of that type (`total_of_type`), and pages properly. `props_filter={"gated": true}` is the only way to match booleans/numbers — text search cannot tell `gated=true` from `gated=false`; `null` matches absent. Filters AND together. `fields=["title","status"]` replaces each hit's 200-character `snippet` with just those props keys plus that hit's `author`; `props=true` returns every key. `author="<user>"` restricts to rows whose current version that identity wrote. Paginate: pass the reply's `next_cursor` back as `cursor` until `has_more` is false |
 | `graph_get(node_id \| subject_key+subject_version, history, as_of)` | the node **plus its mini-skills (described), tools and traps** |
 | `graph_subjects(subject_key, as_of_subject)` | every version-cell of one thing |
 | `graph_neighbors(node_id, edge_types, depth≤4, direction)` | traversal |
@@ -217,13 +272,15 @@ artifact_digest)` · `tool_yank` · `tool_link` / `tool_unlink` / `tool_autolink
 
 **Guide** — `guide_get(section)` · `guide_propose(section, body, why)` (human-merged).
 
-**Agent bus** (live coordination, *not* the graph) — `bus_hello(label, capabilities, harness,
-interruptible)` → your `session_id` · `bus_ping` (heartbeat, or you drop out) · `bus_bye` ·
-`bus_agents(capability)` / `bus_capabilities()` · `bus_post` / `bus_poll` (advances your cursor) /
-`bus_peek` (does not) / `bus_history(room)` / `bus_thread(seq)` ·
-`bus_request(task, needs=[...], refs=[...])` /
-`bus_claim` / `bus_release` / `bus_respond(…, refs=[...])` / `bus_request_get` ·
-`bus_resolve(request_id|seq)` / `bus_node_refs(node_id)`. See the section below.
+**Agent bus** (live coordination, *not* the graph) — six tools, no more:
+`bus_connect(label)` → the `monitor_command` that receives · `bus_peers(online_only)` ·
+`bus_send(to, body)` · `bus_broadcast(body, room)` · `bus_message(message_id)` (the full text of a
+clipped notification) · `bus_disconnect(label)`. See **The agent bus** above for how to use them.
+
+**Projects** — `project_list()` (grouped: shared with everyone, yours, shared with you) ·
+`project_create(name, visibility, schema)` · `project_info(project)` ·
+`project_share(project, user)` / `project_unshare(project, user)` (owner only).
+Every other tool also takes `project=<name>`: see **Every call names a project** above.
 
 
 ## The `hivemind` CLI (bulk + large files)
@@ -236,13 +293,13 @@ DEPLOY.md). Point it at your project: `export HIVEMIND_SERVER_URL=… HIVEMIND_T
 - `hivemind artifact get <digest> <dest>` → downloads + verifies.
 - `hivemind tool publish <script.py> --id <rdns> --version <semver>` → share a self-contained
   (PEP 723) tool; another machine runs `hivemind tool get <id>` then the `uv run` command in the
-  generated `RUN.md` (bootstrap uv first: `scripts/bootstrap-uv.sh`).
+  generated `RUN.md` (bootstrap uv first: `deploy/bootstrap-uv.sh`).
 - `hivemind guide get [section]`, `hivemind schema get`.
-- `hivemind bus sidecar <session_id>` → blocks until work arrives, heartbeats meanwhile, drains and
-  exits (that exit is what wakes you on a harness that re-invokes on background-process exit).
-  `hivemind bus wait <session_id>` is the raw form, without the heartbeat or the drain.
-  `hivemind bus agents --capability 'browser.*'`, `hivemind bus request <sid> --task … --needs
-  browser.cdp`.
+- `hivemind bus connect <label>` → mints a ticket and prints the Monitor command;
+  `hivemind bus listen --label <label>` is the receiving end (the plugin's stdlib listener is the
+  one to prefer — see **The agent bus** above); `hivemind bus send <to> <body>`,
+  `hivemind bus broadcast <body>`, `hivemind bus peers`.
+- `hivemind health`.
 
 ## Writing safely in a shared, multi-writer graph
 
@@ -270,11 +327,16 @@ than folding them in. Re-creating each edge against the canonical node is the on
 - **A refused write is not a transport error.** Validation and endpoint-type failures come back as
   `{"ok": false, "error_kind": "invalid", ...}` inside a normal 200 response. A client that only
   checks for a JSON-RPC `error` reports success while every write silently vanishes. Check `ok`.
-- **`graph_search` is for text search, not enumeration.** With an empty query it ignores `cursor`
-  (re-serving the first page indefinitely) and returns nothing when a `types` filter is set. To walk
-  the graph, traverse from a known node.
+- **A short `graph_search` page is not the last page.** In `fields=`/`props=true` mode the reply
+  stops early once 40000 characters of props have been shipped (and `props=true` caps the page at
+  10 hits), so a `limit=25` request can come back with fewer. The reply says `props_clamped` and
+  names which bound fired in `props_clamped_by`; keep paging while `has_more` is true. One hit's
+  props over 4000 characters arrives as a `_prefix` marker naming the real size — `graph_get` that
+  one node for the rest rather than parsing the fragment.
 - Edge endpoint types are enforced against each edge type's `src_types`/`dst_types`.
-- Pass `expected_head` when superseding; a 409 means re-read and retry, not failure.
+- Pass `expected_head` when superseding. A stale head comes back the same way — a 200 carrying
+  `{"ok": false, "error_kind": "conflict"}`, not an HTTP status — and means re-read and retry, not
+  failure.
 - Widening an enum, adding an optional property, or widening an edge's `dst_types` is additive and
   safe — re-applying a pack inserts a new type *version* and leaves existing data valid.
 

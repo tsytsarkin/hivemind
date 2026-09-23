@@ -8,7 +8,9 @@
 CREATE TABLE IF NOT EXISTS tx (
   tx_id    INTEGER PRIMARY KEY,
   tx_time  TEXT    NOT NULL,                              -- ISO-8601 UTC
-  agent_id TEXT    NOT NULL,                              -- who wrote it
+  agent_id TEXT    NOT NULL,                              -- free-form LABEL ("which job was this")
+  user_id  TEXT,                                          -- the token's user: the real author
+  device   TEXT,                                          -- the token's device, for the same reason
   reason   TEXT,                                          -- free-text note
   meta     TEXT    NOT NULL DEFAULT '{}' CHECK (json_valid(meta))
 );
@@ -55,6 +57,7 @@ CREATE TABLE IF NOT EXISTS node (
   subject_version TEXT,
   subject_order   TEXT,
   redirect_to     TEXT REFERENCES node(node_id),         -- cross-identity merge tombstone (built-in)
+  created_by      TEXT,                                  -- user who first created it (vs. last author)
   created_tx      INTEGER NOT NULL REFERENCES tx(tx_id)
 );
 -- one node per (subject_key, subject_version) cell → upsert-by-subject is deterministic
@@ -62,6 +65,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_subject
   ON node(subject_key, subject_version) WHERE subject_key IS NOT NULL;
 CREATE INDEX IF NOT EXISTS ix_subject_order ON node(subject_key, subject_order);
 CREATE INDEX IF NOT EXISTS ix_node_type ON node(node_type);
+CREATE INDEX IF NOT EXISTS ix_node_created_by ON node(created_by);
 
 CREATE TABLE IF NOT EXISTS edge (
   edge_id     TEXT PRIMARY KEY,
@@ -82,6 +86,7 @@ CREATE TABLE IF NOT EXISTS node_version (
   props        TEXT NOT NULL CHECK (json_valid(props)),
   schema_ver   INTEGER NOT NULL,                         -- which node_type version validated this
   content_hash TEXT NOT NULL,                            -- sha256(canonical json) — dedup + idempotency
+  author_user  TEXT,                                     -- token's user; NULL = written before authorship
   tx_from      INTEGER NOT NULL REFERENCES tx(tx_id),
   tx_to        INTEGER NOT NULL DEFAULT 9223372036854775807,
   retracted    INTEGER NOT NULL DEFAULT 0,
@@ -91,6 +96,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_node_head
   ON node_version(node_id) WHERE tx_to = 9223372036854775807;
 CREATE INDEX IF NOT EXISTS ix_node_asof ON node_version(node_id, tx_from, tx_to);
 CREATE INDEX IF NOT EXISTS ix_node_ver_hash ON node_version(content_hash);
+-- The contributor chain is COMPUTED from these rows (GROUP BY author_user), never stored as an
+-- array on the node: a denormalized author list is a second copy of the truth and drifts from it.
+CREATE INDEX IF NOT EXISTS ix_node_ver_author ON node_version(author_user);
 
 CREATE TABLE IF NOT EXISTS edge_version (
   version_id   TEXT PRIMARY KEY,
@@ -100,6 +108,7 @@ CREATE TABLE IF NOT EXISTS edge_version (
   props        TEXT NOT NULL CHECK (json_valid(props)),
   schema_ver   INTEGER NOT NULL,
   content_hash TEXT NOT NULL,
+  author_user  TEXT,                                     -- token's user; NULL = written before authorship
   tx_from      INTEGER NOT NULL REFERENCES tx(tx_id),
   tx_to        INTEGER NOT NULL DEFAULT 9223372036854775807,
   retracted    INTEGER NOT NULL DEFAULT 0,
@@ -108,6 +117,7 @@ CREATE TABLE IF NOT EXISTS edge_version (
 CREATE UNIQUE INDEX IF NOT EXISTS ux_edge_head
   ON edge_version(edge_id) WHERE tx_to = 9223372036854775807;
 CREATE INDEX IF NOT EXISTS ix_edge_asof ON edge_version(edge_id, tx_from, tx_to);
+CREATE INDEX IF NOT EXISTS ix_edge_ver_author ON edge_version(author_user);
 
 -- ── bulk edges (versioned=0): high-volume imported graphs, no per-edge history ───
 CREATE TABLE IF NOT EXISTS edge_bulk (
@@ -116,6 +126,9 @@ CREATE TABLE IF NOT EXISTS edge_bulk (
   dst_node_id TEXT NOT NULL,
   props       TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(props)),
   source_tag  TEXT NOT NULL,                             -- e.g. "kernelcache@26A5388g"; replace-by-tag
+  -- No author_user here, deliberately: a bulk edge has no version row to carry one. Bulk edges are
+  -- attributed through their created_tx (which records user_id) and their source_tag alone, so
+  -- "every edge carries an author" is true of versioned edges only.
   created_tx  INTEGER NOT NULL REFERENCES tx(tx_id),
   PRIMARY KEY (edge_type, src_node_id, dst_node_id, source_tag)
 );
@@ -155,6 +168,7 @@ CREATE TABLE IF NOT EXISTS tool_version (
   artifact_digest TEXT REFERENCES blob(digest),
   yanked          INTEGER NOT NULL DEFAULT 0,
   yanked_reason   TEXT,
+  author_user     TEXT,                                   -- the token's user who published it
   created_tx      INTEGER NOT NULL REFERENCES tx(tx_id),
   PRIMARY KEY (id, version)
 );
@@ -167,13 +181,14 @@ CREATE TABLE IF NOT EXISTS guide_section (
   updated_tx    INTEGER NOT NULL REFERENCES tx(tx_id)
 );
 CREATE TABLE IF NOT EXISTS guide_proposal (
-  id         TEXT PRIMARY KEY,
-  section    TEXT NOT NULL,
-  body       TEXT NOT NULL,
-  agent_id   TEXT NOT NULL,
-  why        TEXT,
-  status     TEXT NOT NULL DEFAULT 'proposed',            -- proposed | merged | rejected
-  created_tx INTEGER NOT NULL REFERENCES tx(tx_id)
+  id          TEXT PRIMARY KEY,
+  section     TEXT NOT NULL,
+  body        TEXT NOT NULL,
+  agent_id    TEXT NOT NULL,                              -- free-form agent LABEL
+  author_user TEXT,                                       -- the token's user who proposed it
+  why         TEXT,
+  status      TEXT NOT NULL DEFAULT 'proposed',           -- proposed | merged | rejected
+  created_tx  INTEGER NOT NULL REFERENCES tx(tx_id)
 );
 
 -- ── meta: schema_version counter + engine bookkeeping ───────────────────────────
@@ -202,7 +217,8 @@ CREATE TABLE IF NOT EXISTS skill_version (
   tags          TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(tags)),
   requires      TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(requires)),  -- tools/skills needed
   verified_how  TEXT,                                    -- how the author confirmed it works
-  author        TEXT,
+  author        TEXT,                                    -- free-form agent LABEL
+  author_user   TEXT,                                    -- the token's user: the real author
   yanked        INTEGER NOT NULL DEFAULT 0,
   yanked_reason TEXT,
   created_tx    INTEGER NOT NULL REFERENCES tx(tx_id),
@@ -229,7 +245,8 @@ CREATE TABLE IF NOT EXISTS trap (
   confidence   TEXT NOT NULL DEFAULT 'medium',           -- low | medium | high
   status       TEXT NOT NULL DEFAULT 'active',           -- active | retired | disputed
   status_reason TEXT,
-  author       TEXT,
+  author       TEXT,                                     -- free-form agent LABEL
+  author_user  TEXT,                                     -- the token's user: the real author
   created_tx   INTEGER NOT NULL REFERENCES tx(tx_id),
   updated_tx   INTEGER NOT NULL REFERENCES tx(tx_id)
 );

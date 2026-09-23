@@ -19,11 +19,20 @@ Design notes that are load-bearing:
   definition; anything durable belongs in the graph. Keeping it in memory also means a restart is
   a clean slate rather than a pile of dead sessions.
 * **The offline queue is bounded.** A message sent while a peer is briefly disconnected is held
-  and delivered on reconnect, but only `MAX_QUEUE` of them and only for `QUEUE_TTL`. Unbounded
-  retention is how the blob store quietly grew to 94 GB; a chat buffer gets a hard cap.
+  and delivered on reconnect, but only `MAX_QUEUE` of them, only for `QUEUE_TTL`, and only up to
+  `QUEUE_BYTES` of body — counted in real UTF-8 bytes, because `len()` on a `str` counts code
+  points and UTF-8 spends up to four bytes on one. Unbounded retention is how the blob store
+  quietly grew to 94 GB; a chat buffer gets a hard cap, and a cap has to be in the unit it names.
 * **Auth is a ticket, not a header.** The listener connects over a URL, not an authenticated HTTP
   call, so an authenticated MCP call mints a single-use, short-lived ticket and the long-lived
   bearer token never appears in a URL, a shell history or an access log.
+* **The credential names its user, and the project ACL is re-checked against it.** Signing only a
+  label made a listen key a bearer credential for seven days: a member removed from a private
+  project kept receiving until it expired. Both credentials now carry the minting user inside the
+  signature, and `websocket_endpoint` re-runs `projects_meta.can_access` — at the handshake, and
+  again while the socket is open, since a listener holds one socket for days and would otherwise
+  never be re-checked. This is the only place the ACL can be enforced for the bus:
+  `app.ProjectAuthMiddleware` returns early for non-HTTP scopes.
 * **Agents reach this through `hivemind bus listen`, not `Monitor(ws=…)` directly.** Measured:
   Monitor's ws source refuses private addresses ("the address is in a private, link-local, or
   cloud-metadata range"), and this server lives on a LAN address. A subprocess carries no such
@@ -40,6 +49,7 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import os
 import secrets
 import threading
@@ -49,23 +59,96 @@ from collections import deque
 from contextvars import ContextVar
 from typing import Any, Dict, Iterable, Optional
 
+from .identity import Identity
 from .ids import ulid
+from .projects_meta import can_access, load_with_problem
+
+log = logging.getLogger(__name__)
 
 PROTOCOL_VERSION = 1
 
 TICKET_TTL = 60.0            # seconds a mint stays redeemable; single use
 MAX_QUEUE = 100              # per-peer offline messages
 QUEUE_TTL = 3600.0           # seconds an undelivered message is worth keeping
-MAX_BODY = 256 * 1024        # per-frame body cap; big payloads belong in the blob store
+MAX_BODY = 256 * 1024        # per-frame body cap, in CODE POINTS; big payloads belong in blobs
+LABEL_CAP = 64               # agent labels and room names; see _norm_label for why it is a cap
 HEARTBEAT = 30.0             # server->client ping interval
 RECENT_MAX = 500             # recent frames kept retrievable by id
 RECENT_TTL = 3600.0          # ...and for how long
-RECENT_BYTES = 32 * 1024 * 1024   # ...and never more than this in total
-QUEUE_BYTES = 8 * 1024 * 1024     # per-peer offline queue byte ceiling
+RECENT_BYTES = 32 * 1024 * 1024   # ...and never more than this in total, in REAL UTF-8 bytes
+QUEUE_BYTES = 8 * 1024 * 1024     # per-peer offline queue ceiling, also real UTF-8 bytes
 LISTEN_KEY_TTL = 7 * 86400   # a listener's own credential: long-lived, reusable, revocable
 
+# The user recorded in a credential minted with no identity in scope (auth off, or a test driving
+# the Hub directly). The colon is load-bearing: identity.validate_username forbids it, and
+# project_tools.share validates every member, so this can never equal a real owner or member — such
+# a credential reaches a shared project and no private one.
+UNKNOWN_USER = "unknown:bus"
+
 # Per-project HMAC secret for listen keys, loaded from the project directory at startup.
+# Keyed by _scope(), never by project name — see there.
 _SECRETS: Dict[str, bytes] = {}
+
+# Projects that actually have a /p/<name>/ prefix in a live app. build_app fills this in as it
+# builds the mounts; nothing removes an entry, because Starlette never removes a route.
+#
+# This exists because bus_connect used to hand back a ws:// URL and a monitor_command for a project
+# created AFTER startup, where the whole prefix 404s. The listener then got a 403, classified it
+# `refused`, and printed "call bus_connect for a fresh URL" — so the agent looped. project_tools
+# already knew (its create reply says so) and so did project.md and SKILL.md; bus_connect is the
+# surface the agent acts on, so it has to say so itself.
+#
+# Keyed by directory for the same reason _scope() gives: nothing enforces one app per process, and
+# two deployments can hold a same-named project. Keyed by NAME, a project mounted in one app would
+# report itself reachable in the other.
+_MOUNTED: set = set()
+
+
+def _scope(project_dir: Path) -> str:
+    """The key under which a project's hub and signing secret are held.
+
+    The project DIRECTORY, not its name. Nothing enforces one app per process — the tests build
+    several, and an embedding may too — and two deployments can hold a same-named project. Keyed by
+    name, the second build_app to run would overwrite the first's signing secret and both would
+    share one hub, so a listen key minted against one deployment would verify against the other's
+    and admit its holder to that bus. Same hazard, and the same shape of fix, as the one
+    projects_meta._CACHE applies to its own name collision (that one keys on the literal
+    project.json path, not on this; the two need not agree, they only need to be per-directory).
+
+    realpath, not str(): two spellings of ONE directory — a relative path, or a data root reached
+    through a symlink — would split the hub and the secret in two, so a message sent by a tool
+    would land on a different hub from the socket that should have received it. Every caller
+    happens to pass the same registry Project.dir today, which makes that safe by accident; this
+    makes it safe by construction.
+    """
+    return os.path.realpath(project_dir)
+
+
+def register_mount(project_dir: Path) -> None:
+    """Record that this project has its own /p/<name>/ routes. Called by app.build_app per mount."""
+    _MOUNTED.add(_scope(project_dir))
+
+
+def is_mounted(project_dir: Path) -> bool:
+    """Does /p/<name>/ exist for this project, or does the whole prefix 404 until a restart?"""
+    return _scope(project_dir) in _MOUNTED
+
+
+# What bus_connect and bus_send say instead of handing back a URL that cannot work. One wording,
+# because two spellings of "this project has no routes yet" would drift, and this one is what an
+# agent acts on.
+NOT_MOUNTED = ("project {name!r} has no /p/{name}/ routes yet, so it has no bus: the server builds "
+               "those mounts at startup and this project was created after it. Nothing here would "
+               "connect — the URL would 404 and the listener would report `refused` and ask you to "
+               "call bus_connect again, forever. Restart the server (deploy/restart.sh), then call "
+               "bus_connect again. Until then the project is fully usable on the project-neutral "
+               "/mcp endpoint with project={name!r}; only the bus, blob transfer and the guide and "
+               "skill REST routes need the restart.")
+
+
+def not_mounted_error(name: str) -> "BusError":
+    return BusError(NOT_MOUNTED.format(name=name))
+
 
 # The address the CURRENT caller used to reach us, captured per request by the ASGI middleware.
 #
@@ -86,35 +169,42 @@ def current_origin() -> str:
     return _ORIGIN.get()
 
 
-def register_secret(project_name: str, path: Path) -> bytes:
+def register_secret(project_dir: Path) -> bytes:
     """Load (or create) the secret that signs this project's listen keys.
 
     It lives on disk rather than in memory so a key stays valid across a server restart. That is
     the whole point of the key: a listener that reconnects after the server bounced must get back
     in on its own, without an agent noticing and re-running bus_connect.
     """
+    scope, path = _scope(project_dir), project_dir / "bus_secret"
     try:
         secret = path.read_bytes()
         if len(secret) >= 32:
-            _SECRETS[project_name] = secret
+            _SECRETS[scope] = secret
             return secret
     except FileNotFoundError:
         pass
     secret = secrets.token_bytes(32)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
-    tmp.write_bytes(secret)
-    os.chmod(tmp, 0o600)          # the signing key for bus access: owner-only
+    tmp.unlink(missing_ok=True)   # a leftover from a crashed run
+    # Created AT 0600, not chmod'd after the write: a chmod-after-write leaves the signing key for
+    # bus access briefly world-readable under a permissive umask, which is the same window
+    # jsonstore.save opens O_EXCL to avoid. Anyone who reads these 32 bytes can mint a listen key
+    # for any label on this project.
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "wb") as f:
+        f.write(secret)
     tmp.replace(path)
-    _SECRETS[project_name] = secret
+    _SECRETS[scope] = secret
     return secret
 
 
-def _secret(project_name: str) -> bytes:
+def _secret(scope: str) -> bytes:
     """Fall back to a process-lifetime secret when no project dir was registered (unit tests)."""
-    got = _SECRETS.get(project_name)
+    got = _SECRETS.get(scope)
     if got is None:
-        got = _SECRETS[project_name] = secrets.token_bytes(32)
+        got = _SECRETS[scope] = secrets.token_bytes(32)
     return got
 
 
@@ -124,6 +214,54 @@ def _b64(raw: bytes) -> str:
 
 def _unb64(txt: str) -> bytes:
     return base64.urlsafe_b64decode(txt + "=" * (-len(txt) % 4))
+
+
+def _norm_label(value: Optional[str], default: str) -> str:
+    """Normalise anything that names a thing on the bus: a peer label, a sender, a room.
+
+    Truncating rather than rejecting, because a caller who passed a long agent name should have
+    its message delivered under a shortened one rather than refused — which is what `_label()` in
+    the renderers already does downstream, and what the ticket mints have always done here.
+
+    This is a memory bound, not cosmetics. `_remember` and the offline queue account for the BODY
+    of each frame and nothing else, so any OTHER caller-controlled field is footprint those caps
+    cannot see: before this was applied at the send path, an authenticated peer could park ~200 MB
+    per offline peer in `from`, and ~1 GB in the recent buffer, with both caps reading it as zero.
+    An identifier longer than this is not a name, it is a payload wearing one.
+
+    What remains uncounted after this cap is bounded and small, and the number is worth writing
+    down because the caps are stated in bytes: three caller-chosen name fields (`from`, `to`,
+    `room`) at LABEL_CAP code points, up to 4 UTF-8 bytes each, is at most 768 B per frame — so
+    768 x MAX_QUEUE = 75 KiB on top of QUEUE_BYTES per offline peer, and 768 x RECENT_MAX = 375 KiB
+    on top of RECENT_BYTES process-wide. Under a thousandth of either cap, against the megabytes
+    this cap removed.
+    """
+    return (value or default).strip()[:LABEL_CAP] or default
+
+
+def _body_bytes(frame: dict) -> int:
+    """What a frame's body will actually occupy, in BYTES.
+
+    `len()` on a `str` counts code points, and UTF-8 spends up to four bytes on one of them. The
+    two memory caps here used to account in that unit, so both were 4x looser than their own names:
+    measured with the largest bodies the server accepts (MAX_BODY code points of U+1F600), the
+    recent buffer accounted 32.00 MiB while physically holding 128.00 MiB, and an offline queue
+    accounted 8.00 MiB while holding 32.00 MiB.
+
+    Computed once per frame and cached as `_b`, not recomputed inside the trim loop: the loop runs
+    on every send and encoding the whole retained set each time would mean up to 32 MiB of encoding
+    per message, on a path whose budget is milliseconds.
+    """
+    return len((frame.get("body") or "").encode())
+
+
+def _public(frame: dict) -> dict:
+    """A stored frame as it goes back out, without the internal bookkeeping.
+
+    `_t` (arrival time) and `_b` (body bytes) are ours. Stripped by PREFIX rather than by name so
+    that a third one cannot be added later and silently shipped on the wire.
+    """
+    return {k: v for k, v in frame.items() if not k.startswith("_")}
 
 
 class BusError(Exception):
@@ -169,11 +307,12 @@ class _Peer:
 class Hub:
     """In-process registry of connected agents and the fan-out that feeds them."""
 
-    def __init__(self, name: str = "default") -> None:
-        self.name = name
+    def __init__(self, scope: str = "default") -> None:
+        # Opaque key, shared with _SECRETS: a directory path in production (see _scope).
+        self.scope = scope
         self._peers: Dict[str, _Peer] = {}        # peer_id -> _Peer
         self._by_label: Dict[str, str] = {}       # label -> peer_id (last writer wins)
-        self._tickets: Dict[str, tuple] = {}      # ticket -> (peer_id, expires_at)
+        self._tickets: Dict[str, tuple] = {}      # ticket -> (peer_id, expires_at, user)
         # MCP tool bodies run on worker threads while the event loop owns the sockets, so the
         # registry is touched from two threads. An asyncio.Lock would not help — it only
         # serialises coroutines on one loop. Individual dict ops are atomic under the GIL, but the
@@ -186,14 +325,14 @@ class Hub:
         self._recent: deque = deque(maxlen=RECENT_MAX)
 
     def _remember(self, frame: dict) -> None:
-        # Bounding the COUNT is not enough: 500 frames at the 256 KB body cap is 128 MB held for
-        # an hour. Trim by bytes as well, oldest first, so retention cannot become a slow leak.
+        # Bounding the COUNT is not enough: RECENT_MAX frames at the MAX_BODY cap is 500 MiB held
+        # for an hour (500 x 256 Ki code points x 4 bytes). Trim by bytes as well, oldest first, so
+        # retention cannot become a slow leak. Real bytes, not code points — see _body_bytes.
         with self._guard:
-            self._recent.append({**frame, "_t": _now()})
-            total = sum(len(f.get("body") or "") for f in self._recent)
+            self._recent.append({**frame, "_t": _now(), "_b": _body_bytes(frame)})
+            total = sum(f["_b"] for f in self._recent)
             while total > RECENT_BYTES and len(self._recent) > 1:
-                dropped = self._recent.popleft()
-                total -= len(dropped.get("body") or "")
+                total -= self._recent.popleft()["_b"]
 
     def message(self, message_id: str) -> dict:
         """Full text of a recent message, by id — the out-of-band half of a clipped notification."""
@@ -202,27 +341,36 @@ class Hub:
             if f.get("_t", 0) < cutoff:
                 break
             if f.get("id") == message_id or str(f.get("id", ""))[-8:] == message_id:
-                out = {k: v for k, v in f.items() if k != "_t"}
+                out = _public(f)
                 out["chars"] = len(out.get("body") or "")
                 return out
         raise BusError(
-            f"no message {message_id!r} in the last {int(RECENT_TTL // 60)} minutes. Bus traffic "
-            f"is ephemeral — ask the sender to resend, or have them put durable content in the "
-            f"graph instead.")
+            f"no message {message_id!r} in the last {int(RECENT_TTL // 60)} minutes. If your own "
+            f"listener received it, grep the id in ~/.hivemind/bus-inbox.jsonl (and its .1): that "
+            f"copy has no time limit, only a size one. Otherwise bus traffic is ephemeral: ask "
+            f"the sender to resend, or have them put durable content in the graph instead.")
 
     # ── registration ─────────────────────────────────────────────────────────────
-    def mint_ticket(self, label: str, meta: Optional[dict] = None) -> dict:
-        """Create (or re-use) a peer identity and hand back a single-use connect ticket."""
-        label = (label or "agent").strip()[:64]
+    def mint_ticket(self, label: str, meta: Optional[dict] = None,
+                    user: Optional[str] = None) -> dict:
+        """Create (or re-use) a peer identity and hand back a single-use connect ticket.
+
+        The ticket records who minted it for the same reason the listen key signs it: the handshake
+        is the only place the bus ACL is enforced, and it has to know whose access to check. A
+        ticket needs no signature for that — it is a random token this process holds in memory and
+        burns on first use, so its user cannot be edited by whoever carries it.
+        """
+        label = _norm_label(label, "agent")
         with self._guard:
             peer_id = self._ensure_peer(label, meta).peer_id
             ticket = secrets.token_urlsafe(24)
-            self._tickets[ticket] = (peer_id, _now() + TICKET_TTL)
+            self._tickets[ticket] = (peer_id, _now() + TICKET_TTL, user or UNKNOWN_USER)
             self._sweep_tickets()
         return {"ticket": ticket, "peer_id": peer_id, "label": label,
                 "expires_in": int(TICKET_TTL)}
 
-    def mint_listen_key(self, label: str, meta: Optional[dict] = None) -> dict:
+    def mint_listen_key(self, label: str, meta: Optional[dict] = None,
+                        user: Optional[str] = None) -> dict:
         """Hand back a reusable credential a listener can reconnect with on its own.
 
         A ticket is single-use and lasts a minute, which is right for one handshake and wrong for a
@@ -230,38 +378,67 @@ class Hub:
         stored: verification needs no table, so it still works after the process that minted it is
         gone. It carries no authority beyond joining the bus under this label, expires, and is
         revocable wholesale by deleting the project's bus_secret.
+
+        The minting user is INSIDE the signature, not beside it: the handshake re-checks the
+        project ACL against that user (see authorize_key), and a user field the holder could edit
+        would let any key holder nominate the owner of the project it is aimed at.
         """
-        label = (label or "agent").strip()[:64]
+        label = _norm_label(label, "agent")
+        user = user or UNKNOWN_USER
         with self._guard:
             self._ensure_peer(label, meta)
         exp = int(_now() + LISTEN_KEY_TTL)
-        body = f"{_b64(label.encode())}.{exp}"
-        sig = hmac.new(_secret(self.name), body.encode(), hashlib.sha256).digest()
-        return {"listen_key": f"hk1.{body}.{_b64(sig)}", "label": label,
+        body = f"{_b64(label.encode())}.{_b64(user.encode())}.{exp}"
+        sig = hmac.new(_secret(self.scope), body.encode(), hashlib.sha256).digest()
+        return {"listen_key": f"hk1.{body}.{_b64(sig)}", "label": label, "user": user,
                 "expires_in": LISTEN_KEY_TTL}
 
-    def redeem_key(self, key: str) -> Optional[_Peer]:
-        """Verify a listen key and return its peer, creating it if the server has restarted."""
+    def verify_key(self, key: str) -> Optional[tuple]:
+        """Check a listen key's signature and expiry; return (label, user). NO SIDE EFFECTS.
+
+        Split from redeem_key because the project ACL runs between the two, and nothing that has
+        not passed it may touch the registry. The registry is keyed by LABEL and the label is
+        chosen by whoever minted the key, so a write from an unauthorized caller lands on a peer it
+        named rather than one it owns — see authorize_key.
+
+        A key in the pre-user format has four fields, not five, so it fails to unpack and is
+        refused. That is deliberate: such a key names nobody, so there is no access to re-check and
+        honouring it would leave exactly the hole this closes. Its holder re-runs bus_connect.
+        """
         try:
-            scheme, label_b64, exp_s, sig_b64 = key.split(".")
+            scheme, label_b64, user_b64, exp_s, sig_b64 = key.split(".")
         except (ValueError, AttributeError):
             return None
         if scheme != "hk1":
             return None
-        body = f"{label_b64}.{exp_s}"
-        want = hmac.new(_secret(self.name), body.encode(), hashlib.sha256).digest()
+        body = f"{label_b64}.{user_b64}.{exp_s}"
+        want = hmac.new(_secret(self.scope), body.encode(), hashlib.sha256).digest()
         try:
             if not hmac.compare_digest(want, _unb64(sig_b64)):
                 return None
             if _now() > int(exp_s):
                 return None
             label = _unb64(label_b64).decode()
+            user = _unb64(user_b64).decode()
         except (ValueError, UnicodeDecodeError):
             return None
-        # Re-create on demand: after a restart the registry is empty, and refusing here would mean
-        # every listener stayed dead until a human noticed.
+        return label, user
+
+    def admit(self, label: str) -> _Peer:
+        """The peer for a connection that HAS passed the ACL, created on demand.
+
+        Re-create on demand: after a restart the registry is empty, and refusing here would mean
+        every listener stayed dead until a human noticed. Reached only from authorize_key, after
+        can_access — that ordering is what keeps an unauthorized caller out of the registry.
+        """
         with self._guard:
             return self._ensure_peer(label, None)
+
+    def redeem_key(self, key: str) -> Optional[tuple]:
+        """verify_key plus the peer it names. Callers that must gate on the ACL use the two halves
+        separately (authorize_key); this is the whole handshake for an in-process caller."""
+        got = self.verify_key(key)
+        return None if got is None else (self.admit(got[0]), got[1])
 
     def _ensure_peer(self, label: str, meta: Optional[dict]) -> _Peer:
         """Get-or-create the peer for a label. Caller holds the guard."""
@@ -274,24 +451,25 @@ class Hub:
             self._peers[peer_id].meta.update(meta)
         return self._peers[peer_id]
 
-    def redeem(self, ticket: str) -> Optional[_Peer]:
-        """Burn a ticket and return its peer. Single use: a replayed ticket is refused."""
+    def redeem(self, ticket: str) -> Optional[tuple]:
+        """Burn a ticket and return (peer, user). Single use: a replayed ticket is refused."""
         with self._guard:
             got = self._tickets.pop(ticket, None)
             if got is None:
                 return None
-            peer_id, expires = got
+            peer_id, expires, user = got
             if _now() > expires:
                 return None
-            return self._peers.get(peer_id)
+            peer = self._peers.get(peer_id)
+            return None if peer is None else (peer, user)
 
     def _has_pending_ticket(self, peer_id: str) -> bool:
         now = _now()
-        return any(pid == peer_id and now <= exp for pid, exp in self._tickets.values())
+        return any(pid == peer_id and now <= exp for pid, exp, _u in self._tickets.values())
 
     def _sweep_tickets(self) -> None:
         now = _now()
-        for t, (_, exp) in list(self._tickets.items()):
+        for t, (_, exp, _u) in list(self._tickets.items()):
             if now > exp:
                 self._tickets.pop(t, None)
 
@@ -328,7 +506,7 @@ class Hub:
             except Exception:
                 pass
         cutoff = _now() - QUEUE_TTL
-        drained = [m for m in peer.queue if m.get("_t", 0) >= cutoff]
+        drained = [_public(m) for m in peer.queue if m.get("_t", 0) >= cutoff]
         peer.queue.clear()
         return drained
 
@@ -371,22 +549,29 @@ class Hub:
                 # message survives a reconnect rather than evaporating.
                 peer.ws = None
                 peer.connected_at = None
-        peer.queue.append({**frame, "_t": _now()})
-        # Same reasoning per peer: maxlen caps the count, this caps the footprint.
-        qbytes = sum(len(f.get("body") or "") for f in peer.queue)
+        peer.queue.append({**frame, "_t": _now(), "_b": _body_bytes(frame)})
+        # Same reasoning per peer: maxlen caps the count, this caps the footprint — in bytes.
+        qbytes = sum(f["_b"] for f in peer.queue)
         while qbytes > QUEUE_BYTES and len(peer.queue) > 1:
-            qbytes -= len(peer.queue.popleft().get("body") or "")
+            qbytes -= peer.queue.popleft()["_b"]
         return False
 
     async def send(self, sender: str, to: str, body: str,
                    kind: str = "message", data: Optional[dict] = None) -> dict:
+        sender = _norm_label(sender, "agent")
+        # Code points, deliberately, and the message says so: docs/bus.md derives the listener's
+        # inbox ceiling from `MAX_BODY` being a code-point cap (a body of astral characters is
+        # legal and `ensure_ascii` writes each as a surrogate pair). The BUFFER caps below are the
+        # ones that count real bytes; this one bounds one frame, not a buffer.
         if len(body) > MAX_BODY:
-            raise BusError(f"body is {len(body)} bytes; cap is {MAX_BODY}. "
+            raise BusError(f"body is {len(body)} characters; cap is {MAX_BODY}. "
                            f"Upload large payloads as an artifact and send the digest.")
         target = self.peer(to)
         if target is None:
             known = [p.label for p in self._peers.values()]
             raise BusError(f"no peer {to!r}; connected peers: {known or '(none)'}")
+        # `to` is already normalised — it is the registered peer's label — but `sender` arrives
+        # straight from the `agent` argument of bus_send, so it is normalised here.
         frame = {"v": PROTOCOL_VERSION, "type": kind, "id": ulid(), "from": sender,
                  "to": target.label, "room": None, "body": body, "ts": _iso()}
         if data:
@@ -399,8 +584,11 @@ class Hub:
 
     async def broadcast(self, sender: str, body: str, room: str = "lobby",
                         data: Optional[dict] = None) -> dict:
+        # Both are caller-controlled and neither is counted by the queue or the recent buffer.
+        sender = _norm_label(sender, "agent")
+        room = _norm_label(room, "lobby")
         if len(body) > MAX_BODY:
-            raise BusError(f"body is {len(body)} bytes; cap is {MAX_BODY}")
+            raise BusError(f"body is {len(body)} characters; cap is {MAX_BODY}")
         frame = {"v": PROTOCOL_VERSION, "type": "broadcast", "id": ulid(), "from": sender,
                  "to": None, "room": room, "body": body, "ts": _iso()}
         if data:
@@ -425,7 +613,7 @@ class Hub:
                 await self._deliver(p, frame)
 
 
-# One hub per project, created lazily; bus state is per-process by design.
+# One hub per project, created lazily; bus state is per-process by design. Keyed by _scope().
 _hubs: Dict[str, Hub] = {}
 
 # The event loop that owns the WebSocket connections. MCP tool bodies run on worker threads, so a
@@ -439,30 +627,141 @@ def set_loop(loop: Any) -> None:
     _LOOP = loop
 
 
-def hub_for(project_name: str) -> Hub:
-    h = _hubs.get(project_name)
+def hub_for(project_dir: Path) -> Hub:
+    scope = _scope(project_dir)
+    h = _hubs.get(scope)
     if h is None:
-        h = _hubs[project_name] = Hub(project_name)
+        h = _hubs[scope] = Hub(scope)
     return h
 
 
-async def websocket_endpoint(ws: Any, project_name: str) -> None:
+def access_check(user: str, project_dir: Path, project_name: str,
+                 require_auth: bool) -> tuple:
+    """(allowed, problem) — may_access, plus WHY the metadata failed closed, for an operator log.
+
+    One code path, so the two cannot drift; same split, and the same reason for it, as
+    projects_meta.load_with_problem and app._note_metadata. The problem must never reach a caller:
+    "this project's metadata is corrupt" tells them the project exists.
+    """
+    if not require_auth:
+        return True, None
+    meta, problem = load_with_problem(project_dir, project_name)
+    return can_access(Identity(user=user, device="bus"), meta), problem
+
+
+def may_access(user: str, project_dir: Path, project_name: str, *,
+               require_auth: bool = True) -> bool:
+    """Is this user allowed into this project *right now*?
+
+    Re-read every call. projects_meta.load is mtime-stamped, so the common case is a stat() and a
+    revocation takes effect on the very next check — there is no epoch to bump and nothing to
+    invalidate. can_access is the one access rule every surface shares; this never second-guesses
+    it. The identity is reconstructed from the credential rather than from a bearer token, which is
+    why the user has to be inside the signature.
+
+    `require_auth` is passed in, never inferred from "did the credential name anybody?", for the
+    reason envelope.set_registry gives: with HIVEMIND_REQUIRE_AUTH=0 there is no credential naming
+    a person, so app._authorize applies no ACL on any other surface, and a bus that failed closed
+    on the same input would be the one thing such a deployment could not use. It defaults to the
+    strict rule, so a caller that forgets the flag gets the check rather than the bypass.
+
+    A `legacy:*` user is NOT flagged legacy here. can_access refuses a legacy identity whose
+    project_scope is not this project, and the credential carries no scope to reconstruct, so
+    flagging it would deny every legacy listener outright. The scope is enforced by the signature
+    instead: a listen key is signed with one project's secret and verifies against no other. What
+    is left over is nil — `legacy:` contains a colon, identity.validate_username forbids one and
+    project_tools.share validates every member, so such a user is never an owner or a member and
+    reaches shared projects only, exactly as can_access would have it.
+    """
+    return access_check(user, project_dir, project_name, require_auth)[0]
+
+
+def authorize_key(hub: Hub, key: str, project_dir: Path, project_name: str, *,
+                  require_auth: bool = True) -> Optional[tuple]:
+    """Verify the key AND re-check the project ACL — a key outlives a revocation otherwise.
+
+    Returns (peer, user), because authorising the handshake is not authorising the socket: the
+    caller keeps the user so it can ask again while the connection is open.
+
+    The peer is materialised only AFTER can_access, and a refusal writes nothing at all. That
+    ordering is the whole defence, because peers are keyed by LABEL while authorization is keyed by
+    USER and the label is chosen by whoever mints the credential: the two do not name the same
+    principal, so any write from this path would land on a peer the caller merely named. Measured,
+    when a refusal used to drop the peer it resolved: a revoked member holding a key minted under
+    another agent's label destroyed that agent's queued mail, and — because forget(force=True) also
+    clears the reprieve _forget_locked gives a peer whose listener has not attached yet — made that
+    agent's own bus_connect ticket resolve to a deleted peer, refused 4401, replayable at will.
+
+    Recording the minting user on _Peer and forgetting only "its own" peer does NOT fix that, and
+    it was measured too: _ensure_peer is get-or-create by label, so whichever rule names the owner,
+    the attacker just mints on the other side of the victim. Owner-on-create leaves the victim
+    exposed when the attacker mints FIRST; letting an authenticated mint re-claim leaves them
+    exposed when it mints LAST. Not writing at all is the only rule with no ordering in it.
+    """
+    got = hub.verify_key(key)
+    if got is None:
+        return None
+    label, user = got
+    if not may_access(user, project_dir, project_name, require_auth=require_auth):
+        return None
+    return hub.admit(label), user
+
+
+def authorize_ticket(hub: Hub, ticket: str, project_dir: Path, project_name: str, *,
+                     require_auth: bool = True) -> Optional[tuple]:
+    """Burn the ticket AND re-check the ACL. Same rule as a key, on a much shorter fuse: a ticket
+    is single-use and lasts `TICKET_TTL`, but the socket it opens lasts as long as any other.
+
+    Nothing to undo on a refusal here: redeem() only looks a peer up, and the one it finds was
+    created by the authenticated bus_connect that minted this ticket. A refused ticket is then
+    exactly an expired one, which is how they were always treated.
+    """
+    got = hub.redeem(ticket)
+    if got is None:
+        return None
+    peer, user = got
+    if not may_access(user, project_dir, project_name, require_auth=require_auth):
+        return None
+    return peer, user
+
+
+async def websocket_endpoint(ws: Any, project_name: str, project_dir: Path, *,
+                             require_auth: bool = True) -> None:
     """Serve one agent connection for the lifetime of its socket.
 
     The client never sends anything meaningful — this is a one-way push channel — but we read in a
     loop anyway so that a closed socket is noticed promptly rather than only when the next message
     happens to be sent to it.
+
+    This is also the ONLY place the project ACL is enforced for the bus: the ws route is registered
+    at the Starlette level and app.ProjectAuthMiddleware returns early for non-HTTP scopes, so no
+    middleware has looked at this caller. Hence the check here, and again below on the open socket.
     """
-    hub = hub_for(project_name)
+    hub = hub_for(project_dir)
     # Either credential works: a ticket (single-use, minted per connect) or a listen key (reusable,
-    # so a listener reconnects by itself across drops and restarts).
+    # so a listener reconnects by itself across drops and restarts). Both name their minting user,
+    # and both are refused unless that user still passes the project ACL.
     key = ws.query_params.get("key", "")
-    peer = hub.redeem_key(key) if key else hub.redeem(ws.query_params.get("ticket", ""))
-    if peer is None:
-        # 4401 is in the private range; the close code surfaces to Monitor so the agent sees WHY.
+    admitted = (authorize_key(hub, key, project_dir, project_name, require_auth=require_auth)
+                if key else
+                authorize_ticket(hub, ws.query_params.get("ticket", ""), project_dir, project_name,
+                                 require_auth=require_auth))
+    if admitted is None:
+        # This refusal MUST stay pre-accept. uvicorn collapses any close sent before accept into a
+        # bare 403 with an empty body and discards the code — every implementation does it
+        # (websockets_sansio_impl, websockets_impl, wsproto_impl all reject with FORBIDDEN) — so the
+        # 4401 below never reaches the client. That is the property we want, not a bug to fix: a bad
+        # credential is then byte-identical to a project with no ws route at all.
+        #
+        # So do NOT call accept() first to make the code visible. An accepted-then-closed socket IS
+        # distinguishable from an unmounted path, and since this endpoint is reached without a
+        # bearer token that instantly hands an unauthenticated caller an existence oracle for
+        # /p/<private>/bus/ws — the same oracle app.PROJECT_DENIED exists to remove on every other
+        # path. 4401 (private range) is kept for the in-process/ASGI callers that do see it.
         await ws.close(code=4401)
         return
 
+    peer, user = admitted
     await ws.accept()
     queued = await hub.attach(peer, ws)
     await ws.send_text(json.dumps({
@@ -471,16 +770,75 @@ async def websocket_endpoint(ws: Any, project_name: str) -> None:
         "queued": len(queued), "ts": _iso(),
     }, ensure_ascii=False))
     for m in queued:
-        m.pop("_t", None)
+        # Already public: Hub.attach strips the internal fields, so there is exactly one place
+        # that has to know which they are.
         await ws.send_text(json.dumps(m, ensure_ascii=False))
     await hub.presence(peer, "connected")
 
     try:
+        # The handshake authorised ONE connection, and this socket then stays up for days: the
+        # listener reconnects only on a blip or a restart, so a handshake-only check would in
+        # practice almost never fire and a revoked member would keep receiving indefinitely.
+        # Re-ask on an ABSOLUTE deadline instead — and never wait past it. The wait below is the
+        # only thing that wakes this loop, so a full-HEARTBEAT timeout issued just after an inbound
+        # frame would carry the loop well beyond `recheck_at`: a client that spoke at t+29.9 bought
+        # itself a fresh 30 seconds and doubled its own window to 2×HEARTBEAT. A client that has
+        # stopped cooperating is precisely the threat model for a revocation check, so the wait is
+        # clamped to the time remaining. HEARTBEAT is then the upper bound on how long a revoked
+        # listener keeps receiving, whatever it SENDS. Not "whatever it does": a client that stops
+        # READING applies back-pressure to the send_text and close awaits below, and those are the
+        # only awaits here the deadline does not clamp.
+        recheck_at = _now() + HEARTBEAT
         while True:
+            if _now() >= recheck_at:
+                # Deadline first, so successive checks START exactly HEARTBEAT apart whatever
+                # the check itself costs — that is the bound the comment above claims.
+                recheck_at = _now() + HEARTBEAT
+                allowed, problem = access_check(user, project_dir, project_name, require_auth)
+                if not allowed:
+                    if problem:
+                        # Unreadable metadata denies like any other failure, but this close is
+                        # TERMINAL for the listener (bus-listen.py prints and exits rather than
+                        # retrying), so every agent on this project must re-run bus_connect once
+                        # the file is fixed — they do not recover on their own the way an HTTP
+                        # caller does. An operator has to be able to tell that from a real
+                        # revocation, which is what app._note_metadata does for the HTTP path.
+                        # Logged on eviction only, never on a refused handshake. Not because an
+                        # outsider could flood it — they cannot reach it at all, since a bad
+                        # signature returns before any metadata is read — but because eviction is
+                        # BOUNDED at one line per socket already admitted, whereas nothing limits
+                        # how often a credential holder retries a handshake, and each attempt would
+                        # log another line for as long as the file stayed broken.
+                        log.warning("bus: dropping peer %r on project %r: %s — failing closed; "
+                                    "listeners must re-run bus_connect once this is fixed",
+                                    peer.label, project_name, problem)
+                    # Post-accept, so unlike the refusal above this close code DOES reach the
+                    # client: the listener treats 4401 as terminal and tells its agent to re-run
+                    # bus_connect. No oracle either — this caller was already admitted.
+                    await ws.close(code=4401)
+                    # Then drop the peer, rather than leaving it parked: detach() alone keeps it in
+                    # the registry for as long as it holds queued mail, so an evicted label would
+                    # stay listed by bus_peers and bus_send would keep telling senders "queued for
+                    # reconnect" about someone whose reconnect can no longer be authorised.
+                    #
+                    # Void the mail and then use the ORDINARY sweep rule — deliberately not
+                    # force=True. force bypasses two guards, and only one of them is the queue:
+                    # the other reprieves a peer whose listener has not attached yet, and
+                    # _forget_locked records the regression that reprieve exists to prevent. A
+                    # label is caller-chosen at mint time, so this peer may be one another agent
+                    # is mid-connect on; forcing past that would refuse ITS bus_connect. Voiding
+                    # the queue first is what this eviction is entitled to do — a revoked peer
+                    # must never drain one — and forget() then declines if a connect is in flight.
+                    await hub.detach(peer, ws)
+                    peer.queue.clear()
+                    hub.forget(peer)
+                    break
             # Heartbeat: if nothing arrives within the window, ping. A dead peer fails here and
-            # we drop it, which is what keeps `bus_peers` honest without a TTL sweeper.
+            # we drop it, which is what keeps `bus_peers` honest without a TTL sweeper. The wait
+            # never outlasts the re-check deadline above; see there.
             try:
-                await asyncio.wait_for(ws.receive_text(), timeout=HEARTBEAT)
+                await asyncio.wait_for(ws.receive_text(),
+                                       timeout=min(HEARTBEAT, max(0.0, recheck_at - _now())))
             except asyncio.TimeoutError:
                 try:
                     await ws.send_text(json.dumps({"v": PROTOCOL_VERSION, "type": "ping",

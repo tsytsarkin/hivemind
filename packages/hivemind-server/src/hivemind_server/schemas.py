@@ -260,6 +260,41 @@ def _type_unchanged(cur, kind: str, name: str, json_schema: dict,
     return True
 
 
+def copy_types(src_db: Database, dst_db: Database, *, agent: str = "system") -> int:
+    """Copy the ACTIVE node/edge type definitions of one project into another. Returns the count.
+
+    A project with no types cannot be written to at all (validate_props refuses an unknown type), so
+    a fresh project that inherited nothing would be useless the moment it was created — which is why
+    project_tools.create inherits by default.
+
+    Reads the type rows rather than get_schema(): that view drops a node type's `parent` and returns
+    the edge traits alongside the schema rather than as traits, so a copy rebuilt from it would
+    silently change behaviour (an acyclic edge would come out cyclic). Proposed types are left
+    behind on purpose — they are not part of the source's vocabulary yet.
+    """
+    defs: list[tuple] = []
+    with src_db.read() as cur:
+        for name in _all_type_names(cur, "node"):
+            t = usable_type(cur, "node", name)
+            if t is None or t["status"] != "active":
+                continue
+            defs.append(("node", name, json.loads(t["json_schema"]), {"parent": t["parent"]}))
+        for name in _all_type_names(cur, "edge"):
+            t = usable_type(cur, "edge", name)
+            if t is None or t["status"] != "active":
+                continue
+            traits = {k: t[k] for k in _EDGE_TRAITS}
+            traits["src_types"] = json.loads(t["src_types"])
+            traits["dst_types"] = json.loads(t["dst_types"])
+            defs.append(("edge", name, json.loads(t["json_schema"]), traits))
+    if not defs:
+        return 0
+    with dst_db.write(agent, "inherit the source project's vocabulary") as tx:
+        for kind, name, schema, traits in defs:
+            define_type(tx.cur, tx, kind, name, schema, status="active", traits=traits)
+    return len(defs)
+
+
 def apply_pack(db: Database, agent_id: str, pack: dict, *, force: bool = False) -> dict:
     """Operator: load a domain pack's schema. Defines node/edge types as ACTIVE directly.
 

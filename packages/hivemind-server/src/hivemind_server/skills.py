@@ -11,7 +11,7 @@ import json
 from typing import Optional
 
 from . import semver
-from .db import Conflict, Database, Invalid, NotFound
+from .db import LEGACY_USER, Conflict, Database, Invalid, NotFound
 
 MAX_BODY_CHARS = 20000          # ~5k tokens: a mini-skill, not a manual
 _ID_OK = set("abcdefghijklmnopqrstuvwxyz0123456789-_./")
@@ -65,10 +65,11 @@ def publish(db: Database, agent_id: str, *, id: str, version: str, title: str, d
         cur.execute("INSERT INTO skill(id, latest_version, created_tx) VALUES(?,?,?) "
                     "ON CONFLICT(id) DO NOTHING", (id, version, tx.tx_id))
         cur.execute(
+            # `author` is the agent LABEL the caller passed; `author_user` is the token's user.
             "INSERT INTO skill_version(id,version,title,description,when_to_use,body,tags,"
-            "requires,verified_how,author,created_tx) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            "requires,verified_how,author,author_user,created_tx) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
             (id, version, title, description, when_to_use, body, json.dumps(tags),
-             json.dumps(requires or {}), verified_how, agent_id, tx.tx_id))
+             json.dumps(requires or {}), verified_how, agent_id, tx.user, tx.tx_id))
         rows = cur.execute("SELECT version FROM skill_version WHERE id=? AND yanked=0",
                            (id,)).fetchall()
         latest = semver.latest([r["version"] for r in rows]) or version
@@ -126,24 +127,45 @@ def get(db: Database, id: str, constraint: str = "") -> dict:
             "description": best["description"], "when_to_use": best["when_to_use"],
             "body": best["body"], "tags": json.loads(best["tags"]),
             "requires": json.loads(best["requires"]), "verified_how": best["verified_how"],
-            "author": best["author"], "yanked": bool(best["yanked"]),
+            "author": best["author"], "author_user": best["author_user"] or LEGACY_USER,
+            "yanked": bool(best["yanked"]),
             "yanked_reason": best["yanked_reason"]}
 
 
 def search(db: Database, query: str = "", *, tags: Optional[list] = None,
-           limit: int = 20, format: str = "concise", mode: str = "hybrid") -> dict:
+           limit: int = 20, format: str = "concise", mode: str = "hybrid",
+           author: Optional[str] = None) -> dict:
     limit = max(1, min(limit, 100))
-    from .search import _fts_query
+    from .search import _fts_query, author_filter
+    # A skill's author is on its LATEST version row. The filter goes into the candidate SQL of BOTH
+    # sources — the FTS query below, and the vector query via the id set it is handed — so a
+    # prolific author cannot squeeze a rare one out of either pool. The row check in the loop is
+    # therefore a backstop, not the filter: it catches a candidate source that skipped both.
+    a_pred, a_args = author_filter("sv.author_user", author)
+    a_join = (" JOIN skill_version sv ON sv.id = s.id AND sv.version = s.latest_version"
+              if a_pred else "")
+    a_and, a_where = (f" AND {a_pred}", f" WHERE {a_pred}") if a_pred else ("", "")
     with db.read() as cur:
         if query:
             m = _fts_query(query)
             lexical = [r["id"] for r in cur.execute(
-                "SELECT id FROM skill_fts WHERE skill_fts MATCH ? ORDER BY rank LIMIT ?",
-                (m, limit * 3))] if m else []
+                f"SELECT f.id AS id FROM skill_fts f JOIN skill s ON s.id = f.id{a_join} "
+                f"WHERE skill_fts MATCH ?{a_and} ORDER BY f.rank LIMIT ?",
+                (m, *a_args, limit * 3))] if m else []
             semantic = []
             if mode in ("hybrid", "semantic"):
                 from . import embeddings
-                semantic = [i for i, _ in embeddings.query(db, "skill", query, limit=limit * 3)]
+                # The vector index is not SQL, so the semantic candidates cannot carry the
+                # predicate as a WHERE clause: they are ranked WITHIN this id set instead. Built
+                # here, where it is used — every other path ignores it. Filtering the vectors
+                # afterwards made mode="semantic" exactly the bug this filter exists to avoid: a
+                # post-filter over a capped pool, reporting "this author wrote nothing" as soon as
+                # the library outgrew it.
+                a_ids = {r["id"] for r in cur.execute(
+                    f"SELECT s.id AS id FROM skill s{a_join}{a_where}",
+                    tuple(a_args))} if a_pred else None
+                semantic = [i for i, _ in embeddings.query(db, "skill", query, limit=limit * 3,
+                                                           ids=a_ids)]
             if mode == "lexical":
                 ids = lexical
             elif mode == "semantic":
@@ -153,7 +175,8 @@ def search(db: Database, query: str = "", *, tags: Optional[list] = None,
                 ids = sorted(fused, key=lambda k: fused[k], reverse=True)
         else:
             ids = [r["id"] for r in cur.execute(
-                "SELECT id FROM skill ORDER BY created_tx DESC LIMIT ?", (limit * 3,))]
+                f"SELECT s.id AS id FROM skill s{a_join}{a_where} "
+                f"ORDER BY s.created_tx DESC LIMIT ?", (*a_args, limit * 3))]
         out = []
         for sid in ids:
             s = cur.execute("SELECT latest_version FROM skill WHERE id=?", (sid,)).fetchone()
@@ -163,6 +186,8 @@ def search(db: Database, query: str = "", *, tags: Optional[list] = None,
                             (sid, s["latest_version"])).fetchone()
             if r is None:
                 continue
+            if author and (r["author_user"] or LEGACY_USER) != author:
+                continue            # backstop: every candidate source above is already filtered
             t = json.loads(r["tags"])
             if tags and not set(tags) & set(t):
                 continue
@@ -173,7 +198,8 @@ def search(db: Database, query: str = "", *, tags: Optional[list] = None,
                 out.append({"id": sid, "version": r["version"], "title": r["title"],
                             "description": r["description"], "when_to_use": r["when_to_use"],
                             "tags": t, "requires": json.loads(r["requires"]),
-                            "verified_how": r["verified_how"], "author": r["author"]})
+                            "verified_how": r["verified_how"], "author": r["author"],
+                            "author_user": r["author_user"] or LEGACY_USER})
             if len(out) >= limit:
                 break
     from . import embeddings

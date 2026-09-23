@@ -11,12 +11,14 @@ with priority/state/next_action), `measurement` (value + denominator + unit + sc
 
 **Edge types:** `documented_by` (finding/component/entry_point/function → lane) and `same_as` (symmetric, `*`→`*`) for aliasing/deduplicating nodes that denote the same thing, carrying a `confidence` (exact/semantic/partial) and an optional `canonical` node_id.
 
-Layers on top of `security-research` (its `documented_by` range references `finding` etc.), so
-apply that first:
+Layers on top of the other two: its `documented_by` domain names `finding`, `component` and
+`function` from `security-research` and `entry_point` from `ios-macos-attack-surface`, so those
+endpoint types have to exist before an edge can be written. Apply them first:
 ```sh
 hivemind-admin --project default apply-pack packs/security-research/schema.json
 hivemind-admin --project default apply-pack packs/ios-macos-attack-surface/schema.json
 hivemind-admin --project default apply-pack packs/research-workflow/schema.json
 ```
-Re-applying is idempotent. Verified to match the live project exactly (a re-apply reports every
-type `unchanged`). See [../../docs/packs.md](../../docs/packs.md).
+Re-applying is idempotent: a byte-identical type is skipped, so a re-apply reports it `unchanged`
+rather than inflating its version — which is also how this pack was checked against the project it
+was captured from. See [../../docs/packs.md](../../docs/packs.md).

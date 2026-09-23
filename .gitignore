@@ -31,3 +31,12 @@ tokens.json
 
 # deployment env (environment-specific)
 deploy/hivemind.env
+
+# Per-project secrets and token stores must never be committed. A test that constructs a fake
+# project directory inside the tree causes register_secret() to write a real HMAC key there; one
+# such key reached origin this way. These patterns make that unstageable rather than merely
+# discouraged — the durable fix is that tests build project dirs under tmp_path.
+bus_secret
+tokens.json
+identities.json
+packages/hivemind-server/tests/_tmp_*/

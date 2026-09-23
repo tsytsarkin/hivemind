@@ -7,6 +7,19 @@
 #
 # Blobs are content-addressed and immutable, so they are mirrored incrementally and WITHOUT
 # --delete: an artifact GC'd on the live side stays recoverable here.
+#
+# One file is deliberately LEFT OUT: <project>/bus_secret, the HMAC key that signs listen keys.
+# That file is the wholesale revocation lever (deleting it revokes every outstanding key), so
+# restoring an old copy would resurrect keys a rotation had revoked. The server recreates it at
+# startup; the cost is that every listener on the project is refused once, exits, and its agent has
+# to re-run bus_connect. Written up in restore.md -- do not "fix" this by adding it here without
+# reading that section.
+#
+# project.json and identities.json are backed up because they are ACL state, not convenience:
+# project.json IS the per-project ACL, and a project restored without it reads as visibility=shared
+# with no owner (Project.__init__ stamps that when the file is absent) — i.e. a restore would
+# silently publish every private graph. identities.json holds every server-level token, so a
+# restore without it revokes everyone.
 set -euo pipefail
 
 DATA_DIR="${HIVEMIND_DATA_DIR:-$HOME/hivemind-data}"
@@ -15,7 +28,16 @@ KEEP="${HIVEMIND_BACKUP_KEEP:-7}"          # dated DB snapshots to retain per pr
 STAMP="$(date +%Y%m%d-%H%M%S)"
 LOG="$DEST/backup.log"
 
-mkdir -p "$DEST"
+# $DEST holds one directory PER PROJECT, so anything else written at that level can collide with a
+# real project name: projects_meta.NAME_RE accepts `identities.json` and `backup.log` verbatim
+# (measured). Server-level files therefore go under _server/, which no project name can reach — a
+# name must start [a-z0-9], so a leading underscore is unreachable by construction. `backup.log`
+# predates this layout and stays where operators expect it, so it is checked explicitly below
+# rather than moved.
+SRV="$DEST/_server"
+RESERVED="backup.log _server"
+
+mkdir -p "$DEST" "$SRV"
 exec >>"$LOG" 2>&1
 echo "=== $(date -Is) backup start (keep=$KEEP) ==="
 
@@ -27,6 +49,11 @@ total_start=$(date +%s)
 for proj_dir in "$DATA_DIR"/projects/*/; do
   [ -d "$proj_dir" ] || continue
   proj="$(basename "$proj_dir")"
+  # Loud, not silent: without this the mkdir below fails with "Not a directory" under set -e and
+  # the backup dies mid-sweep with nothing naming the cause.
+  case " $RESERVED " in
+    *" $proj "*) fail "project '$proj' collides with $DEST/$proj, which this script owns; rename the project or point HIVEMIND_BACKUP_DIR elsewhere" ;;
+  esac
   out="$DEST/$proj"
   mkdir -p "$out/db" "$out/blobs"
 
@@ -63,11 +90,27 @@ PY
   # ── tokens (credentials: keep them 0600 here too) ────────────────────────────
   [ -f "$proj_dir/tokens.json" ] && install -m 600 "$proj_dir/tokens.json" "$out/tokens.json"
 
+  # ── project.json: the ACL. Not optional — see the header. ────────────────────
+  if [ -f "$proj_dir/project.json" ]; then
+    install -m 600 "$proj_dir/project.json" "$out/project.json"
+  else
+    echo "  [$proj] !!! no project.json — this project will restore as SHARED"
+  fi
+
   # ── rotation ─────────────────────────────────────────────────────────────────
   ls -1t "$out/db"/hivemind-*.db 2>/dev/null | tail -n +$((KEEP + 1)) | while read -r old; do
     echo "  [$proj] pruning $(basename "$old")"
     rm -f "$old"
   done
 done
+
+# Server-level credentials, one per deployment rather than per project. Under _server/ so the name
+# cannot collide with a project directory — see the note at the top.
+if [ -f "$DATA_DIR/identities.json" ]; then
+  install -m 600 "$DATA_DIR/identities.json" "$SRV/identities.json"
+  echo "  identities.json backed up ($(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))))' "$DATA_DIR/identities.json" 2>/dev/null || echo '?') tokens)"
+else
+  echo "  note: no identities.json at $DATA_DIR (no server-level identities minted yet)"
+fi
 
 echo "=== $(date -Is) backup done in $(( $(date +%s) - total_start ))s; dest usage: $(du -sh "$DEST" | cut -f1) ==="

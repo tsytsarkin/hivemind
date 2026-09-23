@@ -9,7 +9,7 @@ import re
 from typing import Optional
 
 from . import semver
-from .db import Conflict, Database, Invalid, NotFound
+from .db import LEGACY_USER, Conflict, Database, Invalid, NotFound
 
 _ID_RE = re.compile(r"^[a-z0-9]([a-z0-9._-]*[a-z0-9])?(/[a-z0-9]([a-z0-9._-]*[a-z0-9])?)?$")
 _REQUIRED = ("id", "version", "runtime", "entrypoint")
@@ -68,9 +68,9 @@ def publish(db: Database, agent_id: str, manifest: dict, artifact_digest: str, *
                 warnings.append({"similar_tools": dups, "note": "published despite similarity"})
         cur.execute("INSERT INTO tool(id,latest_version,created_tx) VALUES(?,?,?) "
                     "ON CONFLICT(id) DO NOTHING", (tid, version, tx.tx_id))
-        cur.execute("INSERT INTO tool_version(id,version,manifest,artifact_digest,created_tx) "
-                    "VALUES(?,?,?,?,?)",
-                    (tid, version, json.dumps(manifest), artifact_digest, tx.tx_id))
+        cur.execute("INSERT INTO tool_version(id,version,manifest,artifact_digest,author_user,"
+                    "created_tx) VALUES(?,?,?,?,?,?)",
+                    (tid, version, json.dumps(manifest), artifact_digest, tx.user, tx.tx_id))
         # recompute latest across non-yanked stable versions
         rows = cur.execute("SELECT version FROM tool_version WHERE id=? AND yanked=0",
                            (tid,)).fetchall()
@@ -115,7 +115,7 @@ def resolve(db: Database, tid: str, *, constraint: str = "", os: Optional[str] =
             arch: Optional[str] = None, include_prerelease: bool = False) -> dict:
     with db.read() as cur:
         rows = cur.execute(
-            "SELECT version, manifest, artifact_digest, yanked, yanked_reason "
+            "SELECT version, manifest, artifact_digest, yanked, yanked_reason, author_user "
             "FROM tool_version WHERE id=?", (tid,)).fetchall()
     if not rows:
         raise NotFound(f"tool {tid!r} not found")
@@ -156,6 +156,7 @@ def resolve(db: Database, tid: str, *, constraint: str = "", os: Optional[str] =
             "artifact_digest": best["artifact_digest"], "artifact_url": href,
             "run": _run_command(manifest), "entrypoint": manifest["entrypoint"],
             "yanked": bool(best["yanked"]), "yanked_reason": best["yanked_reason"],
+            "author_user": best["author_user"] or LEGACY_USER,
             "newer_incompatible": newer}
 
 
@@ -175,20 +176,39 @@ def _newer_incompatible(all_versions, chosen: str, constraint: str):
 
 
 def search(db: Database, query: str = "", *, os: Optional[str] = None,
-           arch: Optional[str] = None, limit: int = 25, mode: str = "hybrid") -> dict:
+           arch: Optional[str] = None, limit: int = 25, mode: str = "hybrid",
+           author: Optional[str] = None) -> dict:
     """FTS-backed tool search (was a full-table scan with Python-side filtering)."""
-    from .search import _fts_query
+    from .search import _fts_query, author_filter
     limit = max(1, min(limit, 200))
+    # A tool's author is on its LATEST version row. The filter goes into the candidate SQL of BOTH
+    # sources — the FTS query below, and the vector query via the id set it is handed — so a
+    # prolific author cannot squeeze a rare one out of either pool. The row check in the loop is
+    # therefore a backstop, not the filter: it catches a candidate source that skipped both.
+    a_pred, a_args = author_filter("tv.author_user", author)
+    a_join = (" JOIN tool_version tv ON tv.id = t.id AND tv.version = t.latest_version"
+              if a_pred else "")
+    a_and, a_where = (f" AND {a_pred}", f" WHERE {a_pred}") if a_pred else ("", "")
     with db.read() as cur:
         if query:
             m = _fts_query(query)
             lexical = [r["id"] for r in cur.execute(
-                "SELECT id FROM tool_fts WHERE tool_fts MATCH ? ORDER BY rank LIMIT ?",
-                (m, limit * 3))] if m else []
+                f"SELECT f.id AS id FROM tool_fts f JOIN tool t ON t.id = f.id{a_join} "
+                f"WHERE tool_fts MATCH ?{a_and} ORDER BY f.rank LIMIT ?",
+                (m, *a_args, limit * 3))] if m else []
             semantic = []
             if mode in ("hybrid", "semantic"):
                 from . import embeddings
-                semantic = [i for i, _ in embeddings.query(db, "tool", query, limit=limit * 3)]
+                # The vector index is not SQL, so the semantic candidates cannot carry the
+                # predicate as a WHERE clause: they are ranked WITHIN this id set instead. Built
+                # here, where it is used — every other path ignores it. Filtering the vectors
+                # afterwards made mode="semantic" a post-filter over a capped pool, reporting
+                # "this author published nothing" once the registry outgrew it.
+                a_ids = {r["id"] for r in cur.execute(
+                    f"SELECT t.id AS id FROM tool t{a_join}{a_where}",
+                    tuple(a_args))} if a_pred else None
+                semantic = [i for i, _ in embeddings.query(db, "tool", query, limit=limit * 3,
+                                                           ids=a_ids)]
             if mode == "lexical":
                 ids = lexical
             elif mode == "semantic":
@@ -198,14 +218,18 @@ def search(db: Database, query: str = "", *, os: Optional[str] = None,
                 ids = sorted(fused, key=lambda k: fused[k], reverse=True)
         else:
             ids = [r["id"] for r in cur.execute(
-                "SELECT id FROM tool ORDER BY created_tx DESC LIMIT ?", (limit * 3,))]
+                f"SELECT t.id AS id FROM tool t{a_join}{a_where} "
+                f"ORDER BY t.created_tx DESC LIMIT ?", (*a_args, limit * 3))]
         out = []
         for tid in ids:
             r = cur.execute(
-                "SELECT t.latest_version, tv.manifest FROM tool t JOIN tool_version tv "
-                "ON tv.id=t.id AND tv.version=t.latest_version WHERE t.id=?", (tid,)).fetchone()
+                "SELECT t.latest_version, tv.manifest, tv.author_user FROM tool t "
+                "JOIN tool_version tv ON tv.id=t.id AND tv.version=t.latest_version "
+                "WHERE t.id=?", (tid,)).fetchone()
             if r is None:
                 continue
+            if author and (r["author_user"] or LEGACY_USER) != author:
+                continue            # backstop: every candidate source above is already filtered
             m2 = json.loads(r["manifest"])
             arts = m2.get("artifacts") or []
             if os and arts and not any(a.get("os") == os for a in arts):
@@ -227,8 +251,10 @@ def search(db: Database, query: str = "", *, os: Optional[str] = None,
 
 
 # ── MCP tool attachment (called from registry_tools.attach) ────────────────────────
-def attach_tools(mcp, project, envelope, RO, WRITE, base) -> None:
-    db = project.db
+def attach_tools(mcp, db, envelope, RO, WRITE) -> None:
+    """`db` is the per-call database proxy (envelope.CurrentDb), not one project's handle. It used
+    to take the project plus a URL base; the base was never used and the project only for its db.
+    """
 
     @mcp.tool(annotations=WRITE,
               description="Publish an immutable tool version. `manifest` must include id "
@@ -288,11 +314,15 @@ def attach_tools(mcp, project, envelope, RO, WRITE, base) -> None:
 
     @mcp.tool(annotations=RO,
               description="List/search published tools (id, latest version, description, "
-                          "platforms). Use this to discover what tools other agents have shared.")
+                          "platforms). Use this to discover what tools other agents have shared. "
+                          "author='<user>' restricts to tools whose LATEST version that identity "
+                          "published: one they wrote and someone else has since bumped leaves "
+                          "their list, though both immutable versions still exist.")
     @envelope
     def tool_search(query: str = "", os: Optional[str] = None, arch: Optional[str] = None,
-                    limit: int = 25, mode: str = "hybrid") -> dict:
-        return search(db, query, os=os, arch=arch, limit=limit, mode=mode)
+                    limit: int = 25, mode: str = "hybrid",
+                    author: Optional[str] = None) -> dict:
+        return search(db, query, os=os, arch=arch, limit=limit, mode=mode, author=author)
 
     @mcp.tool(annotations=WRITE,
               description="Yank a tool version (hide from resolution; still fetchable by exact pin). "

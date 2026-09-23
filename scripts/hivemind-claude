@@ -1,0 +1,197 @@
+#!/usr/bin/env bash
+# Launch Claude Code with the Hivemind plugin loaded for ONE session — without installing it.
+#
+# Why this exists: `claude plugin install` writes the plugin and its token into the user's
+# permanent configuration. On a borrowed machine, a throwaway VM, or a box you are only debugging
+# from, that is the wrong footprint. `--plugin-dir` loads a plugin for the session only, and this
+# script supplies the two values the plugin's userConfig would otherwise have collected at install
+# time.
+#
+# How the config reaches the plugin (all three measured against Claude Code 2.1.280, not assumed):
+#   * `--plugin-dir DIR` loads the plugin for this session and DOES honour the `userConfig`
+#     defaults declared in plugin.json.
+#   * `pluginConfigs.<name>.options` in a `--settings` file supplies the values. For a
+#     `--plugin-dir` plugin the key is the BARE plugin name — `hivemind`. The installed-plugin
+#     forms (`hivemind@local`, `hivemind@hivemind-marketplace`) are ignored and the defaults win,
+#     so a rename here fails silently rather than loudly. `test_launcher.py` pins it.
+#   * `--settings` MERGES; it does not replace user settings. Model, theme and other plugins
+#     survive.
+# The token really does arrive as `Authorization: Bearer <token>`: verified by pointing this script
+# at a local HTTP probe that logged the header. Re-do that probe if you change how the file is
+# written.
+#
+# The token is written only to a 0600 file inside a 0700 private directory, removed on exit, and is
+# never passed on the `claude` command line, where `ps` would show it to every user on the host.
+set -euo pipefail
+
+PROG=${0##*/}
+DEFAULT_ADDR="localhost:8787"
+DEFAULT_PROJECT="default"
+
+usage() {
+    cat <<EOF
+$PROG — run Claude Code with the Hivemind plugin, no install
+
+usage: $PROG [options] [-- extra claude args...]
+
+options:
+  --url URL          Server address or full project URL. Bare host:port is fine;
+                     /p/<project> is appended when the URL has no project path.
+                     Default: prompted, $DEFAULT_ADDR
+  --token TOKEN      Bearer token. Prefer the prompt or HIVEMIND_TOKEN: an
+                     argument is visible to anyone running ps.
+  --project NAME     Project to use when --url names no /p/<name>. Default: $DEFAULT_PROJECT
+  --plugin-dir DIR   Plugin to load. Default: the plugin/ beside this script's repo.
+  --no-check         Skip the reachability and token preflight.
+  --dry-run          Print what would run, then exit. The token is redacted.
+  -h, --help         This text.
+
+Anything not listed above is forwarded to claude, as is everything after a literal --.
+So "$PROG --resume" and "$PROG -- --model sonnet" both work.
+
+environment:
+  HIVEMIND_SERVER_URL   default for --url   (set both this and HIVEMIND_TOKEN to
+  HIVEMIND_TOKEN        default for --token  skip both prompts entirely)
+
+examples:
+  $PROG                                   # prompt for address and token, then launch
+  $PROG --url box.local:8787 --project scratch
+  HIVEMIND_TOKEN=\$(cat ~/.hm-token) $PROG --url box.local:8787 --resume
+EOF
+}
+
+die() { printf '%s: %s\n' "$PROG" "$1" >&2; exit 1; }
+
+URL=${HIVEMIND_SERVER_URL:-}
+TOKEN=${HIVEMIND_TOKEN:-}
+PROJECT=$DEFAULT_PROJECT
+PLUGIN_DIR=
+CHECK=1
+DRY=0
+CLAUDE_ARGS=()
+
+while [ $# -gt 0 ]; do
+    case $1 in
+        --url)        [ $# -ge 2 ] || die "--url needs a value";        URL=$2;        shift 2 ;;
+        --token)      [ $# -ge 2 ] || die "--token needs a value";      TOKEN=$2;      shift 2 ;;
+        --project)    [ $# -ge 2 ] || die "--project needs a value";    PROJECT=$2;    shift 2 ;;
+        --plugin-dir) [ $# -ge 2 ] || die "--plugin-dir needs a value"; PLUGIN_DIR=$2; shift 2 ;;
+        --url=*)        URL=${1#*=};        shift ;;
+        --token=*)      TOKEN=${1#*=};      shift ;;
+        --project=*)    PROJECT=${1#*=};    shift ;;
+        --plugin-dir=*) PLUGIN_DIR=${1#*=}; shift ;;
+        --no-check)   CHECK=0; shift ;;
+        --dry-run)    DRY=1;   shift ;;
+        -h|--help)    usage; exit 0 ;;
+        --)           shift; CLAUDE_ARGS+=("$@"); break ;;
+        *)            CLAUDE_ARGS+=("$1"); shift ;;   # not ours: claude's
+    esac
+done
+
+command -v claude >/dev/null 2>&1 || die "claude is not on PATH"
+
+# The plugin lives beside this script's repo, so the launcher works from any directory and from a
+# symlink on PATH.
+if [ -z "$PLUGIN_DIR" ]; then
+    src=$0
+    while [ -L "$src" ]; do
+        link=$(readlink "$src")
+        case $link in /*) src=$link ;; *) src=$(dirname "$src")/$link ;; esac
+    done
+    PLUGIN_DIR=$(cd "$(dirname "$src")/.." && pwd)/plugin
+fi
+[ -f "$PLUGIN_DIR/.claude-plugin/plugin.json" ] \
+    || die "no plugin at $PLUGIN_DIR (expected .claude-plugin/plugin.json) — pass --plugin-dir"
+
+# ── collect what we were not given ──────────────────────────────────────────────────────────────
+if [ -z "$URL" ]; then
+    if [ -t 0 ]; then
+        printf 'Hivemind server address [%s]: ' "$DEFAULT_ADDR" >&2
+        IFS= read -r URL || true
+    fi
+    [ -n "$URL" ] || URL=$DEFAULT_ADDR
+fi
+
+# A bare host:port is what people have in hand; a full project URL is what the plugin wants.
+case $URL in *://*) ;; *) URL="http://$URL" ;; esac
+URL=${URL%/}
+case $URL in
+    */p/*) ;;                                  # already names a project
+    *)     URL="$URL/p/$PROJECT" ;;
+esac
+
+if [ -z "$TOKEN" ]; then
+    if [ -t 0 ]; then
+        printf 'Bearer token for %s (not echoed): ' "$URL" >&2
+        IFS= read -rs TOKEN || true
+        printf '\n' >&2
+    fi
+    # Required, not optional: every MCP call on this server needs one, so an empty token buys a
+    # session whose every tool call 401s. Failing here is kinder than failing 40 times later.
+    [ -n "$TOKEN" ] || die "a token is required (prompt, --token, or HIVEMIND_TOKEN)"
+fi
+
+# ── the session-only settings file ──────────────────────────────────────────────────────────────
+# 0700 dir + 0600 file, both established by umask BEFORE the token is written, so the secret is
+# never briefly world-readable. Removed on any exit, including Ctrl-C.
+umask 077
+TMPDIR_HM=$(mktemp -d "${TMPDIR:-/tmp}/hivemind-claude.XXXXXX")
+cleanup() { rm -rf "$TMPDIR_HM"; }
+trap cleanup EXIT INT TERM HUP
+SETTINGS="$TMPDIR_HM/settings.json"
+
+# json-escape: a token or URL may legitimately contain a backslash or quote.
+esc() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
+
+# One emitter, called twice — once with the real token into the 0600 file, once with a placeholder
+# for --dry-run. Redacting by rewriting the emitted file would mean a regex over a secret, which
+# fails open: a token containing a regex metacharacter would print in full.
+settings_json() {
+    printf '{"pluginConfigs":{"hivemind":{"options":{"server_url":"%s","api_token":"%s"}}}}\n' \
+        "$(esc "$URL")" "$(esc "$1")"
+}
+
+# The key is the bare plugin name. See the header note: the @marketplace forms are silently ignored
+# for a --plugin-dir plugin, which would leave the userConfig defaults in place.
+settings_json "$TOKEN" > "$SETTINGS"
+
+# ── preflight, so a wrong address fails here and not as a silent MCP error inside the session ───
+if [ "$CHECK" = 1 ] && command -v curl >/dev/null 2>&1; then
+    root=${URL%/p/*}
+    if ! curl -fsS -m 5 -o /dev/null "$root/healthz" 2>/dev/null; then
+        printf '%s: warning: %s/healthz did not answer — the session will start, but the plugin will not connect.\n' \
+            "$PROG" "$root" >&2
+    else
+        code=$(curl -s -m 5 -o /dev/null -w '%{http_code}' \
+               -H "Authorization: Bearer $TOKEN" "$URL/guide" 2>/dev/null || echo 000)
+        case $code in
+            200) ;;
+            401) printf '%s: warning: the server rejected that token (401).\n' "$PROG" >&2 ;;
+            # By design this server answers identically for a project that does not exist and one
+            # you may not see, so this message must not claim to know which.
+            404) printf '%s: warning: no project answered at %s — it does not exist, or it is not yours.\n' \
+                     "$PROG" "$URL" >&2 ;;
+            000) printf '%s: warning: %s/guide did not answer.\n' "$PROG" "$URL" >&2 ;;
+            *)   printf '%s: warning: %s/guide answered %s.\n' "$PROG" "$URL" "$code" >&2 ;;
+        esac
+    fi
+fi
+
+set -- --plugin-dir "$PLUGIN_DIR" --settings "$SETTINGS" ${CLAUDE_ARGS+"${CLAUDE_ARGS[@]}"}
+
+if [ "$DRY" = 1 ]; then
+    printf 'project_url=%s\nplugin_dir=%s\nsettings_mode=%s\n' \
+        "$URL" "$PLUGIN_DIR" \
+        "$(stat -f '%OLp' "$SETTINGS" 2>/dev/null || stat -c '%a' "$SETTINGS")"
+    printf 'argv=claude'; printf ' %s' "$@"; printf '\n'
+    printf 'settings=%s' "$(settings_json '***')"
+    exit 0
+fi
+
+# Deliberately NOT exec: the token file has to be removed when the session ends, and a trap cannot
+# fire after exec. claude runs as a child in this foreground process group, so Ctrl-C reaches it
+# directly; we wait, propagate its status, and the EXIT trap reaps the 0700 directory. The cost is
+# one idle shell per session, which is the right price for not leaving a bearer token in TMPDIR.
+status=0
+claude "$@" || status=$?
+exit "$status"

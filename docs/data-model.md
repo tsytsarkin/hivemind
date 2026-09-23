@@ -18,7 +18,33 @@ assertive`, `src_types/dst_types`, `cardinality`). `versioned=1` → `edge_versi
 `props.status`; a node with an open assertive edge is flagged `disputed`.
 
 ## Provenance
-Every write inserts a `tx(tx_id, tx_time, agent_id, reason)` row; `tx_id` is the as-of coordinate.
+Every write inserts a `tx(tx_id, tx_time, agent_id, user_id, device, reason)` row; `tx_id` is the
+as-of coordinate. `user_id` is the **author**, taken from the caller's token and not settable from
+a tool argument; `agent_id` is a free-form label ("which job was this"). Versioned rows carry the
+same user directly — `node.created_by`, `node_version.author_user`, `edge_version.author_user`,
+and the same column on `skill_version`, `trap`, `tool_version` and `guide_proposal` — while a bulk
+edge (`edge_bulk`) has no version row and so is attributed through its `created_tx` and
+`source_tag` alone. NULL means "written before authorship existed" and reads as `legacy:unknown`;
+`hivemind-admin backfill-authors` fills those from each row's `tx.agent_id` as `legacy:<label>`,
+never as a real username (`:` is illegal in one).
+
+Three different questions, three different fields, and a read answers all three:
+`created_by` is the node's **first** author; `author` is the author of the version being returned
+(the head, or the as-of one); and `contributors` is **everyone who ever revised it**. The last is
+`GROUP BY author_user` over that node's `node_version` rows, **computed on read and never stored**
+— a denormalized `authors` array would be a second copy of what the version rows already say and
+would drift from them the first time a row was corrected. `agent_label` sits beside `author` as the
+free-form `agent` string the caller passed: kept so "which job was this" survives, never mistaken
+for identity. `author=` on the four searches filters on the same column (see [api.md](api.md)).
+
+`edge` holds the identity of each edge (type + endpoints); `edge_version` and `edge_bulk` hold
+what it says.
+
+## Search index
+`node_fts` (BM25 over prose) and `sym_fts` (trigram over symbols) are the two halves `graph_search`
+fuses with RRF; both are FTS5 virtual tables rebuilt by `hivemind-admin reindex`. `meta` is a
+single key/value table; the one counter it holds is `schema_version` (`guide_version` is not in it
+— it is a per-section column on `guide_section`, bumped per section by a merge or `set-guide`).
 
 ## Blobs
 Content-addressed files (`blob`, `blob_ref`, `blob_pin`); attach to any node/edge **version**.
@@ -30,28 +56,32 @@ registry (yank, never delete; only the newest non-yanked version is indexed in `
 `node_id` and `subject_key`/`subject_version` scope it, and `status`
 (`active`/`disputed`/`retired`) makes it falsifiable. Indexed in `trap_fts`; every record and
 status change writes a `tx` row for provenance.
-`skill_link` / `tool_link` attach either to a node (`relation`, plus `source`=auto|confirmed and the retrieval `score`) and are what `graph_get` surfaces; they are written automatically on publish and a confirmed link is never downgraded. `embedding` holds one L2-normalised float32 vector per skill/tool per backend (`model`), used for semantic search; `skill_fts` / `tool_fts` hold the lexical side. Details: [skills-and-traps.md](skills-and-traps.md).
+`skill_link` / `tool_link` attach either to a node (`relation`, plus `source`=auto|confirmed and the retrieval `score`) and are what `graph_get` surfaces; they are written automatically on publish and a confirmed link is never downgraded. `embedding` holds **one** L2-normalised float32 vector per skill/tool — its primary key is `(kind, item_id)`, so `model` records which backend produced the vector that is stored rather than keying a set of them, and re-embedding under another backend replaces it. That is why switching backends leaves zero vectors for the active one and raises `semantic_warning` instead of silently mixing two vector spaces. `skill_fts` / `tool_fts` hold the lexical side. Details: [skills-and-traps.md](skills-and-traps.md).
 
-## Agent bus (ephemeral — no provenance)
+## Agent bus (no tables at all)
 
-Six tables for live coordination, written through `Database.write_light()` and reaped on a TTL.
-They are the one part of the store that inserts **no `tx` row**: presence and chatter are worthless
-five minutes later, so paying revision-chain, `graph_search` and backup costs for them would be a
-mistake. `bus_session(session_id, label, harness, interruptible, cursor, expires_at, ttl, ended_at)`
-— identity is per **session**, never per token, since one token runs many agents with different
-capabilities. `ttl` is stored per session so that both `bus_ping` *and* `bus_poll` extend
-`expires_at` by what that session actually asked for: a session stays alive by working, not only by
-pinging. `bus_capability(session_id, name, attrs)` holds dotted, self-asserted names for exact or
-`prefix.*` queries; `bus_membership` is room joins. `bus_message(seq, room, to_session, kind,
-reply_to, request_id, expires_at)` — one global `AUTOINCREMENT` `seq` orders everything, so a
-session needs only a single integer cursor, and `AUTOINCREMENT` (not a bare rowid) is what stops a
-reap of the tail from reusing numbers and silently rewinding every cursor past them.
-`bus_request(request_id, requester, needs, state, claimed_by, lease_expires_at, attempts)` is
-single-winner dispatch, decided by one conditional `UPDATE … WHERE claimed_by IS NULL`. `bus_ref`
-holds typed pointers (`node`/`version`/`subject`/`traversal`/`search`) from a message, request or
-response into the graph, validated at write time. The link is deliberately **one-way** — the bus
-points at the graph and the graph never points back — so reaping a message cannot leave the graph
-holding a dead reference. Details: [bus.md](bus.md).
+The bus stores **nothing**. Presence is the open WebSocket, messages live in the hub's memory, and
+a restart is a clean slate — so nothing it carries writes a `tx` row, none of it is searchable, and
+there is no reaper to keep honest. The v1 polling bus did have six tables
+(`bus_session`/`bus_capability`/`bus_membership`/`bus_message`/`bus_request`/`bus_ref`);
+`Database._DROPPED` drops them at startup so a database that predates the rewrite converges on the
+shape of a fresh one, and the data was ephemeral by design so there was nothing to migrate. The
+only durable trace of a conversation is the local JSONL inbox each listener appends on the
+*receiving machine* (4 MiB, one rotation) — outside the database entirely. Details:
+[bus.md](bus.md).
+
+## Projects
+
+A project is a directory — `<projects_root>/<name>/{hivemind.db, blobs/, tokens.json,
+project.json, bus_secret}` — so "which project" is a filesystem boundary, not a column. Three of
+those five are credentials or ACL state and are written `0600`: `tokens.json`, `project.json` and
+`bus_secret` (the HMAC key that signs this project's bus listen keys; it is the only one *not* in
+`deploy/backup.sh`, on purpose — see `deploy/restore.md`). `project.json` holds
+`{name, visibility: "shared"|"private", owner, members[], label, created, session, last_touched}`
+and **is the ACL**: `projects_meta.can_access` is the one predicate every surface consults. It is
+read through an mtime+size-stamped cache, so a share made in another process takes effect on the
+next request with nothing to invalidate, and a file that is missing or will not parse reads back
+`private` with no owner — reachable by nobody. See [security.md](security.md).
 
 ## Schema, tools, guide
 `node_type`/`edge_type` (versioned, additive-only, proposed→active; operator `apply_pack` is

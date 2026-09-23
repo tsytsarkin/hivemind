@@ -24,7 +24,7 @@ subject cell: `subject_key="IOSurfaceRootUserClient"`, `subject_version="26.6"`,
   the whole tagged set.
 
 ## Workflow
-1. `schema_get` + `guide_get` to orient. 2. Create/He supersede a `finding`; attach evidence
+1. `schema_get` + `guide_get` to orient. 2. Create or supersede a `finding`; attach evidence
    artifacts (`hivemind artifact put`, then `artifact_attach(..., role="crashlog|binary|poc")`).
 3. Link `evidence_for`, `derived_from`. 4. When another agent's claim conflicts on the same build,
    add `contradicts {status:"open"}` rather than overwriting. 5. Package a reusable RE tool and

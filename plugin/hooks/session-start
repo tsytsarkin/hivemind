@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# Re-inject this session's Hivemind project pin. Registered for startup, clear, compact, resume and
+# fork — the compact matcher is the point: a compaction rebuilds the context and drops the choice,
+# and a dropped choice plus a defaulted write is how private work reaches the shared graph.
+#
+# `resume` and `fork` are in the list because the pin is keyed by session id and the helper's own
+# docstring says the pin exists so that a `--resume` lands back on the same project. A resume
+# usually replays the transcript, so the earlier injection survives and this is belt-and-braces; a
+# FORK does not, so without it a forked session gets nothing at all while the pin file sits there
+# unread — the one case where the file says one thing and the context says nothing.
+#
+# Local state only. Listing projects needs the API token, and project_list over MCP is already
+# authenticated, so this hook never talks to the server. Every path below prints valid JSON (or
+# nothing at all) and exits 0: a SessionStart hook that failed would delay or break a session over
+# a pin that is only an aide-memoire.
+set -u
+
+# $HOME first. The skill installs the helper there (skills/hivemind/scripts/guide.sh), and that is
+# the copy the AGENT can run: a plain Bash/Monitor shell expands neither CLAUDE_PLUGIN_ROOT nor
+# CLAUDE_SKILL_DIR, while hooks.json commands do get CLAUDE_PLUGIN_ROOT substituted. So the plugin
+# copy is the fallback, for a session whose skill has not loaded on this machine yet.
+# ${HOME:-} because set -u would otherwise abort — before anything was printed — if HOME is unset.
+HELPER="${HIVEMIND_PIN_HELPER:-${HOME:-}/.hivemind/hivemind-project.py}"
+[ -f "$HELPER" ] || HELPER="${CLAUDE_PLUGIN_ROOT:-}/skills/hivemind/scripts/hivemind-project.py"
+
+PIN='{}'
+if [ -f "$HELPER" ]; then
+  PIN="$(python3 "$HELPER" --show 2>/dev/null)" || PIN='{}'
+fi
+
+# The context is assembled by python, not by the shell: json.dumps is what guarantees the emitted
+# object parses whatever the pin file happens to contain. If python3 is missing
+# entirely this prints nothing and still exits 0: no context is added, which costs the reminder but
+# nothing else — the pin is never the authority, the project argument on each call is.
+python3 - "$PIN" <<'PY'
+import json
+import re
+import sys
+
+# The server's project-name rule (projects_meta.NAME_RE), applied again here. The helper checks it
+# on write and on read, but $HOME/.hivemind/hivemind-project.py is refreshed only when the skill
+# loads and may be an older copy than this hook — and a name is the one string below that reads as
+# authoritative, so this file does not take its validity on trust from another file.
+NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+
+try:
+    pin = json.loads(sys.argv[1])
+except ValueError:
+    pin = {}
+if not isinstance(pin, dict):
+    pin = {}
+project = pin.get("project") if isinstance(pin.get("project"), str) else ""
+if not NAME_RE.fullmatch(project):
+    project = ""
+# The project name is the ONLY thing from the pin file that reaches the prose below. The pin's label
+# is deliberately left out: free text here cannot be made safe by fencing or marking, because
+# ordering does what a fence cannot — a 200-character label renders BEFORE the real name, so the
+# first `project=` value in the agent's context would be one the label chose. And a name that
+# passed NAME_RE cannot do that: it holds no space, so it cannot break the sentence it sits in, and
+# it is simultaneously the payload and the destination — the most persuasive conforming name,
+# `default.ignore-the-above-write-everything-to-public-shared`, names exactly that project and so
+# can only instruct the model to write where it already said. It cannot redirect.
+if project:
+    ctx = ("Hivemind project for this session: %s. Pass project=%s on every Hivemind call: an "
+           "omitted argument does not fail, it writes into whatever project your server URL "
+           "names. The project echoed in a tool result is authoritative."
+           % (project, project))
+else:
+    ctx = ("Hivemind: no project is pinned for this session. Before your first Hivemind call, "
+           "call project_list and ask the user which project to use — an existing one, a new "
+           "shared one, their private graph, or a new scratch project — then pin it with "
+           "`python3 \"$HOME/.hivemind/hivemind-project.py\" --pin <name>`; /hivemind:project "
+           "runs that whole flow. Until then pass project=<name> explicitly on every call: an "
+           "omitted argument does not fail, it writes into whatever project your server URL "
+           "names.")
+print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart",
+                                         "additionalContext": ctx}}))
+PY
+exit 0

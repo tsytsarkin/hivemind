@@ -127,11 +127,12 @@ def _bus(c, args) -> int:
         if args.url:
             # Explicit URL: single ticket, so this cannot survive a reconnect. Supported for
             # debugging; agents are given a --label command instead.
-            return _bus_mod.run_listen(args.url, retry=not args.once, remint=None)
+            return _bus_mod.run_listen(args.url, retry=not args.once, remint=None,
+                                       inbox=args.inbox)
         if not args.label:
             _die("give --label (recommended) or --url")
         return _bus_mod.run_listen(mint_url(args.label), retry=not args.once,
-                                   remint=lambda: mint_url(args.label))
+                                   remint=lambda: mint_url(args.label), inbox=args.inbox)
 
     if args.bus_cmd == "connect":
         _out(c.call("bus_connect", {"label": args.label}))
@@ -230,6 +231,8 @@ def build_parser() -> argparse.ArgumentParser:
     bl.add_argument("--url", help="ws:// URL from bus_connect (includes the single-use ticket)")
     bl.add_argument("--label", help="connect as this peer and mint the ticket automatically")
     bl.add_argument("--once", action="store_true", help="exit on disconnect instead of retrying")
+    bl.add_argument("--inbox", help="append every message here as JSON, one per line "
+                                    "(default: ~/.hivemind/bus-inbox.jsonl)")
     bsnd = bus.add_parser("send", help="send a message to one peer")
     bsnd.add_argument("to"); bsnd.add_argument("body")
     bbc = bus.add_parser("broadcast", help="send to everyone in a room")

@@ -1,6 +1,6 @@
 [project]
 name = "hivemind-server"
-version = "1.0.1"
+version = "1.1.0"
 description = "Hivemind server: shared agent knowledge-graph + artifact store + tool registry (MCP + REST)"
 readme = "README.md"
 requires-python = ">=3.11"          # official `mcp` 2.0 SDK requires >=3.10; we pin 3.11
@@ -8,6 +8,9 @@ license = "Apache-2.0"
 authors = [{ name = "Nik Tsytsarkin" }]
 dependencies = [
     "mcp>=2.0,<3",                  # official MCP Python SDK (MCPServer, streamable HTTP)
+    "pydantic>=2.12,<3",            # mcp requires it anyway; we import Field directly to describe
+                                    # the `project` argument injected into every tool's schema
+
     "starlette>=0.40,<1",           # ASGI host for the MCP mount + REST custom routes
     "uvicorn[standard]>=0.30,<1",   # ASGI server (uvloop/httptools for throughput)
     "jsonschema>=4.21,<5",          # JSON Schema 2020-12 validation of node/edge props

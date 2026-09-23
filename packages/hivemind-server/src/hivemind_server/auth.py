@@ -4,68 +4,20 @@ optional scopes; no OAuth infra. tokens.json = { "<token>": {"client_id": "...",
 """
 from __future__ import annotations
 
-import json
-import os
 import secrets
-from pathlib import Path
 from typing import Optional
 
 from mcp.server.auth.provider import AccessToken, TokenVerifier
 
+from .jsonstore import JsonFileStore
+
 DEFAULT_SCOPES = ["hivemind:rw"]
 
 
-class TokenStore:
-    """Token store backed by tokens.json.
-
-    Tokens are minted by a SEPARATE process (`hivemind-admin mint-token`), so the running server
-    must not cache the file forever — it re-reads whenever the file's (mtime, size) changes, which
-    makes a freshly minted token usable with no restart. Writes go through a temp file + atomic
-    rename so a reader can never observe a half-written file.
+class TokenStore(JsonFileStore):
+    """Token store backed by tokens.json. File discipline (re-read on change, atomic write) lives
+    in JsonFileStore, shared with identity.IdentityStore — see jsonstore.py for why.
     """
-
-    def __init__(self, path: Path):
-        self.path = path
-        self._tokens: dict[str, dict] = {}
-        self._stamp: Optional[tuple] = None
-        self.reload()
-
-    def _file_stamp(self) -> Optional[tuple]:
-        try:
-            st = self.path.stat()
-        except OSError:
-            return None
-        return (st.st_mtime_ns, st.st_size)
-
-    def reload(self) -> None:
-        stamp = self._file_stamp()
-        if stamp is None:
-            self._tokens = {}
-            self._stamp = None
-            return
-        try:
-            self._tokens = json.loads(self.path.read_text())
-        except (OSError, json.JSONDecodeError):
-            return  # keep the last good copy rather than locking everyone out
-        self._stamp = stamp
-
-    def refresh_if_changed(self) -> bool:
-        """Re-read tokens.json if another process changed it. Returns True if reloaded."""
-        if self._file_stamp() != self._stamp:
-            self.reload()
-            return True
-        return False
-
-    def save(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix(self.path.suffix + f".tmp{os.getpid()}")
-        tmp.write_text(json.dumps(self._tokens, indent=2))
-        try:
-            tmp.chmod(0o600)
-        except OSError:
-            pass
-        os.replace(tmp, self.path)          # atomic: readers see old or new, never partial
-        self._stamp = self._file_stamp()
 
     def verify(self, token: str) -> Optional[AccessToken]:
         # Always cheap-stat the file first: picks up tokens minted by another process AND makes

@@ -22,11 +22,12 @@ live guide). Meaning is data — shipped as a swappable **domain pack** (`packs/
 | Path | What |
 |---|---|
 | `packages/hivemind-server/` | The server: MCP (streamable HTTP) + REST, SQLite-backed. Python ≥3.11. |
-| `packages/hivemind-client/` | The client library + `hivemind` CLI. Python ≥3.9, only dep is `httpx`. |
-| `plugin/` | The Claude Code plugin (MCP config + self-updating bootstrap skill). |
-| `packs/` | Optional, swappable, **layerable** domain packs (schema + guide). Ships `security-research` and `ios-macos-attack-surface`. See [docs/packs.md](docs/packs.md). |
+| `packages/hivemind-client/` | The client library + `hivemind` CLI. Python ≥3.9; deps are `httpx` and `websockets` (the bus listener). |
+| `plugin/` | The Claude Code plugin: MCP config, the self-updating bootstrap skill, a schema-authoring skill, the `/hivemind:project` command and a `SessionStart` hook. |
+| `packs/` | Optional, swappable, **layerable** domain packs (schema + guide). Ships `security-research`, `ios-macos-attack-surface` and `research-workflow`. See [docs/packs.md](docs/packs.md). |
 | `deploy/` | Deploy docs, systemd unit, daily backup + restore, bootstrap + relock scripts. |
-| `docs/` | Data model, API, the agent bus, guide authoring, security notes. |
+| `docs/` | [User guide](docs/user-guide.md), data model, API, the agent bus, guide authoring, security notes. |
+| `scripts/` | `hivemind-claude` — run Claude Code with the plugin for one session, without installing it. |
 
 ## Two versioning axes (core concept)
 
@@ -59,30 +60,31 @@ before it builds anything. See **[docs/skills-and-traps.md](docs/skills-and-trap
 
 ## Live coordination: the agent bus
 
-Alongside the graph (durable truth) there is a **bus** for things that are only true right now:
-who is online, what they can physically do, and who is doing a given piece of work.
+Alongside the graph (durable truth) there is a **bus** for the one thing that is only true right
+now: which agents are connected, so they can talk to each other while they work.
 
-Identity is **per agent session**, not per token — one token is reused across many agents on many
-harnesses whose capabilities differ. A session advertises specific dotted capabilities
-(`browser.cdp`, `device.handset.attached`), and work is handed out by **open claim**: everyone who
-matches is notified and exactly one wins a single atomic `UPDATE`. No scheduler, and a wedged
-agent can't stall a request because it simply never claims.
+Delivery is **push, not polling**. An agent calls `bus_connect(label)` once and runs the command it
+returns under its harness's background-process tool; that process holds a WebSocket to the server,
+and an incoming message arrives as a notification in the agent's conversation without it having
+asked. Presence *is* that socket — a peer is online exactly while its connection is open, so there
+is no TTL and no reaper to lose messages behind.
 
 ```sh
-hivemind bus agents --capability 'browser.*'                   # who can do this?
-hivemind bus request "$SID" --task "screenshot x" --needs browser.cdp
-hivemind bus sidecar "$SID" &  # background it: heartbeats while quiet, exits when work arrives —
-                               # and on a harness that re-invokes on exit, that exit is the interrupt
+hivemind bus connect mac-studio        # mint a ticket, print the command that receives
+hivemind bus peers                     # who is connected right now
+hivemind bus send lab-box "census done, 4712 gated entry points"
+hivemind bus broadcast "pausing writes for a migration"
 ```
 
-Messages and requests carry **refs** — validated pointers into the graph, so "do this to that
-thing" actually names the thing. A ref is a node, a pinned revision, a subject cell, a traversal
-(`edge_types` + `depth`), or a saved search; a worker gets labels inline and follows them with
-`bus_resolve`. Answers point back at what they produced, so the durable half lands in the graph
-and only the chatter expires.
+Six MCP tools, and that is the whole surface: `bus_connect`, `bus_peers`, `bus_send`,
+`bus_broadcast`, `bus_message` (the full text of a notification that was clipped), `bus_disconnect`.
+The listener ships **with the plugin** as a stdlib-only script, so a machine that installed nothing
+but the plugin can still receive.
 
-Bus traffic is ephemeral and TTL-reaped; anything worth keeping still goes in the graph.
-See **[docs/bus.md](docs/bus.md)**.
+The bus stores **nothing**: no tables, no provenance rows, in-memory only, and a restart is a clean
+slate. The server keeps a message body for about an hour so `bus_message` can answer, and each
+receiving machine appends what it got to a bounded local JSONL inbox — neither is an archive.
+Anything worth keeping goes in the graph. See **[docs/bus.md](docs/bus.md)**.
 
 ## Domain packs
 
@@ -99,6 +101,13 @@ code required; open a PR under `packs/`, or fork and publish your own.
 
 See [docs/packs.md](docs/packs.md) and the [full docs](docs/) (data model, API, security, guides).
 
+## Using it
+
+**[docs/user-guide.md](docs/user-guide.md)** is the guide for the person at the keyboard: both ways
+to connect (installed, or not), what to do in the first five minutes, how to choose between a
+shared, private or scratch project, and the one rule worth internalising — always pass
+`project=<name>`, because whether omitting it fails depends on which endpoint you are on.
+
 ## Adding machines
 
 **One server, many clients** — don't run a second server per machine (each has its own database,
@@ -107,12 +116,24 @@ so it would be a separate graph). The server listens on `127.0.0.1` by default; 
 server and install the plugin there — no server or checkout needed on the client:
 
 ```sh
-hivemind-admin --project default mint-token --client-id laptop   # on the server
+hivemind-admin mint-token --user <name> --device laptop          # on the server
 claude plugin marketplace add tsytsarkin/hivemind                # on the new machine
 claude plugin install hivemind@hivemind-marketplace --scope user \
   --config server_url=http://<server-ip>:8787/p/default --config api_token=hm_…
 ```
-Full walkthrough incl. secure token transfer: **[docs/clients.md](docs/clients.md)**.
+Or skip installing altogether — `scripts/hivemind-claude` prompts for an address (default
+`localhost:8787`) and a token, loads the plugin for that session only via `--plugin-dir`, and
+forwards any other arguments to `claude`:
+
+```sh
+scripts/hivemind-claude                      # prompt, then launch
+scripts/hivemind-claude --url <host>:8787 --resume
+```
+Nothing is written to your permanent configuration, and the token lives in a `0600` file that is
+removed when the session ends. Good for a borrowed machine or a VM.
+
+Both routes, step by step: **[docs/user-guide.md](docs/user-guide.md)**.
+Minting and moving tokens, and revocation: **[docs/clients.md](docs/clients.md)**.
 
 ## Reproducible dependencies
 

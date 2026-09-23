@@ -8,6 +8,9 @@ Hivemind is a shared, versioned knowledge graph + artifact store + tool registry
 domain-agnostic: node and edge **types are defined at runtime in the schema**. Before writing,
 call `schema_get` (this project's types) and `guide_get` (this project's guide sections).
 
+One server holds several projects, so **every tool takes `project=<name>` and no call proceeds when
+no project is resolvable**. Pass it on every call.
+
 ## Persist results here, not in local memory
 
 Hivemind is the durable home for research and results — local memory and scratch notes are
@@ -21,7 +24,9 @@ and evidence here **as you go**, not just at the end.
 - **Evidence:** `hivemind artifact put <file>` then `artifact_attach(digest, version_id, role=…)`
   so a claim carries its proof. **Relate:** `graph_link(...)`.
 - **Keep local:** secrets/tokens, machine-specific config, throwaway scratch, anything private.
-  Everything on this server is shared with every agent and person on it.
+  Everything in a **shared** project is readable by every user of the server; a **private** one is
+  readable only by its owner and the users that owner shared it with. Write as if the wrong project
+  is the shared one — see the project section of the `hivemind` skill.
 - **Server unreachable?** Keep a local note, say so, and write it in once it's back.
 - **No fitting type?** `schema_propose` an additive one rather than falling back to a local file.
 
