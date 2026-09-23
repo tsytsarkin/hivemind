@@ -11,6 +11,13 @@ Dependencies are tracked three ways so any machine can reproduce the environment
 
 Pick **uv** for an exact lockfile install, or **plain venv + pip** if uv isn't available.
 
+> **Deploying to a server that already holds real data?** Follow
+> [deploy-checklist.md](deploy-checklist.md) rather than this file alone. It is the operational
+> half: get the branch to the remote *before* the server (or the `git clone` below reinstalls the
+> old code), tighten the modes on files that already exist, verify the ACL from two identities, and
+> run the one irreversible step — the author backfill — with a backup behind it. This file says how
+> to install; that one says what to check.
+
 ## Server (lab box, Python ≥3.11)
 
 ### Option A — uv (recommended: exact, from uv.lock)
@@ -139,6 +146,16 @@ Tunables: `HIVEMIND_BACKUP_DIR` (default `$HIVEMIND_BACKUP_DIR`), `HIVEMIND_BACK
 
 Measured on the live project (1.7 GB database, 9,475 blobs / 9.7 GB): **23 s** for the first run,
 **17 s** incrementally with zero blobs transferred. Restore procedure: [restore.md](restore.md).
+
+## Rolling out a change to a live server
+
+[deploy-checklist.md](deploy-checklist.md) is the step-by-step, and the one thing worth repeating
+here: **push to the remote before pushing to the server.** Measured on this branch, `main` and
+`origin/main` were both at the merge base while the work sat on a feature branch, so
+`git push origin main` succeeded and sent nothing — and the server, which is pushed to directly
+because it cannot fetch from the private repo, would then have run 60 commits GitHub did not have.
+The `git clone <repo>` recovery path at the top of this file would have reinstalled the **old**
+server. The checklist fast-forwards `main` first and then verifies that the remote actually moved.
 
 ## Restarting
 

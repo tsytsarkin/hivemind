@@ -1145,6 +1145,11 @@ git commit -m "fix: enforce project ACL on every /p/ path and close the name-enu
 This task changes authentication behaviour on a live server, so it does not go out on its own
 authority. Ask first, then:
 
+> **Superseded — do not run this block.** `git push origin main` is a silent no-op while the work
+> is on a feature branch (`main` and `origin/main` are both at the merge base), so the server ends
+> up running commits the remote does not have. Use `deploy/deploy-checklist.md` step 1, which
+> fast-forwards `main` first and then verifies the remote moved.
+
 ```bash
 bash deploy/backup.sh
 git push origin main && git push nik@<box>:hivemind HEAD:refs/heads/_in
@@ -3098,6 +3103,14 @@ git commit -m "docs: identity, project selection and the ACL; bump to 1.1.0"
 ```
 
 - [ ] **Step 7: Deploy — ONLY after the user approves the push**
+
+> **Superseded by `deploy/deploy-checklist.md`** — the tracked, corrected version of this step and
+> of Step 8 below. Two things are wrong here: `git push origin main` pushes nothing while the work
+> is on a feature branch (measured: `main` and `origin/main` are both at `1825ca8`, `HEAD` is 60
+> commits ahead), so the server would run code the remote does not have and DEPLOY.md's `git clone`
+> recovery would reinstall the old server; and `backfill-authors` acts on one project per
+> invocation, so it has to be looped. The checklist does both, and verifies the remote actually
+> moved.
 
 ```bash
 bash deploy/backup.sh
