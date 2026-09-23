@@ -125,7 +125,10 @@ There is a per-user cap on projects you own; the server will tell you if you rea
 Whether omitting it fails depends on which endpoint you're on, and the safe-looking case is the one
 that bites:
 
-- On the project-neutral `POST /mcp` (the server root), a **write naming no project is refused**.
+- On the project-neutral `POST /mcp` (the server root), **every call is refused without it — reads
+  as well as writes**, because there is no project for the call to be about. Measured: `graph_types`
+  and `guide_get` are refused the same as `graph_upsert`; only the wording differs, and the refusal
+  lists the projects you may name.
 - On a project base URL — `POST /p/<name>/mcp`, which is what the installed plugin's default
   `server_url` resolves to — **the URL *is* the project**, so the write silently lands wherever that
   URL points.

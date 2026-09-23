@@ -7,8 +7,10 @@ Pick the Hivemind project for this session and pin it. Every Hivemind call carri
 `project=<name>`, and this choice decides which graph the session's knowledge lands in. Private work
 written into a shared project cannot be un-shared.
 
-**Omitting the argument is not safe, and whether it fails depends on the endpoint.** A write with no
-`project=` is refused only on the project-neutral `POST /mcp`. On a project base URL —
+**Omitting the argument is not safe, and whether it fails depends on the endpoint.** On the
+project-neutral `POST /mcp` every call with no `project=` is refused — **reads as well as writes**,
+since there is no project for the call to be about; the write refusal just explains the stakes,
+and both list the projects you may name. On a project base URL —
 `POST /p/<name>/mcp`, which is what `${user_config.server_url}` resolves to by default and what the
 deployed plugin uses — the URL *is* the project, so the write silently lands in whatever project
 that URL names. That is by design (the caller's own URL named it), and it is exactly how an omitted

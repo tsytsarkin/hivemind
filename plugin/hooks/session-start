@@ -23,6 +23,34 @@ set -u
 HELPER="${HIVEMIND_PIN_HELPER:-${HOME:-}/.hivemind/hivemind-project.py}"
 [ -f "$HELPER" ] || HELPER="${CLAUDE_PLUGIN_ROOT:-}/skills/hivemind/scripts/hivemind-project.py"
 
+# ── publish the plugin's own config to the session's shell, without overriding a real export ─────
+# Why this exists: `skills/hivemind/scripts/guide.sh`, the bus listener command and the `hivemind`
+# CLI all read HIVEMIND_SERVER_URL / HIVEMIND_TOKEN from the environment, and on a plugin-only
+# machine nobody exports them — so the live guide silently fell back to its cached copy while the
+# plugin held the URL and the token all along.
+#
+# Measured against Claude Code 2.1.x, because none of it is guessable: a SessionStart hook is given
+# the user config as CLAUDE_PLUGIN_OPTION_<KEY-UPPERCASED>, and `$CLAUDE_ENV_FILE` is a shell
+# fragment that later Bash tool calls in the session source. Neither variable is visible to a plain
+# Bash tool call, which is exactly why the hook has to be the bridge. Verified end to end: the hook
+# writes, and a subsequent Bash call reads the value back.
+#
+# An existing export always wins — the environment is the override and this is only the fallback,
+# so a machine that deliberately points its shell at a different server or token keeps doing so.
+if [ -n "${CLAUDE_ENV_FILE:-}" ]; then
+  # The token lands in a file on disk, so narrow it BEFORE writing rather than after: Claude Code
+  # creates this file 0644, and a bearer token in a world-readable file is worse than the cached
+  # guide this whole block exists to fix. chmod is idempotent and harmless if another hook shares
+  # the file.
+  chmod 600 "$CLAUDE_ENV_FILE" 2>/dev/null || true
+  if [ -z "${HIVEMIND_SERVER_URL:-}" ] && [ -n "${CLAUDE_PLUGIN_OPTION_SERVER_URL:-}" ]; then
+    printf 'export HIVEMIND_SERVER_URL=%q\n' "$CLAUDE_PLUGIN_OPTION_SERVER_URL" >> "$CLAUDE_ENV_FILE" 2>/dev/null || true
+  fi
+  if [ -z "${HIVEMIND_TOKEN:-}" ] && [ -n "${CLAUDE_PLUGIN_OPTION_API_TOKEN:-}" ]; then
+    printf 'export HIVEMIND_TOKEN=%q\n' "$CLAUDE_PLUGIN_OPTION_API_TOKEN" >> "$CLAUDE_ENV_FILE" 2>/dev/null || true
+  fi
+fi
+
 PIN='{}'
 if [ -f "$HELPER" ]; then
   PIN="$(python3 "$HELPER" --show 2>/dev/null)" || PIN='{}'

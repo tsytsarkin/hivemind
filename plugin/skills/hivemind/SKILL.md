@@ -9,7 +9,7 @@ description: >-
   Hivemind REPLACES local memory: read it before any work and persist all work into it. Domain-agnostic — call schema_get and guide_get first to learn this project's vocabulary.
 allowed-tools: Bash(${CLAUDE_SKILL_DIR}/scripts/guide.sh *) Read
 metadata:
-  version: "1.1.0"
+  version: "1.1.1"
 ---
 
 # Hivemind
