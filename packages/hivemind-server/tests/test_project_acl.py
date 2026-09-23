@@ -140,6 +140,49 @@ async def test_healthz_stays_open_because_it_names_nothing(two_users):
 
 
 @pytest.mark.anyio
+async def test_a_shared_projects_open_tails_are_exactly_two(two_users):
+    """`app._authorize`'s `tail not in ("", "healthz")` is the whole reason a shared project's REST
+    surface still needs a token, and until now nothing failed when it widened.
+
+    `envelope.set_registry`'s docstring names this exact line: *"One more open tail there would have
+    turned it into an ACL bypass with nothing here failing."* It was true — measured, adding
+    `"guide"` to that tuple left the whole suite green while
+    `GET /p/default/guide` with no Authorization header returned 200 and the full guide body,
+    contradicting docs/security.md, docs/clients.md and docs/api.md.
+
+    So this states the WHOLE rule, not half of it: the two open tails are pinned at 200 as well, or
+    a "fix" that closed them would pass. The authenticated controls at the end are what make the
+    401s mean something — without them every assertion here would still hold if `/guide` and
+    `/skills` were not routes at all.
+    """
+    application, nik, _ = two_users
+    transport = httpx.ASGITransport(app=application)
+    async with Lifespan(application), httpx.AsyncClient(transport=transport,
+                                                        base_url="http://t", timeout=30) as c:
+        # Open: a client holds only the base URL and a healthy server must not look dead.
+        for path in ("/p/default/", "/p/default/healthz"):
+            r = await c.get(path)
+            assert r.status_code == 200, f"{path} must stay open: {r.status_code} {r.text}"
+            assert "authorization" not in {k.lower() for k in r.request.headers}
+
+        # Everything else under a shared project needs the token, whatever it serves.
+        for path in ("/p/default/guide", "/p/default/guide/core", "/p/default/skills",
+                     "/p/default/skills/some.skill", "/p/default/tools",
+                     "/p/default/blobs/sha256/" + "0" * 64):
+            r = await c.get(path)
+            assert r.status_code == 401, f"{path} answered {r.status_code} without a token: {r.text}"
+            assert r.json() == appmod.NO_TOKEN, r.text
+            assert r.headers.get("www-authenticate") == "Bearer", dict(r.headers)
+
+        # Controls: the two that matter most are real routes serving real content, so the 401s
+        # above are a refusal and not a router miss.
+        guide = await c.get("/p/default/guide", headers=_auth(nik))
+        assert guide.status_code == 200 and guide.json(), guide.text
+        skills = await c.get("/p/default/skills", headers=_auth(nik))
+        assert skills.status_code == 200 and "skills" in skills.json(), skills.text
+
+
+@pytest.mark.anyio
 async def test_the_root_index_no_longer_enumerates_projects(two_users):
     """It listed every project name with no token at all."""
     application, _, _ = two_users

@@ -210,6 +210,12 @@ class ProjectAuthMiddleware:
             # A shared project is knowable to everyone by definition, so its health probe and
             # endpoint index answer without a token: clients hold only the project base URL, and a
             # healthy server must not look dead to them. Neither exposes project data.
+            #
+            # This tuple is the entire reason a shared project's REST surface still needs a token,
+            # and one more entry in it is an ACL bypass — envelope.set_registry names this line for
+            # that reason. test_a_shared_projects_open_tails_are_exactly_two pins both halves: these
+            # two open at 200, everything else 401. Do not widen it without changing that test, and
+            # do not widen it by changing that test.
             if tail not in ("", "healthz"):
                 return Denied(401, NO_TOKEN, [(b"www-authenticate", b"Bearer")])
             return None

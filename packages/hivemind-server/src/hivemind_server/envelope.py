@@ -99,6 +99,11 @@ def set_registry(registry, *, require_auth: bool = True) -> None:
     in resolve_project used to key off an absent identity, which made the write path's security
     property depend on the middleware's unauthenticated-tail allowlist in another file. One more
     open tail there would have turned it into an ACL bypass with nothing here failing.
+
+    That allowlist now has a test of its own —
+    test_a_shared_projects_open_tails_are_exactly_two — which pins both halves of the rule: the two
+    open tails at 200 and every other tail at 401. Measured before it existed: adding `"guide"` to
+    the tuple left the whole suite green while an anonymous GET returned the full guide body.
     """
     _REGISTRY.set(registry)
     _REQUIRE_AUTH.set(require_auth)
