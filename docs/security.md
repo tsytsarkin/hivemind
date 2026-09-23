@@ -18,7 +18,8 @@ Two credential kinds resolve, in this order (`identity.resolve`):
 | Author recorded as | `nik` | `legacy:<client_id>` |
 | Reaches | every project its user may access | **only** the project whose file holds it |
 | On `POST /mcp` and `GET /projects` | works | `401` |
-| May create or share a project | yes | no (`project_tools._require_minted`) |
+| May create a project | yes | no (`project_tools._require_minted`) |
+| May share one | yes, if they own it | no — a `legacy:x` user is never an owner, so `_owner_only` refuses |
 
 A legacy token is pinned deliberately: `resolve()` is handed exactly one project and consults only
 that one, so a token in project A's `tokens.json` does not resolve against B at all, and
@@ -60,8 +61,11 @@ under `/p/<name>/`. It is in the middleware rather than in the tool decorator be
 surface — blob `GET`/`PUT`, `/blobs/batch`, the guide, the skill and tool catalogs, the project
 index — never reaches a tool at all: an ACL in the tool layer would leave
 `GET /p/nik.private/blobs/<digest>` open to any authenticated user.
-`test_the_blob_surface_is_not_a_bypass` walks every one of those routes, with controls proving each
-request reached a handler rather than 404ing at the router.
+`test_the_blob_surface_is_not_a_bypass` walks nine of them — blobs `GET`/`PUT`, `/blobs/batch`,
+`/guide`, `/guide/{section}`, `/skills`, `/skills/{id}`, `/tools`, `/tools/{id}` — asserting the
+body as well as the status, since a missing blob is a 404 too. Its two controls are both on the
+blob routes, which is where a router miss is easiest to mistake for a handler's refusal. The
+project index and `healthz` are not in that test; the two sibling tests below cover them.
 
 Two surfaces the middleware cannot cover, each closed where it lives:
 

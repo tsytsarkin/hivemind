@@ -146,8 +146,15 @@ def _build(reg, who: Identity, name: str, visibility: str, *, label: str, sessio
     }[schema]
     return {"project": name, "existing": False, "visibility": visibility, "schema": schema,
             "next": nxt,
-            "note": "the project-neutral /mcp endpoint serves it now; its own /p/<name>/ REST "
-                    "routes (blob upload, bus) appear after the next server restart"}
+            # Measured, not reasoned: NOTHING under /p/<name>/ exists yet — not the blob routes,
+            # not the guide, not healthz, and not its own /mcp either. build_app builds the mounts
+            # once from the projects the registry held at startup, so every path under the prefix
+            # 404s until a restart. The note used to say "REST routes", which left an agent that
+            # tried /p/<name>/mcp with a bare 404 and no explanation.
+            "note": f"the project-neutral /mcp endpoint serves it now — pass project={name} on "
+                    f"your calls. Nothing under /p/{name}/ exists until the server restarts (its "
+                    f"own /mcp, blob upload, guide and bus all 404 until then), so the hivemind "
+                    f"CLI cannot reach it yet."}
 
 
 def _adopt(reg, who: Identity, name: str, visibility: str) -> dict:

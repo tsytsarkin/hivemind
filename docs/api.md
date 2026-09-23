@@ -24,6 +24,13 @@ Projects: `project_list` (grouped `shared` / `mine` / `shared_with_me`), `projec
 than *in* one, so their own `project` argument is the project they act on and no per-call one is
 injected.
 
+**A project created by `project_create` has no `/p/<name>/` prefix until the server restarts.** The
+mounts are built once, in `build_app`, from the projects the registry held at startup, so a new one
+is reachable **only** on the neutral `/mcp` with `project=<name>` — measured: `/p/<name>/mcp`,
+`/p/<name>/blobs/…`, `/p/<name>/guide` and `/p/<name>/healthz` all `404` until then, and all answer
+afterwards. It *is* in `GET /projects` immediately. Nothing is lost by waiting: the graph is live
+from the moment it is created, and only the byte-moving and bus surfaces need the restart.
+
 Graph: `graph_types`, `graph_search`, `graph_get`, `graph_subjects`, `graph_neighbors`, `graph_upsert`,
 `graph_link`, `graph_bulk_load`. Schema: `schema_get`, `schema_propose`, `schema_promote`,
 `schema_apply` (returns `{created, unchanged}`; idempotent), `schema_changes`. Artifacts: `artifact_ref`, `artifact_attach`, `artifact_refs`, `artifact_orphans`. Tools:
@@ -34,7 +41,7 @@ Graph: `graph_types`, `graph_search`, `graph_get`, `graph_subjects`, `graph_neig
 Those six `bus_*` tools are the whole bus. It holds **no tables**: presence is the open WebSocket
 and messages live in memory, so nothing it carries writes a `tx` row or appears in `graph_search`,
 and a restart is a clean slate. (The v1 polling bus — `bus_poll`, `bus_post`, `bus_request` and the
-rest — was removed along with its six tables; `db._DROPPED` drops those from any database that
+rest — was removed along with its six tables; `Database._DROPPED` drops those from any database that
 still has them.) See [bus.md](bus.md).
 
 `graph_search` searches by text, by type, and by field value (`props_filter={"gated": true}` — typed equality via json_extract, the only way to match booleans/numbers; `null` matches absent): pass `types=[…]`, and an empty query with `types` browses every node of that type (returns `total_of_type`); `graph_types()` lists the types that hold data. It paginates: pass the `next_cursor` from a reply back as `cursor`, and stop when `has_more` is false. Read tools are annotated `readOnlyHint`; all return `{ok, …}` or `{ok:false, error, error_kind}`.
@@ -55,9 +62,10 @@ Two reads carry extra, unrequested context so recorded dead-ends can't be missed
 ## REST
 
 Clients are configured with a **project base URL** — `http://<host>:8787/p/<project>` — and every
-path below is relative to it. `GET /` on either the server root or a project base returns an index
-of these endpoints, so a wrong base URL tells you so instead of 404ing — except for a private
-project, which tells an unauthorised caller nothing at all (see below).
+path below is relative to it. `GET /p/<project>/` returns an index of that project's endpoints, so
+a wrong base URL tells you so instead of 404ing — except for a private project, which tells an
+unauthorised caller nothing at all (see below). `GET /` on the **server root** is a different, much
+shorter index: four links and an explicit note that project names are not listed there.
 
 **The server root carries only four paths**: `GET /`, `GET /healthz`, `GET /projects` and
 `POST /mcp`. The MCP app is mounted at the root as well as under every project prefix, so the blob,
@@ -100,7 +108,7 @@ carries its own credential and enforces the same ACL itself — see below.)
 | `POST /blobs/batch` | Git-LFS style: `{"objects":[{"oid","size"}]}` → which are missing |
 
 ## Clients
-- `hivemind` CLI (`node/edge/search/neighbors/schema/artifact/tool/skill/trap/guide`; incl.
+- `hivemind` CLI (`health/node/edge/search/neighbors/schema/artifact/tool/skill/trap/guide/bus`; incl.
   `schema apply <pack.json>`, `skill publish|search|get|yank`, `trap record|search|get|status`),
   config from `HIVEMIND_SERVER_URL` + `HIVEMIND_TOKEN`. It has **no `--project` flag** and never
   sends one, so it acts in the project its URL names — give it a project base URL, not the server
@@ -126,8 +134,10 @@ carries its own credential and enforces the same ACL itself — see below.)
   (which act **as the project's owner**, the recovery path for an owner who lost their token, since
   the MCP tools are owner-only), `apply-pack`, `promote`, `list-proposals`, `merge-guide`,
   `set-guide`, `retire-guide`, `orphans`, `gc`, `backfill-authors`, `reindex`, `embed`, `autolink`.
-  `gc` and `backfill-authors` report unless given `--yes`. All of them except `mint-token --user`
-  act on the global `--project` (default `default`), one project per invocation — so a sweep over
-  every project is `list-projects` and a loop.
+  `gc` and `backfill-authors` report unless given `--yes`. Most act on the global `--project`
+  (default `default`), **one project per invocation**, so a sweep over every project is
+  `list-projects` and a loop. Three do not: `mint-token --user` writes a server-level identity and
+  touches no project, `list-projects` is global by definition, and `project-share`/`project-unshare`
+  take the project as a positional argument (the `--project` flag is ignored for them).
 
 `skill_search` / `tool_search` take `mode=hybrid|lexical|semantic` and report `semantic_backend` (plus `semantic_warning` when embeddings are missing or from another backend). See [skills-and-traps.md](skills-and-traps.md).

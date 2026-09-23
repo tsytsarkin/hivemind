@@ -37,6 +37,14 @@ would drift from them the first time a row was corrected. `agent_label` sits bes
 free-form `agent` string the caller passed: kept so "which job was this" survives, never mistaken
 for identity. `author=` on the four searches filters on the same column (see [api.md](api.md)).
 
+`edge` holds the identity of each edge (type + endpoints); `edge_version` and `edge_bulk` hold
+what it says.
+
+## Search index
+`node_fts` (BM25 over prose) and `sym_fts` (trigram over symbols) are the two halves `graph_search`
+fuses with RRF; both are FTS5 virtual tables rebuilt by `hivemind-admin reindex`. `meta` is a
+single key/value table for per-database counters such as `guide_version`.
+
 ## Blobs
 Content-addressed files (`blob`, `blob_ref`, `blob_pin`); attach to any node/edge **version**.
 

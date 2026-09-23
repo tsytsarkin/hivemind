@@ -122,6 +122,13 @@ project the root URL has not named, so the router 404s them there, and the bus W
 route at all. So point the CLI — whose reason to exist is large artifacts — at a **project base
 URL**, and pick the root only for an MCP-only client that genuinely works across projects.
 
+**A brand-new project has no project base URL yet.** The `/p/<name>/` mounts are built once at
+startup, so a project you just created with `project_create` answers `404` on every path under its
+own prefix — `/mcp`, `/blobs/…`, `/guide`, `/healthz` alike — until the server restarts. Until then
+it is reachable only on the neutral `/mcp` with `project=<name>`, which means **the `hivemind` CLI
+cannot use a project until the next restart** (it has no `--project` flag; see below). Its graph is
+live immediately either way — it is the byte-moving and bus surfaces that wait.
+
 A project base URL is not a restriction either way: `project=<name>` on an individual call overrides
 it, so `/p/default/mcp` still reaches `nik.private` if the token may. That is a property of the tool
 layer — the MCP client and `hivemind.Client.call(tool, {"project": …})`. **The `hivemind` CLI has no

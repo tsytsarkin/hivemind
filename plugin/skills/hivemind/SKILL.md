@@ -38,6 +38,10 @@ a graph everyone can read.
   `/hivemind:project` runs that whole flow, including the create.
 - **The `project` echoed in a tool result is authoritative.** It is what the server actually used.
   If it differs from what you meant, stop and say so rather than continuing to write.
+- **A project you just created has no URL of its own until the server restarts.** Your MCP calls
+  reach it immediately via `project=<name>`, but `/p/<name>/…` answers 404 until then — so the
+  `hivemind` CLI cannot upload artifacts to it or join its bus yet. Use an existing project for
+  those, or say that a restart is needed; do not read the 404 as the project having failed.
 
 The pin is local state keyed by the session id: it survives a compaction, and a `--resume` lands
 back on the same project. It is a reminder for you, not an authority — the server takes the project
@@ -261,13 +265,15 @@ artifact_digest)` · `tool_yank` · `tool_link` / `tool_unlink` / `tool_autolink
 
 **Guide** — `guide_get(section)` · `guide_propose(section, body, why)` (human-merged).
 
-**Agent bus** (live coordination, *not* the graph) — `bus_hello(label, capabilities, harness,
-interruptible)` → your `session_id` · `bus_ping` (heartbeat, or you drop out) · `bus_bye` ·
-`bus_agents(capability)` / `bus_capabilities()` · `bus_post` / `bus_poll` (advances your cursor) /
-`bus_peek` (does not) / `bus_history(room)` / `bus_thread(seq)` ·
-`bus_request(task, needs=[...], refs=[...])` /
-`bus_claim` / `bus_release` / `bus_respond(…, refs=[...])` / `bus_request_get` ·
-`bus_resolve(request_id|seq)` / `bus_node_refs(node_id)`. See the section below.
+**Agent bus** (live coordination, *not* the graph) — six tools, no more:
+`bus_connect(label)` → the `monitor_command` that receives · `bus_peers(online_only)` ·
+`bus_send(to, body)` · `bus_broadcast(body, room)` · `bus_message(message_id)` (the full text of a
+clipped notification) · `bus_disconnect(label)`. See **The agent bus** above for how to use them.
+
+**Projects** — `project_list()` (grouped: shared with everyone, yours, shared with you) ·
+`project_create(name, visibility, schema)` · `project_info(project)` ·
+`project_share(project, user)` / `project_unshare(project, user)` (owner only).
+Every other tool also takes `project=<name>`: see **Every call names a project** above.
 
 
 ## The `hivemind` CLI (bulk + large files)
@@ -282,11 +288,11 @@ DEPLOY.md). Point it at your project: `export HIVEMIND_SERVER_URL=… HIVEMIND_T
   (PEP 723) tool; another machine runs `hivemind tool get <id>` then the `uv run` command in the
   generated `RUN.md` (bootstrap uv first: `scripts/bootstrap-uv.sh`).
 - `hivemind guide get [section]`, `hivemind schema get`.
-- `hivemind bus sidecar <session_id>` → blocks until work arrives, heartbeats meanwhile, drains and
-  exits (that exit is what wakes you on a harness that re-invokes on background-process exit).
-  `hivemind bus wait <session_id>` is the raw form, without the heartbeat or the drain.
-  `hivemind bus agents --capability 'browser.*'`, `hivemind bus request <sid> --task … --needs
-  browser.cdp`.
+- `hivemind bus connect <label>` → mints a ticket and prints the Monitor command;
+  `hivemind bus listen --label <label>` is the receiving end (the plugin's stdlib listener is the
+  one to prefer — see **The agent bus** above); `hivemind bus send <to> <body>`,
+  `hivemind bus broadcast <body>`, `hivemind bus peers`.
+- `hivemind health`.
 
 ## Writing safely in a shared, multi-writer graph
 

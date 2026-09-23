@@ -59,30 +59,31 @@ before it builds anything. See **[docs/skills-and-traps.md](docs/skills-and-trap
 
 ## Live coordination: the agent bus
 
-Alongside the graph (durable truth) there is a **bus** for things that are only true right now:
-who is online, what they can physically do, and who is doing a given piece of work.
+Alongside the graph (durable truth) there is a **bus** for the one thing that is only true right
+now: which agents are connected, so they can talk to each other while they work.
 
-Identity is **per agent session**, not per token — one token is reused across many agents on many
-harnesses whose capabilities differ. A session advertises specific dotted capabilities
-(`browser.cdp`, `device.handset.attached`), and work is handed out by **open claim**: everyone who
-matches is notified and exactly one wins a single atomic `UPDATE`. No scheduler, and a wedged
-agent can't stall a request because it simply never claims.
+Delivery is **push, not polling**. An agent calls `bus_connect(label)` once and runs the command it
+returns under its harness's background-process tool; that process holds a WebSocket to the server,
+and an incoming message arrives as a notification in the agent's conversation without it having
+asked. Presence *is* that socket — a peer is online exactly while its connection is open, so there
+is no TTL and no reaper to lose messages behind.
 
 ```sh
-hivemind bus agents --capability 'browser.*'                   # who can do this?
-hivemind bus request "$SID" --task "screenshot x" --needs browser.cdp
-hivemind bus sidecar "$SID" &  # background it: heartbeats while quiet, exits when work arrives —
-                               # and on a harness that re-invokes on exit, that exit is the interrupt
+hivemind bus connect mac-studio        # mint a ticket, print the command that receives
+hivemind bus peers                     # who is connected right now
+hivemind bus send lab-box "census done, 4712 gated entry points"
+hivemind bus broadcast "pausing writes for a migration"
 ```
 
-Messages and requests carry **refs** — validated pointers into the graph, so "do this to that
-thing" actually names the thing. A ref is a node, a pinned revision, a subject cell, a traversal
-(`edge_types` + `depth`), or a saved search; a worker gets labels inline and follows them with
-`bus_resolve`. Answers point back at what they produced, so the durable half lands in the graph
-and only the chatter expires.
+Six MCP tools, and that is the whole surface: `bus_connect`, `bus_peers`, `bus_send`,
+`bus_broadcast`, `bus_message` (the full text of a notification that was clipped), `bus_disconnect`.
+The listener ships **with the plugin** as a stdlib-only script, so a machine that installed nothing
+but the plugin can still receive.
 
-Bus traffic is ephemeral and TTL-reaped; anything worth keeping still goes in the graph.
-See **[docs/bus.md](docs/bus.md)**.
+The bus stores **nothing**: no tables, no provenance rows, in-memory only, and a restart is a clean
+slate. The server keeps a message body for about an hour so `bus_message` can answer, and each
+receiving machine appends what it got to a bounded local JSONL inbox — neither is an archive.
+Anything worth keeping goes in the graph. See **[docs/bus.md](docs/bus.md)**.
 
 ## Domain packs
 

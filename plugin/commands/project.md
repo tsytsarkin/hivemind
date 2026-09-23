@@ -56,6 +56,12 @@ Do this now, in order. **Do not choose a project for the user.**
    it — an empty project cannot be written to at all until it has types, so stopping here leaves
    them with a graph that refuses every write.
 
+   **Tell them one thing about a brand-new project**: it is usable from this session right away —
+   every MCP call carrying `project=<name>` works — but it has no `/p/<name>/` URL of its own until
+   the server is restarted, because those mounts are built at startup. So the `hivemind` CLI cannot
+   reach it yet (large artifact uploads, `hivemind bus listen`), and neither can a second machine
+   configured with a project base URL. Say so rather than letting them discover it as a bare 404.
+
 5. **Pin it.**
 
        python3 "$HOME/.hivemind/hivemind-project.py" --pin <name> --label "<short note on the work>"
