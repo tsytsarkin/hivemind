@@ -321,10 +321,25 @@ def test_the_hook_is_registered_for_every_event_that_rebuilds_the_context():
     assert cmds == ['bash "${CLAUDE_PLUGIN_ROOT}/hooks/session-start"'], cmds
 
 
-def test_the_manifest_points_at_the_hooks_file_and_the_versions_agree():
+def test_the_manifest_leaves_the_standard_hooks_file_to_be_auto_loaded():
+    """This test used to assert the opposite — that `manifest.hooks` names `hooks/hooks.json` — and
+    that is what kept the bug in place: Claude Code loads the standard path automatically and
+    REJECTS the duplicate, so declaring it disabled every hook in the file.
+
+    Found only by a real `/reload-plugins`, which reported `Duplicate hooks file detected:
+    ./hooks/hooks.json resolves to already-loaded file …`. Nothing else could see it — the manifest
+    is valid JSON, the hooks file is valid, and a test asserting they point at each other passes
+    while the hook never runs. The symptom is the project pin quietly not being re-injected.
+
+    `manifest.hooks` is for ADDITIONAL hook files only. `mcpServers` is deliberately not asserted:
+    the same reload loads `./.mcp.json` from the manifest without complaint.
+    """
     manifest = json.loads(MANIFEST.read_text())
-    hooks_rel = manifest["hooks"]
-    assert (MANIFEST.parent.parent / hooks_rel).resolve() == HOOKS_JSON.resolve()
+    declared = manifest.get("hooks")
+    assert declared is None or "hooks/hooks.json" not in str(declared), (
+        f"manifest.hooks names the standard file ({declared!r}); Claude Code auto-loads it and "
+        f"rejects the duplicate, which disables every hook in it")
+    assert HOOKS_JSON.is_file(), "the standard hooks file must exist — it is what gets auto-loaded"
     front = SKILL.read_text().split("---")[1]
     assert f'version: "{manifest["version"]}"' in front, "SKILL.md metadata must not drift"
 

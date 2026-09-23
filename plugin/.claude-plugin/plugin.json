@@ -16,7 +16,6 @@
     "mcp"
   ],
   "mcpServers": "./.mcp.json",
-  "hooks": "./hooks/hooks.json",
   "userConfig": {
     "server_url": {
       "type": "string",
@@ -27,7 +26,7 @@
     "api_token": {
       "type": "string",
       "title": "API token",
-      "description": "Bearer token from `hivemind-admin mint-token --user <you> --device <machine>`, kept in the server's identities.json. It names a person, which is what puts an author on your writes, and it reaches every project that person may access. An older per-project token (the server's tokens.json) still works, but only with the project-path form of the URL above — on the server root it gets a 401, because it is pinned to a project that URL has not named. The SessionStart hook also exports it as HIVEMIND_TOKEN for the session's Bash calls, so the live guide and the hivemind CLI can authenticate; that file is narrowed to 0600 before the token is written to it.",
+      "description": "Bearer token from `hivemind-admin mint-token --user <you> --device <machine>`, kept in the server's identities.json. It names a person, which is what puts an author on your writes, and it reaches every project that person may access. An older per-project token (the server's tokens.json) still works, but only with the project-path form of the URL above \u2014 on the server root it gets a 401, because it is pinned to a project that URL has not named. The SessionStart hook also exports it as HIVEMIND_TOKEN for the session's Bash calls, so the live guide and the hivemind CLI can authenticate; that file is narrowed to 0600 before the token is written to it.",
       "sensitive": true
     }
   }
