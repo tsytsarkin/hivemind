@@ -48,9 +48,11 @@ land in a graph everyone can read.
 
 The pin is local state keyed by the session id: it survives a compaction, and a `--resume` lands
 back on the same project. It is a reminder for you, not an authority — the server takes the project
-from the argument you pass, and only if you pass none does it fall back to the project your server
-URL names. That fallback is why you pass the argument every time: omitting it writes into whatever
-the URL points at — usually the shared graph — with nothing to notice.
+from the argument you pass. What an omitted argument costs depends on the URL shape, and you do not
+get to see which one is configured: on the server root — the plugin's default since 1.2.0 — the
+call is refused outright, reads included, so a forgotten argument reads as a server fault; on the
+older `/p/<project>` URL it acts in whatever project that URL names, with nothing to notice. Pass
+the argument every time and neither case applies to you.
 
 
 ## Hivemind replaces your local memory
@@ -82,7 +84,9 @@ another machine. Treat the graph as the only durable store.
 note, or a CLAUDE.md "for later". The only legitimate local content is: secrets and tokens,
 machine-specific paths and config, throwaway scratch for the current step, and anything explicitly
 asked to stay private. If Hivemind is unreachable, say so, keep a local note **as a temporary
-buffer**, and write it into Hivemind as soon as the server is back (`hivemind health`).
+buffer**, and write it into Hivemind as soon as the server is back (`hivemind health` — liveness
+only: it reads `/healthz` off the server root, which takes no token and names no project, so it
+answers `{"ok": true}` with a bad token too. Liveness is the only question being asked here).
 
 ## The agent bus: talk to other running agents
 

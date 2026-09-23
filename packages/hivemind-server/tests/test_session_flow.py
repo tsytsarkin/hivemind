@@ -88,6 +88,60 @@ def test_the_hook_asks_for_a_choice_when_nothing_is_pinned(tmp_path):
     assert "project_list" in ctx and "ask" in ctx.lower()
 
 
+def test_the_injected_context_never_says_an_omitted_project_is_defaulted(tmp_path):
+    """The most-read sentence this project ships, and it was false for a whole release.
+
+    Before 1.2.0 `server_url` was a project URL, so a call omitting `project=` landed in the
+    project the URL named — and both branches of the hook said exactly that. 1.2.0 made the SERVER
+    ROOT the default, where `envelope.resolve_project` REFUSES a call that names no project, reads
+    included (`app.ProjectAuthMiddleware._neutral` publishes no mount default). The sentence then
+    became wrong in the dangerous direction: it reports an absent protection while the protection
+    is present, so an agent that believes it reads a correct refusal as a server fault and trusts a
+    defaulted read that never happened.
+
+    Both branches are checked because the false sentence was in both, and the file states the rule
+    twice. Asserted on meaning rather than on wording: the refusal must be named, and no phrasing
+    may promise that omitting the argument still does something.
+    """
+    _run(["--pin", "nik.private"], tmp_path)
+    pinned = json.loads(_hook(tmp_path).stdout)["hookSpecificOutput"]["additionalContext"]
+    unpinned = json.loads(_hook(tmp_path / "unpinned").stdout)["hookSpecificOutput"]["additionalContext"]
+    assert "nik.private" in pinned and "project_list" in unpinned, \
+        "got the same branch twice — the test is not checking what it claims to"
+    for which, ctx in (("pinned", pinned), ("unpinned", unpinned)):
+        low = " ".join(ctx.lower().split())
+        for lie in ("does not fail", "is not refused", "safe to omit", "defaults to"):
+            assert lie not in low, f"{which} branch promises an omitted project= still acts: {lie!r}"
+        assert "refused" in low, (
+            f"{which} branch never says an omitted project= is REFUSED on the server root, which "
+            f"is the plugin's default address: {ctx!r}")
+        assert "read" in low, (
+            f"{which} branch does not say the refusal covers reads too — an agent that thinks "
+            f"only writes are refused will read a refused graph_search as a server fault")
+
+
+def test_the_skill_does_not_contradict_itself_about_an_omitted_project(tmp_path):
+    """SKILL.md stated the rule correctly and then contradicted it 25 lines later.
+
+    The head of the file said "no call proceeds when no project is resolvable … neither falls back
+    to a configured default"; the pin paragraph below it said an omitted argument "writes into
+    whatever the URL points at". Both sentences shipped in the same release, and the second one is
+    the pre-1.2.0 behaviour of a URL shape the plugin no longer configures. An agent reading the
+    file top to bottom ends on the wrong one.
+
+    The head sentence is pinned by substring because it is the true statement; the false promises
+    are pinned by absence.
+    """
+    body = " ".join(SKILL.read_text().lower().split())
+    assert "no call proceeds when no project is resolvable" in body, \
+        "SKILL.md no longer states the rule it is supposed to agree with"
+    assert "neither falls back to a configured default" in body
+    for lie in ("only if you pass none does it fall back",
+                "omitting it writes into whatever the url points at",
+                "an omitted argument does not fail"):
+        assert lie not in body, f"SKILL.md contradicts its own rule: {lie!r}"
+
+
 def test_the_hook_survives_an_unwritable_home(tmp_path):
     """It must never block a session."""
     missing = tmp_path / "nope" / "deeper"

@@ -118,18 +118,19 @@ import sys
 
 project = sys.argv[1] if len(sys.argv) > 1 else ""
 if project:
-    ctx = ("Hivemind project for this session: %s. Pass project=%s on every Hivemind call: an "
-           "omitted argument does not fail, it writes into whatever project your server URL "
-           "names. The project echoed in a tool result is authoritative."
+    ctx = ("Hivemind project for this session: %s. Pass project=%s on every Hivemind call: on "
+           "the default server-root URL an omitted argument is refused, reads included, and on "
+           "the older /p/<project> URL it silently acts in whatever project the URL names. The "
+           "project echoed in a tool result is authoritative."
            % (project, project))
 else:
     ctx = ("Hivemind: no project is pinned for this session. Before your first Hivemind call, "
            "call project_list and ask the user which project to use — an existing one, a new "
            "shared one, their private graph, or a new scratch project — then pin it with "
            "`python3 \"$HOME/.hivemind/hivemind-project.py\" --pin <name>`; /hivemind:project "
-           "runs that whole flow. Until then pass project=<name> explicitly on every call: an "
-           "omitted argument does not fail, it writes into whatever project your server URL "
-           "names.")
+           "runs that whole flow. Until then pass project=<name> explicitly on every call: on "
+           "the default server-root URL an omitted argument is refused, reads included, and on "
+           "the older /p/<project> URL it silently acts in whatever project the URL names.")
 print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart",
                                          "additionalContext": ctx}}))
 PYCTX
