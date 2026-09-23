@@ -1,5 +1,9 @@
 # Plan: replace the polling bus with WebSocket push
 
+> **Historical.** This plan is delivered — the WebSocket bus is what ships. The *Why* below
+> describes the v1 polling bus it replaced, so read that section in the past tense; the
+> shipped design is documented in [../bus.md](../bus.md).
+
 ## Why
 
 The current bus is poll-based and agents report it as flaky. Four failure modes, all reproduced
@@ -11,8 +15,8 @@ against the live server on 2026-09-18:
 2. **Silent loss on session expiry.** Sessions expire after `ttl` (default 900 s). After expiry
    `bus_poll` hard-errors (`session … has ended`), while `bus_post` to that session is still
    **accepted** — the sender believes it delivered, the message is never read.
-3. **`bus_wait` is not an MCP tool.** It exists only as a REST route + `hivemind bus wait` CLI.
-   Calling it over MCP returns `Unknown tool: bus_wait`. The only long-poll escape hatch is
+3. **`bus_wait` was not an MCP tool.** It existed only as a REST route and a CLI
+   subcommand of `hivemind bus`. Calling it over MCP returned `Unknown tool: bus_wait`. The only long-poll escape hatch is
    unreachable from an agent, so the documented "watcher" pattern depends on a backgrounded CLI
    process and the agent noticing its exit.
 4. **Long-poll burns the turn.** Even when reachable, `bus_wait` blocks the agent's turn doing

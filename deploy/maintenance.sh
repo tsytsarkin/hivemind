@@ -29,11 +29,12 @@ for proj in $PROJECTS; do
   echo "-- garbage collection --"
   uv run --package hivemind-server hivemind-admin --project "$proj" gc --yes \
     || echo "gc failed for $proj"
-  # Bus reaping: expired sessions, dead claim leases, expired messages. Busy projects reap
-  # themselves on read paths; a quiet one needs this or it never cleans up.
-  echo "-- agent bus reap --"
-  uv run --package hivemind-server hivemind-admin --project "$proj" bus-reap \
-    || echo "bus-reap failed for $proj"
+  # There is deliberately NO bus step here. The v1 polling bus had sessions, claim leases and
+  # stored messages to reap; the WebSocket bus has none of them — presence IS the socket, the
+  # offline queue is bounded by count and bytes, and the recent buffer expires on its own. A
+  # `bus-reap` call survived here after the rewrite deleted the subcommand and failed silently
+  # behind `|| echo` every night. test_every_command_this_repo_invokes_exists is what stops the
+  # next one.
 done
 
 echo "-- disk --"
