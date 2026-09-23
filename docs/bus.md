@@ -35,11 +35,16 @@ against the live server before the rewrite:
 The WebSocket **server** is part of the Hivemind server; clients on any machine dial it over the
 network like any other client. What is unusual is only *which process* dials it:
 
-> Claude Code's Monitor tool has a built-in `ws` source, but it refuses private addresses —
-> measured: `Monitor cannot open a WebSocket to 192.168.x.x: the address is in a private,
-> link-local, or cloud-metadata range.` Hivemind lives on a LAN address, so Monitor cannot dial it
-> directly. Instead Monitor runs the listener script, and that process holds the WebSocket. A
-> subprocess carries no address policy, and the connection is an ordinary cross-machine WS.
+> Claude Code's Monitor tool has a built-in `ws` source, but it refuses private addresses.
+> Re-measured on **Claude Code 2.1.280, 2026-09-23**, by calling
+> `Monitor(ws={url: "ws://<server-ip>:8787/p/default/bus/ws"})` — it returns an error, not a
+> connection: `Monitor cannot open a WebSocket to <server-ip>: the address is in a private,
+> link-local, or cloud-metadata range.` (the real message interpolates the literal address).
+> Hivemind lives on a LAN address, so Monitor cannot dial it directly — this is the load-bearing
+> reason for the whole listener-subprocess design, so re-run that one call and re-stamp the version
+> before assuming it still holds. Instead Monitor runs the listener script, and that process holds
+> the WebSocket. A subprocess carries no address policy, and the connection is an ordinary
+> cross-machine WS.
 
 ## Using it
 

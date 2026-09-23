@@ -107,8 +107,26 @@ Verify the connection:
 claude mcp list
 # plugin:hivemind:hivemind: http://<server-ip>:8787/mcp (HTTP) - ✔ Connected
 ```
-`api_token` is declared `sensitive`, so Claude Code stores it in the OS keychain rather than in a
-settings file.
+That is Claude Code's own rendering and can change under you: that exact layout — `plugin:` name,
+resolved URL, transport in parentheses, connection state — was **observed on Claude Code 2.1.280,
+2026-09-23** (`claude --version` is what to compare it against). Re-run it and re-stamp the version
+rather than trusting the line. What has to be true is only that it shows the resolved URL and a
+connection state. One artefact worth recognising, measured at the same time: a `server_url` with a
+trailing slash renders as `http://<server-ip>:8787//mcp`, because `.mcp.json` appends `/mcp`
+verbatim — and it connects anyway.
+
+`api_token` is declared `sensitive` (`plugin/.claude-plugin/plugin.json`), and the observable
+consequence is that it is **not written to the settings file**. Measured on the same machine and
+version, with this plugin installed and connecting:
+
+```sh
+grep -c api_token ~/.claude/settings.json    # 0 — only server_url is there, under pluginConfigs
+```
+
+Where Claude Code does keep it is its own business and nothing in this repo observes it — do not
+assume the keychain on the strength of `sensitive` alone; `security find-generic-password` showed no
+item for the plugin on the machine above, and it only searches file-based keychains, so that is not
+evidence either way. Re-run the `grep` after an install rather than trusting this paragraph.
 
 ### Where the URL and the token come from
 
@@ -194,8 +212,23 @@ How the token reaches the plugin, since there is no install step to collect it: 
 
 `packages/hivemind-server/tests/test_launcher.py` pins the first two (plus "must not `exec`", since
 the trap that removes the token file cannot fire after one). The third is Claude Code's own
-behaviour, which no test in this repo can hold — it was measured against Claude Code 2.1.280 and is
-recorded in the script's header comment.
+behaviour, which no test in this repo can hold, so it decays silently as the harness moves. It is
+recorded in the script's header comment and was **re-run on Claude Code 2.1.280 on 2026-09-23**.
+The probe is three lines, needs the plugin already installed under that marketplace name (for a
+`--plugin-dir` run the key is instead the bare plugin name, `hivemind`), and takes a minute — re-run it and
+re-stamp the version rather than trusting the date:
+
+```sh
+d=$(mktemp -d); chmod 700 "$d"
+printf '{"pluginConfigs":{"hivemind@hivemind-marketplace":{"options":{"server_url":"http://127.0.0.1:9999"}}}}' > "$d/s.json"
+claude --settings "$d/s.json" mcp list; rm -rf "$d"
+```
+
+The settings file names **only** `pluginConfigs` — no `enabledPlugins`, no marketplace, no model.
+If `--settings` replaced, the plugin would be gone from the listing. Observed: the plugin is still
+listed (so the user's `enabledPlugins` survived — it merges) and its URL is now
+`http://127.0.0.1:9999/mcp`, failing with `ECONNREFUSED` (so the `--settings` `pluginConfigs` won
+over the user settings' value). Both halves in one line of output.
 
 So the launcher's token arrives exactly the way an installed plugin's does, and from there the
 `SessionStart` hook exports it to the session's shell like any other plugin config — the launcher

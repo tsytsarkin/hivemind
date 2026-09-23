@@ -9,8 +9,11 @@ crosses a trust boundary), `gate` (an entitlement, sandbox rule, TCC service or 
 check), `format` (a parsed data format / UTI), `build` (an OS build), `lane` (a workstream).
 
 **Edge types:** `attacker_reaches` and `attacker_blocked` (both carry mandatory provenance —
-see below), `exposes`, `gated_by`, `satisfies`, `parses`, `runs_as`, `affects`, `present_on`,
-`documented_by`, and a widened `evidence_for` (its range gains `lane`).
+see below), `exposes`, `gated_by`, `satisfies`, `parses`, `runs_as`, `affects` and `present_on`.
+It also re-declares three types from the packs below it, identically, so that this pack can be
+applied on its own: the `lane` node type and the `documented_by` edge from `research-workflow`, and
+the `evidence_for` edge from `security-research`. Where those packs are already applied, `apply_pack`
+reports all three under `unchanged` and mints no new version — nothing is widened.
 
 **The design point:** a reachability claim cannot be recorded without saying how it was
 established. `attacker_reaches` requires `verification`, and `attacker_blocked` additionally

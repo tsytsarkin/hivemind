@@ -1,11 +1,27 @@
-# Rollout checklist — Hivemind 1.1.0 (server identities, projects, the ACL)
+# Rollout checklist — Hivemind 1.2.0 (server identities, projects, the ACL)
 
 Run this once, in order, when deploying the `feat/identity-and-projects` work to a live server.
 It is the operational half of [DEPLOY.md](DEPLOY.md): that file says how to install, this one says
 what to check on a server that already holds real data.
 
-**Nothing in this file has been run.** Every step is written to be executable as-is once the four
-variables in *Fill these in first* below are set.
+Every step is written to be executable as-is once the four variables in *Fill these in first* below
+are set.
+
+**How much of it has already been run, as of 2026-09-23:** steps 0, 1, 2 and 3.1 have been run
+against the lab box. Steps 3.2 onward have **not**. Do not re-run the first group blind — step 0
+backs up a multi-gigabyte live database and step 3.5 is irreversible.
+
+That paragraph goes stale the moment anyone deploys, so establish it yourself instead. These use the
+variables from *Fill these in first* below, plus any `--user` token you already hold:
+
+```sh
+ssh "$BOX" 'cd ~/hivemind && git log --oneline -1 && git status --short'   # step 1: which commit
+ssh "$BOX" 'tail -3 ~/hivemind-backup/backup.log'                          # step 0: last backup
+ssh "$BOX" 'ls -l ~/hivemind-data/identities.json ~/hivemind-data/projects/*/project.json'  # step 2
+curl -s "$ROOT/projects" -H "Authorization: Bearer <a --user token>"
+#   401 or a connection error  -> step 3.1 has not produced a working identity yet
+#   a list containing alice.private -> step 3.2 has already run
+```
 
 ## Before you start: the local checks
 
@@ -91,12 +107,15 @@ plan instead.
 2. **"A write with no `project` argument is refused" is true only on the neutral endpoint, and
    understates it there.** On `POST $ROOT/mcp` *every* call needs `project=` — reads too
    (`graph_types` and `guide_get` are refused exactly as `graph_upsert` is; only the message
-   differs, and both name the projects you may use). True for
-   `POST $ROOT/mcp`. On `POST $ROOT/p/$LIVE/mcp` — which is what every deployed plugin uses, since
-   `server_url` defaults to the per-project form — the URL *is* the project, so the write lands in
-   `$LIVE` by design (`envelope.resolve_project`: `name = explicit or _MOUNT_DEFAULT.get()`). Test
-   it against the root URL or the check is meaningless. `plugin/commands/project.md` now states
-   this condition rather than implying an omitted argument is safe.
+   differs, and both name the projects you may use). That is the shape every deployed plugin uses
+   from 1.2.0 on: `server_url` defaults to the **server root**
+   (`plugin/.claude-plugin/plugin.json` — `"default": "http://127.0.0.1:8787"`), so the refusal
+   is the fleet's normal behaviour rather than an edge case. On `POST $ROOT/p/$LIVE/mcp` — the
+   older project-URL shape, still supported and still what a hand-configured client may be using
+   — the URL *is* the project, so the write lands in `$LIVE` by design
+   (`envelope.resolve_project`: `name = explicit or _MOUNT_DEFAULT.get()`). Test it against the
+   root URL or the check is meaningless. `plugin/commands/project.md` states this condition
+   rather than implying an omitted argument is safe.
 3. **`backfill-authors` must be looped over every project.** It takes the global `--project`
    (default `default`) and acts on one project per invocation, exactly like `gc` and `reindex`. Any
    project you skip keeps its NULLs, silently and forever.
@@ -221,8 +240,10 @@ curl -s "$ROOT/"                     # index; must NOT list project names
 > leaves it alone. Nothing else hand-edited in that checkout does, which is what 1d is for.
 
 > `restart.sh` launches with `uv run --package hivemind-server` via `setsid`, so it survives SSH
-> logout but **not a reboot**. The systemd unit is still not installed — see
-> [hivemind.service](hivemind.service).
+> logout but **not a reboot**. The systemd unit is still not installed, and `bootstrap-labbox.sh`
+> does not install it either — it only prints the commands. `bash deploy/install-service.sh` is what
+> renders [hivemind.service](hivemind.service) for this user and repo path and enables it;
+> `systemctl is-enabled hivemind` is the check, and `not-found` means there is no unit at all.
 
 ## Step 2: tighten the modes on files that already exist
 
@@ -259,13 +280,26 @@ export A=hm_…  B=hm_…      # alice and bob
 Use the **neutral** endpoint, so the `project=` argument is the only thing selecting a project.
 
 ```sh
+# The four things below the Authorization header are all REQUIRED by the deployed server, and a
+# request missing any of them fails at the JSON-RPC layer with no tool ever running — which reads
+# like a broken server rather than a broken curl. `Mcp-Method`/`Mcp-Name` must agree with the body
+# (-32020 otherwise) and `params._meta` must carry both envelope keys (-32602 otherwise). They are
+# exactly what packages/hivemind-client/src/hivemind/client.py:call sends; keep them in step.
+MCP_META='"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}'
+
 call() {  # $1=token $2=tool $3=json-args
   curl -s -X POST "$ROOT/mcp" -H "Authorization: Bearer $1" \
     -H 'Content-Type: application/json' \
     -H 'Accept: application/json, text/event-stream' \
     -H 'MCP-Protocol-Version: 2026-07-28' \
-    -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"$2\",\"arguments\":$3}}"
+    -H 'Mcp-Method: tools/call' -H "Mcp-Name: $2" \
+    -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"$2\",\"arguments\":$3,$MCP_META}}"
 }
+
+# Smoke-test the helper itself before trusting any refusal below to be about projects. A read that
+# names a project must come back ok:true; anything with a top-level "error" key is the transport,
+# not the ACL.
+call "$A" graph_types "{\"project\":\"$LIVE\"}"
 
 call "$A" project_create '{"name":"alice.private","visibility":"private","schema":"inherit"}'
 call "$A" graph_types    '{"project":"alice.private"}'     # which types it inherited
@@ -343,10 +377,13 @@ and writing `$LIVE`, be recorded as `legacy:<client-id>`, and be refused where n
 ```sh
 export FLEET=hm_…      # the token already configured in the plugin
 
+# Same envelope requirement as call() — the project-path endpoint enforces it identically; only
+# where the project comes from differs. $MCP_META is defined in 3.2 above.
 call2() { curl -s -X POST "$ROOT/p/$LIVE/mcp" -H "Authorization: Bearer $FLEET" \
   -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
   -H 'MCP-Protocol-Version: 2026-07-28' \
-  -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"$1\",\"arguments\":$2}}"; }
+  -H 'Mcp-Method: tools/call' -H "Mcp-Name: $1" \
+  -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"$1\",\"arguments\":$2,$MCP_META}}"; }
 call2 graph_upsert '{"type":"<a type this project defines>","props":{"title":"legacy attribution check"}}'
 call2 graph_get    '{"node_id":"<the node_id just returned>"}'      # author must be legacy:<client-id>
 

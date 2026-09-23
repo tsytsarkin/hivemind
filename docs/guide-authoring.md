@@ -6,9 +6,16 @@ The **guide** is how domain knowledge reaches agents at runtime (the on-disk ski
   framework guide. Add domain sections via a pack's `guide/*.md` or `hivemind-admin set-guide`.
 - Agents call `guide_get()` / `guide_get(section)`; the skill also dynamic-injects `core` via
   `guide.sh` (best-effort, never fails). That helper is the one guide path that needs the
-  **environment** — a token and a *project-base* URL, since `/guide` is mounted under `/p/<project>/`
-  — which the plugin's `SessionStart` hook supplies from its own config; when it cannot, the helper
-  prints a cached or bundled copy and names why. `guide_get` over MCP needs none of it.
+  **environment**: a token, plus enough to build `/p/<project>/guide/<section>`, which is where the
+  REST guide is mounted. It takes a URL that already contains `/p/` verbatim, and otherwise composes
+  the prefix itself from `HIVEMIND_PROJECT` — or, when that is unset, from the session pin file it
+  re-reads on each call, so a mid-session `/hivemind:project` switch is followed. The plugin config
+  holds no project at all (`plugin.json` declares only `server_url` and `api_token`); the
+  `SessionStart` hook exports the first two and takes `HIVEMIND_PROJECT` from the pin. When any of
+  that is missing the helper prints a cached or bundled copy and names the cause it hit — no
+  URL/token in the shell, or no project for the root URL (which tells you to run
+  `/hivemind:project` rather than sending you after a network fault). `guide_get` over MCP needs
+  none of it.
 - **Firewall**: agents `guide_propose`; an operator `hivemind-admin merge-guide <id>` publishes it,
   bumping `guide_version`. Keep instructions out of the agent-writable graph.
 

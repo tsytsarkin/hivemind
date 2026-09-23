@@ -23,7 +23,7 @@ live guide). Meaning is data — shipped as a swappable **domain pack** (`packs/
 |---|---|
 | `packages/hivemind-server/` | The server: MCP (streamable HTTP) + REST, SQLite-backed. Python ≥3.11. |
 | `packages/hivemind-client/` | The client library + `hivemind` CLI. Python ≥3.9; deps are `httpx` and `websockets` (the bus listener). |
-| `plugin/` | The Claude Code plugin: MCP config, the self-updating bootstrap skill, a schema-authoring skill, the `/hivemind:project` command and a `SessionStart` hook (re-injects the project pin, and publishes the plugin's server URL + token to the session's shell for the live guide and the CLI). |
+| `plugin/` | The Claude Code plugin: MCP config, the self-updating bootstrap skill, a schema-authoring skill, the `/hivemind:project` command and a `SessionStart` hook (re-injects the project pin, and publishes three values to the session's shell for the live guide and the CLI: `HIVEMIND_SERVER_URL` and `HIVEMIND_TOKEN` from the plugin config, and `HIVEMIND_PROJECT` from the pin — the third is what lets them build `/p/<project>/…` off a root URL, which is the default since 1.2.0). |
 | `packs/` | Optional, swappable, **layerable** domain packs (schema + guide). Ships `security-research`, `ios-macos-attack-surface` and `research-workflow`. See [docs/packs.md](docs/packs.md). |
 | `deploy/` | Deploy docs, systemd unit, daily backup + restore, bootstrap + relock scripts. |
 | `docs/` | [User guide](docs/user-guide.md), data model, API, the agent bus, guide authoring, security notes. |

@@ -241,6 +241,10 @@ class ProjectAware:
 
     Wrapping registration rather than decorating 47 bodies: one wrapper, and a tool physically
     cannot be added to this surface without it.
+
+    47, not the 52 the server registers: project_tools.attach takes the RAW MCPServer, because
+    its five tools are about projects rather than in one. 28 here + 9 registry.attach_tools +
+    4 registry_tools.attach + 6 bus_ws_tools.attach = 47. Count before "correcting" it.
     """
 
     def __init__(self, mcp):
@@ -265,8 +269,8 @@ class ProjectAware:
 class _Current:
     """Attribute proxy onto the project resolved for the current call.
 
-    This is what lets `db = CurrentDb()` at module build time keep working inside all 47 tool
-    bodies without touching any of them: the attribute is fetched during the call, when the
+    This is what lets `db = CurrentDb()` at module build time keep working inside all 47
+    project-aware tool bodies without touching any of them: the attribute is fetched during the call, when the
     project is known. Every use is a plain method call (db.read/db.write/db.meta_get,
     store.stat/...), which is why a proxy is enough — nothing type-checks the database, keys a
     dict by it, or compares it with `is`. Check that before adding a use.

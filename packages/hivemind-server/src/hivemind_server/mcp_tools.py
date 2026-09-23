@@ -47,7 +47,8 @@ def build_mcp(registry, identities, *, instructions: str = INSTRUCTIONS) -> MCPS
     # per request and THAT is the authoritative one; require_auth stays strict here because
     # build_mcp does not know the deployment's mode.
     set_registry(registry)
-    # Resolved per call, so none of the 47 tool bodies below has to know the project exists: the
+    # Resolved per call, so none of the 47 project-aware tool bodies has to know the project
+    # exists: the
     # alternative was editing every one of them to take it as an argument. A body that needs the
     # project itself rather than its database adds `project = CurrentProject()` the same way.
     db = CurrentDb()

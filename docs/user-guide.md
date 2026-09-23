@@ -80,8 +80,10 @@ claude plugin install hivemind@hivemind-marketplace --scope user \
 claude mcp list      # expect: plugin:hivemind:hivemind … ✔ Connected
 ```
 
-`api_token` is declared sensitive, so it goes to the OS keychain rather than a settings file. Full
-walkthrough, including how to move the token safely: [`clients.md`](clients.md).
+`api_token` is declared sensitive, and what that buys you is that it is **not** written to your
+settings file — `grep -c api_token ~/.claude/settings.json` answers `0` on an installed, connecting
+plugin (measured on Claude Code 2.1.280). Where Claude Code does keep it is not something this repo
+observes. Full walkthrough, including how to move the token safely: [`clients.md`](clients.md).
 
 ---
 

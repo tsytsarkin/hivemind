@@ -7,10 +7,15 @@ invent an unkeyed one.
 ## Shape
 
     principal --attacker_reaches--> entry_point <--exposes-- component --runs_as--> principal
-                                         |                       |
-                                     gated_by                  parses
-                                         v                       v
-                                       gate <--satisfies--   format
+        |                                |                       |
+    satisfies                        gated_by                  parses
+        |                                v                       v
+        +----------------------------> gate                    format
+
+`satisfies` runs from the **principal**, not from the format: it says an attacker position already
+holds what a gate demands (`principal --satisfies--> gate`). A `format --satisfies--> gate` write is
+refused by `graph._check_endpoint_types` — *"src node type 'format' not allowed (want
+['principal'])"*.
 
 `finding --affects--> component|function|entry_point|format|gate` ties a defect to its surface.
 `finding|function|component|entry_point --present_on--> build` carries per-build presence evidence.

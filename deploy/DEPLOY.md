@@ -27,7 +27,12 @@ git clone <repo> hivemind && cd hivemind
 uv sync --package hivemind-server
 uv run hivemind-server                                    # or ./.venv/bin/hivemind-server
 ```
-`deploy/bootstrap-labbox.sh` does all of this + mints a token + installs the systemd service.
+`deploy/bootstrap-labbox.sh` does all of this + mints a token. It does **not** install the systemd
+service — it only *prints* the commands, so a box that has been bootstrapped and nothing more has no
+unit at all and the server does not survive a reboot. Run `deploy/install-service.sh` for that (it
+renders the template unit for this user and repo path, then `enable --now`s it), and check with
+`systemctl is-enabled hivemind` — `not-found` means there is no unit, whatever is currently
+listening on 8787.
 
 ### Option B — plain venv + pip
 ```sh
@@ -167,8 +172,12 @@ Tunables, with the defaults the script itself applies: `HIVEMIND_BACKUP_DIR`
 (`$HOME/hivemind-backup`), `HIVEMIND_BACKUP_KEEP` (`7`), `HIVEMIND_DATA_DIR`
 (`$HOME/hivemind-data`). Log: `<backup dir>/backup.log`.
 
-Measured on the live project (1.7 GB database, 9,475 blobs / 9.7 GB): **23 s** for the first run,
-**17 s** incrementally with zero blobs transferred. Restore procedure: [restore.md](restore.md).
+Measured on the lab box on **2026-09-23** (7.7 GB database snapshot, `nodes=124460 tx=1619365`,
+95 GB in the backup destination): **76 s** for an incremental run with zero blobs transferred. That
+figure is only as current as the day it was taken, and the database grows daily — read the real one
+off the machine rather than trusting this line: `tail -5 "$HOME/hivemind-backup/backup.log"` prints
+the snapshot size, the transferred-file count and `backup done in <n>s` for the most recent run.
+Restore procedure: [restore.md](restore.md).
 
 ## Rolling out a change to a live server
 

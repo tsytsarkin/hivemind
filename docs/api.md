@@ -130,8 +130,11 @@ carries its own credential and enforces the same ACL itself — see below.)
 ## Clients
 - `hivemind` CLI (`health/node/edge/search/neighbors/schema/artifact/tool/skill/trap/guide/bus`; incl.
   `schema apply <pack.json>`, `skill publish|search|get|yank`, `trap record|search|get|status`),
-  config from `HIVEMIND_SERVER_URL` + `HIVEMIND_TOKEN` (which the Claude Code plugin's `SessionStart`
-  hook exports from its own config for in-session Bash calls; export them yourself anywhere else).
+  config from four environment variables — `HIVEMIND_SERVER_URL`, `HIVEMIND_TOKEN`,
+  `HIVEMIND_PROJECT` and `HIVEMIND_AGENT` (`cli._client`). In a Claude Code session the plugin's
+  `SessionStart` hook exports the first three for in-session Bash calls: the URL and token from the
+  plugin's own config, the project from the session pin, which is where it lives — the plugin config
+  holds no project. Export them yourself anywhere else.
   The URL may be the server root: `--project <name>` (default `$HIVEMIND_PROJECT`) then names the
   project, riding as a tool argument on `<root>/mcp` and as the `/p/<name>/` prefix on every REST
   path. With no project at all a tool call is refused by the server and a REST path by the client,
