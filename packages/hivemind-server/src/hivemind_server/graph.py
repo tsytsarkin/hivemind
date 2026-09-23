@@ -505,7 +505,18 @@ def search_nodes(db: Database, query: str, *, types: Optional[list[str]] = None,
                  props_filter: Optional[dict] = None,
                  fields: Optional[list[str]] = None, props: bool = False,
                  author: Optional[str] = None) -> dict:
-    """Search current node versions via FTS5 (unicode61 + trigram, RRF-fused)."""
+    """Search current node versions via FTS5 (unicode61 + trigram, RRF-fused).
+
+    Each hit carries a 200-character `snippet`. `fields=[...]` replaces it with those props keys,
+    `props=True` with the whole dict; either mode also names the hit's `author`. Both are bounded —
+    PROPS_MAX_CHARS per hit (over that, a `_prefix` marker naming the real size),
+    PROPS_PAGE_MAX_CHARS of props per page, and PROPS_LIMIT hits for `props=True` — so a reply can
+    be shorter than `limit` asked for: it then says `props_clamped`, names the bound in
+    `props_clamped_by`, and pages on through `has_more`/`next_cursor`.
+
+    `author` restricts to rows whose CURRENT version that identity wrote (the field get_node
+    returns as `author`), pushed into SQL so a filtered page is not a filtered slice of one page.
+    """
     from . import search as _search
     return _search.search(db, query, types=types, limit=limit, cursor=cursor,
                           props_filter=props_filter, fields=fields, props=props, author=author)

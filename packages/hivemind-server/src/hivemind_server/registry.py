@@ -189,6 +189,12 @@ def search(db: Database, query: str = "", *, os: Optional[str] = None,
               if a_pred else "")
     a_and, a_where = (f" AND {a_pred}", f" WHERE {a_pred}") if a_pred else ("", "")
     with db.read() as cur:
+        # The vector index is not SQL, so the semantic candidates cannot carry the predicate: they
+        # are ranked WITHIN this id set instead. Filtering them afterwards made mode="semantic" a
+        # post-filter over a capped pool — "this author published nothing" once the registry
+        # outgrew it — which is the bug this filter exists to avoid.
+        a_ids = {r["id"] for r in cur.execute(
+            f"SELECT t.id AS id FROM tool t{a_join}{a_where}", tuple(a_args))} if a_pred else None
         if query:
             m = _fts_query(query)
             lexical = [r["id"] for r in cur.execute(
@@ -198,7 +204,8 @@ def search(db: Database, query: str = "", *, os: Optional[str] = None,
             semantic = []
             if mode in ("hybrid", "semantic"):
                 from . import embeddings
-                semantic = [i for i, _ in embeddings.query(db, "tool", query, limit=limit * 3)]
+                semantic = [i for i, _ in embeddings.query(db, "tool", query, limit=limit * 3,
+                                                           ids=a_ids)]
             if mode == "lexical":
                 ids = lexical
             elif mode == "semantic":
@@ -219,7 +226,7 @@ def search(db: Database, query: str = "", *, os: Optional[str] = None,
             if r is None:
                 continue
             if author and (r["author_user"] or LEGACY_USER) != author:
-                continue            # a semantic candidate never passed through the SQL filter
+                continue            # backstop: every candidate source above is already filtered
             m2 = json.loads(r["manifest"])
             arts = m2.get("artifacts") or []
             if os and arts and not any(a.get("os") == os for a in arts):
@@ -305,7 +312,9 @@ def attach_tools(mcp, db, envelope, RO, WRITE) -> None:
     @mcp.tool(annotations=RO,
               description="List/search published tools (id, latest version, description, "
                           "platforms). Use this to discover what tools other agents have shared. "
-                          "author='<user>' restricts to what that identity wrote.")
+                          "author='<user>' restricts to tools whose LATEST version that identity "
+                          "published: one they wrote and someone else has since bumped leaves "
+                          "their list, though both immutable versions still exist.")
     @envelope
     def tool_search(query: str = "", os: Optional[str] = None, arch: Optional[str] = None,
                     limit: int = 25, mode: str = "hybrid",

@@ -17,8 +17,10 @@ _RRF_K = 60
 PROPS_LIMIT = 10                 # props=True pages are clamped to this many hits
 PROPS_MAX_CHARS = 4000           # ...and any ONE hit's props to this many characters
 # One page's total props payload, in either mode. fields= is the cheap mode, but the CALLER picks
-# the keys and a single key can hold a whole document, so it needs the same ceiling.
-PROPS_PAGE_MAX_CHARS = PROPS_LIMIT * PROPS_MAX_CHARS
+# the keys and a single key can hold a whole document, so it needs a ceiling too. Its own literal,
+# not PROPS_LIMIT * PROPS_MAX_CHARS: those two are independent knobs, and deriving this from them
+# would silently retune the fields budget whenever the props=true page size was retuned.
+PROPS_PAGE_MAX_CHARS = 40000
 
 
 def _flatten(obj: Any, out: List[str]) -> None:
@@ -106,15 +108,16 @@ def author_filter(column: str, author: Optional[str]) -> tuple:
 def _hit_props(props: dict, fields: Optional[List[str]]) -> tuple:
     """Build one hit's props payload: a projection if fields was given, else the whole dict.
 
-    Returns (payload, chars, truncated). An oversized dict becomes a truncated JSON prefix plus a
-    marker naming the real size, so the caller knows to graph_get that one node rather than
-    mistaking a cut payload for the whole of it.
+    Returns (payload, chars, truncated). An oversized dict becomes `_prefix` — the first
+    PROPS_MAX_CHARS characters of its JSON, cut wherever the budget ran out and therefore NOT
+    parseable — plus a marker naming the real size, so the caller reads what fits and knows to
+    graph_get that one node for the rest rather than mistaking a cut payload for the whole of it.
     """
     p = {k: props[k] for k in fields if k in props} if fields is not None else props
     raw = json.dumps(p)
     if len(raw) <= PROPS_MAX_CHARS:
         return p, len(raw), False
-    return ({"_json": raw[:PROPS_MAX_CHARS], "_truncated": True, "_chars": len(raw)},
+    return ({"_prefix": raw[:PROPS_MAX_CHARS], "_truncated": True, "_chars": len(raw)},
             PROPS_MAX_CHARS, True)
 
 
@@ -130,16 +133,24 @@ def search(db: Database, query: str, *, types: Optional[List[str]] = None,
     cursor+limit, because a fixed pool would silently truncate deep pages.
 
     Each hit carries a 200-character `snippet` by default. `fields=[...]` replaces it with just
-    those props keys, `props=True` with the whole dict; both are bounded (see PROPS_* above) and a
-    reply that hit a bound says `props_clamped`. `author` restricts to what one identity wrote.
+    those props keys, `props=True` with the whole dict; either mode also names the hit's `author`.
+    BOTH are bounded (PROPS_* above): any one hit's props over PROPS_MAX_CHARS is cut to a
+    `_prefix` marker, and a page stops once PROPS_PAGE_MAX_CHARS of props have been shipped;
+    `props=True` additionally caps the page at PROPS_LIMIT hits. A reply that hit any of those says
+    `props_clamped` and names which in `props_clamped_by`; `has_more`/`next_cursor` carry the rest.
+
+    `author` restricts to rows whose CURRENT version that identity wrote — the same field
+    graph_get reports as `author`, not "ever touched" (that is graph_get's `contributors`).
     """
     limit = max(1, min(limit, 200))
     cursor = max(0, int(cursor or 0))
     want = [f for f in fields if isinstance(f, str)] if fields else None   # fields wins over props
-    clamped = False
+    # Which bound fired, not just that one did: three different things shorten a reply, and the
+    # caller's answer to each differs — page on, graph_get the one node, or ask for fewer fields.
+    clamped: list = []
     if want is None and props and limit > PROPS_LIMIT:
         limit = PROPS_LIMIT
-        clamped = True
+        clamped.append("page_limit")
     pool = min(max(200, (cursor + limit) * 3), 2000)
     match = _fts_query(query)
     type_sql, type_args = "", []
@@ -204,14 +215,18 @@ def search(db: Database, query: str, *, types: Optional[List[str]] = None,
                 has_more = True
                 break
             if spent >= PROPS_PAGE_MAX_CHARS:  # ...as does one the props budget has no room for
-                has_more, clamped = True, True
+                has_more = True
+                clamped.append("page_budget")
                 break
             pdict = json.loads(head["props"])
             if want is not None or props:
                 payload, chars, cut = _hit_props(pdict, want)
                 spent += chars
-                clamped = clamped or cut
-                shown = {"props": payload}
+                if cut and "node_truncated" not in clamped:
+                    clamped.append("node_truncated")
+                # The author is on the version row, never in props, so `fields` cannot project it —
+                # and browsing BY author is the case that most needs to see whose each hit is.
+                shown = {"props": payload, "author": head["author_user"] or LEGACY_USER}
             else:
                 shown = {"snippet": json.dumps(pdict)[:200]}
             results.append({"node_id": nid, "node_type": nrow["node_type"],
@@ -230,7 +245,7 @@ def search(db: Database, query: str, *, types: Optional[List[str]] = None,
                 (*type_args, *prop_args, *auth_args)).fetchone()["c"]
     return {"results": results, "count": len(results),
             **({"total_of_type": total} if total is not None else {}),
-            **({"props_clamped": True} if clamped else {}),
+            **({"props_clamped": True, "props_clamped_by": clamped} if clamped else {}),
             "cursor": cursor,
             "next_cursor": (cursor + len(results)) if has_more else None,
             "has_more": has_more,

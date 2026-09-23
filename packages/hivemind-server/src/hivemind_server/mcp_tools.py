@@ -56,7 +56,7 @@ def build_mcp(registry, identities, *, instructions: str = INSTRUCTIONS) -> MCPS
     mcp = ProjectAware(real)
 
     # ── graph reads ──────────────────────────────────────────────────────────────
-    @mcp.tool(annotations=RO, description="Search nodes by text and/or BY TYPE. Pass types=[...] to restrict, and an EMPTY query with types to browse every node of that type (returns total_of_type). graph_types() lists the types that have data. props_filter={'gated': true, 'kind': 'mach-service'} filters on exact FIELD VALUES - the only way to match booleans and numbers, since text search cannot tell gated=true from gated=false (null matches absent). Each hit carries a 200-character `snippet` by default: fields=[\"title\",\"status\"] instead returns just those keys per hit as real `props`, and is the cheap, precise way to read structure across a page. props=true returns every key but clamps the page to 10 hits and truncates any one node over 4000 characters, so prefer fields unless you genuinely need the lot; a reply that hit either bound says props_clamped. Paginated: pass the next_cursor from a reply back as cursor; has_more says when to stop. author='<user>' restricts to what that identity wrote.")
+    @mcp.tool(annotations=RO, description="Search nodes by text and/or BY TYPE. Pass types=[...] to restrict, and an EMPTY query with types to browse every node of that type (returns total_of_type). graph_types() lists the types that have data. props_filter={'gated': true, 'kind': 'mach-service'} filters on exact FIELD VALUES - the only way to match booleans and numbers, since text search cannot tell gated=true from gated=false (null matches absent). Each hit carries a 200-character `snippet` by default. fields=[\"title\",\"status\"] instead returns just those keys per hit as real `props` plus that hit's `author`, and is the cheap, precise way to read structure across a page; props=true returns every key the same way. BOTH of those modes are bounded: any one node's props over 4000 characters is replaced by a `_prefix` marker naming its real size (graph_get that node for the rest), and a page STOPS EARLY once 40000 characters of props have been shipped - so at the default limit=25 a fields= page over long props can come back with ~11 hits. props=true additionally caps the page at 10 hits, so prefer fields unless you genuinely need the lot. A shortened reply says props_clamped and names which bound fired in props_clamped_by; has_more/next_cursor then carry the rest, so page on rather than reading a short page as the end. Paginated: pass the next_cursor from a reply back as cursor; has_more says when to stop. author='<user>' restricts to rows whose CURRENT version that identity wrote; see contributors on graph_get for everyone who ever revised a node.")
     @_envelope
     def graph_search(query: str = "", types: Optional[list[str]] = None,
                      limit: int = 25, cursor: int = 0,
@@ -213,7 +213,9 @@ def build_mcp(registry, identities, *, instructions: str = INSTRUCTIONS) -> MCPS
               description="Search the mini-skill registry — procedures other agents wrote down "
                           "(how to do a complex action, with the gotchas). ALWAYS search here "
                           "before working out a non-obvious procedure from scratch. mode: hybrid (default, lexical+semantic fused), lexical, or semantic. "
-                          "author='<user>' restricts to what that identity wrote.")
+                          "author='<user>' restricts to skills whose LATEST version that "
+                          "identity published: one they wrote and someone else has since revised "
+                          "leaves their list, though both immutable versions still exist.")
     @_envelope
     def skill_search(query: str = "", tags: Optional[list[str]] = None, limit: int = 20,
                      response_format: str = "concise", mode: str = "hybrid",
@@ -293,7 +295,7 @@ def build_mcp(registry, identities, *, instructions: str = INSTRUCTIONS) -> MCPS
     @mcp.tool(annotations=RO,
               description="Search recorded dead-ends (approaches that wasted time and why). "
                           "Check this BEFORE starting a non-trivial approach. "
-                          "author='<user>' restricts to what that identity wrote.")
+                          "author='<user>' restricts to the traps that identity recorded.")
     @_envelope
     def trap_search(query: str = "", node_id: Optional[str] = None,
                     include_retired: bool = False, limit: int = 20,

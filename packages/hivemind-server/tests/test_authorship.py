@@ -439,3 +439,95 @@ async def test_over_the_real_transport_a_search_projects_props_and_filters_by_au
                                                               "arguments": {"query": "wrote"}}, 5))
     assert [h["props"] for h in out["results"]] == [{"title": "nik wrote this"}]
     assert len(every["results"]) == 2 and "snippet" in every["results"][0]
+
+
+def test_semantic_search_with_an_author_is_not_a_post_filter_over_the_vector_pool(db):
+    """mode="semantic" drew its candidates from the vector index, which took no author filter, so
+    the author was applied to the top limit*3 rows AFTER the cut: a rare author's skill sat outside
+    the pool and the reply was empty while a lexical search on the same query returned it."""
+    from hivemind_server import registry, skills
+    set_identity(Identity(user="ana", device="laptop"))
+    for i in range(70):                       # 70 > the limit*3 = 60 candidate pool
+        skills.publish(db, "j", id=f"pack/socket-{i}", version="1.0.0",
+                       title=f"socket socket {i}", description="socket socket socket socket",
+                       body="socket socket socket", force=True)
+    set_identity(Identity(user="nik", device="mac-studio"))
+    # One of nik's is the single best vector match in the whole library, the other two are far
+    # enough down to fall outside the pool. That combination is what separates "ranked WITHIN this
+    # author's items" from "ranked globally, then filtered": the latter returns the one and loses
+    # the two, and cannot be rescued by the empty-semantic fallback to lexical.
+    skills.publish(db, "j", id="socket", version="1.0.0", title="socket", description="socket",
+                   body="socket", force=True)
+    for name in ("rare/one-socket", "rare/socket-aside"):
+        skills.publish(db, "j", id=name, version="1.0.0", title="one socket note",
+                       description="a socket mentioned once among unrelated words",
+                       body="cluster orbit lantern socket meadow trombone glacier", force=True)
+
+    got = {m: sorted(s["id"] for s in skills.search(db, "socket", mode=m, author="nik")["skills"])
+           for m in ("lexical", "semantic", "hybrid")}
+    assert got["lexical"] == ["rare/one-socket", "rare/socket-aside", "socket"]
+    assert got["semantic"] == got["lexical"], "the vector pool must not hide the rare author"
+    assert got["hybrid"] == got["lexical"]
+    # ...and the filter still excludes: asking for the prolific author never returns nik's.
+    assert "rare/one-socket" not in [
+        s["id"] for s in skills.search(db, "socket", mode="semantic", author="ana",
+                                       limit=100)["skills"]]
+
+
+def test_semantic_tool_search_with_an_author_is_not_a_post_filter_either(db, tmp_path):
+    from hivemind_server import blobs, registry
+    store = blobs.BlobStore(tmp_path / "blobs", db, max_bytes=1 << 20, grace_seconds=0)
+    set_identity(Identity(user="ana", device="laptop"))
+    for i in range(80):                       # 80 > the limit*3 = 75 pool at limit=25
+        dig = store.put_stream([f"#!/bin/sh\n{i}".encode()], agent_id="j")["digest"]
+        registry.publish(db, "j", {"id": f"org.x/socket-{i}", "version": "1.0.0",
+                                   "runtime": "shell", "entrypoint": "s.sh",
+                                   "description": "socket socket socket socket"}, dig, force=True)
+    set_identity(Identity(user="nik", device="mac-studio"))
+    # As in the skill case: one best-in-library match plus two that fall outside the pool, so a
+    # filter applied after the top-N cut loses the two instead of returning nothing and falling
+    # back to lexical.
+    dig = store.put_stream([b"#!/bin/sh\nbest"], agent_id="j")["digest"]
+    registry.publish(db, "j", {"id": "socket", "version": "1.0.0", "runtime": "shell",
+                               "entrypoint": "b.sh", "description": "socket"}, dig, force=True)
+    for name in ("org.rare/one-socket", "org.rare/socket-aside"):
+        dig = store.put_stream([f"#!/bin/sh\n{name}".encode()], agent_id="j")["digest"]
+        registry.publish(db, "j", {"id": name, "version": "1.0.0", "runtime": "shell",
+                                   "entrypoint": "r.sh",
+                                   "description": "a socket mentioned once among unrelated words"},
+                         dig, force=True)
+    got = {m: sorted(t["id"] for t in registry.search(db, "socket", mode=m,
+                                                      author="nik")["tools"])
+           for m in ("lexical", "semantic", "hybrid")}
+    assert got["lexical"] == ["org.rare/one-socket", "org.rare/socket-aside", "socket"]
+    assert got["semantic"] == got["lexical"] and got["hybrid"] == got["lexical"]
+
+
+def test_the_reply_names_which_bound_shortened_it(db):
+    """One boolean for three different bounds left the caller guessing which to answer."""
+    for i in range(15):
+        graph.upsert_node(db, "j", "component", {"title": f"alpha {i}", "big": "x" * 9000},
+                          reason="x")
+    out = graph.search_nodes(db, "alpha", props=True, limit=25)
+    assert out["props_clamped"] is True
+    assert set(out["props_clamped_by"]) == {"page_limit", "node_truncated"}
+    # the budget is its own reason, and it is the one a fields= page hits
+    fld = graph.search_nodes(db, "alpha", fields=["big"], limit=25)
+    assert fld["props_clamped_by"] == ["node_truncated", "page_budget"]
+    # ...and an unclamped page in the same mode says nothing at all
+    graph.upsert_node(db, "j", "component", {"title": "beta"}, reason="x")
+    assert "props_clamped_by" not in graph.search_nodes(db, "beta", fields=["title"])
+
+
+def test_a_hit_in_the_new_modes_names_its_author(db):
+    """`author` is on the version row, never in props, so fields= cannot project it — and browsing
+    BY author is exactly the case that needs to see whose each hit is."""
+    graph.upsert_node(db, "j", "component", {"title": "mine"}, reason="x")
+    set_identity(Identity(user="ana", device="laptop"))
+    graph.upsert_node(db, "j", "component", {"title": "theirs"}, reason="x")
+    by_author = {h["props"]["title"]: h["author"]
+                 for h in graph.search_nodes(db, "", fields=["title"])["results"]}
+    assert by_author == {"mine": "nik", "theirs": "ana"}
+    assert graph.search_nodes(db, "", props=True)["results"][0]["author"] == "ana"
+    # the default reply shape stays exactly as it was: no props, no author, just the snippet
+    assert "author" not in graph.search_nodes(db, "")["results"][0]

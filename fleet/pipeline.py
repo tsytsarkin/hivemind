@@ -127,9 +127,13 @@ def queue(pipeline, stage=None, status="pending", stale_heartbeat_s=None,
     """Enumerate work, sorted by priority.
 
     Traverses `belongs_to` from the pipeline anchor, because graph_neighbors
-    returns node PROPS in one call. graph_search does NOT: its rows carry only
-    node_id / node_type / subject_key / version_id / score / snippet, so a queue
-    built on it silently matches nothing. Use search only to COUNT (type_total).
+    returns node PROPS for the whole neighbourhood in one call. graph_search
+    defaults to a `snippet` per hit rather than props; it CAN return props now
+    (`fields=["status","priority"]` per hit, or `props=true`), but those modes
+    are bounded — a page stops early once its props budget is spent and says
+    `props_clamped` — so a queue built on search has to honour has_more /
+    next_cursor or it silently sees part of the work. Use search to COUNT
+    (type_total), or with `fields=` to read a few keys across a page.
     """
     pid = ensure_pipeline(pipeline)
     nb = call("graph_neighbors", {"node_id": pid, "edge_types": ["belongs_to"],

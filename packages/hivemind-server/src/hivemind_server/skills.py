@@ -145,6 +145,12 @@ def search(db: Database, query: str = "", *, tags: Optional[list] = None,
               if a_pred else "")
     a_and, a_where = (f" AND {a_pred}", f" WHERE {a_pred}") if a_pred else ("", "")
     with db.read() as cur:
+        # The vector index is not SQL, so the semantic candidates cannot carry the predicate: they
+        # are ranked WITHIN this id set instead. Filtering them afterwards made mode="semantic"
+        # exactly the bug this filter exists to avoid — a post-filter over a capped pool, which
+        # reported "this author wrote nothing" as soon as the library outgrew the pool.
+        a_ids = {r["id"] for r in cur.execute(
+            f"SELECT s.id AS id FROM skill s{a_join}{a_where}", tuple(a_args))} if a_pred else None
         if query:
             m = _fts_query(query)
             lexical = [r["id"] for r in cur.execute(
@@ -154,7 +160,8 @@ def search(db: Database, query: str = "", *, tags: Optional[list] = None,
             semantic = []
             if mode in ("hybrid", "semantic"):
                 from . import embeddings
-                semantic = [i for i, _ in embeddings.query(db, "skill", query, limit=limit * 3)]
+                semantic = [i for i, _ in embeddings.query(db, "skill", query, limit=limit * 3,
+                                                           ids=a_ids)]
             if mode == "lexical":
                 ids = lexical
             elif mode == "semantic":
@@ -176,7 +183,7 @@ def search(db: Database, query: str = "", *, tags: Optional[list] = None,
             if r is None:
                 continue
             if author and (r["author_user"] or LEGACY_USER) != author:
-                continue            # a semantic candidate never passed through the SQL filter
+                continue            # backstop: every candidate source above is already filtered
             t = json.loads(r["tags"])
             if tags and not set(tags) & set(t):
                 continue
