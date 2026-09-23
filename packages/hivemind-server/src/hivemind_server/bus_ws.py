@@ -47,6 +47,7 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import os
 import secrets
 import threading
@@ -58,7 +59,9 @@ from typing import Any, Dict, Iterable, Optional
 
 from .identity import Identity
 from .ids import ulid
-from .projects_meta import can_access, load as load_meta
+from .projects_meta import can_access, load_with_problem
+
+log = logging.getLogger(__name__)
 
 PROTOCOL_VERSION = 1
 
@@ -92,8 +95,14 @@ def _scope(project_dir: Path) -> str:
     name, the second build_app to run would overwrite the first's signing secret and both would
     share one hub, so a listen key minted against one deployment would verify against the other's
     and admit its holder to that bus. Same hazard, same fix, same key as projects_meta._CACHE.
+
+    realpath, not str(): two spellings of ONE directory — a relative path, or a data root reached
+    through a symlink — would split the hub and the secret in two, so a message sent by a tool
+    would land on a different hub from the socket that should have received it. Every caller
+    happens to pass the same registry Project.dir today, which makes that safe by accident; this
+    makes it safe by construction.
     """
-    return str(project_dir)
+    return os.path.realpath(project_dir)
 
 
 # The address the CURRENT caller used to reach us, captured per request by the ASGI middleware.
@@ -498,6 +507,20 @@ def hub_for(project_dir: Path) -> Hub:
     return h
 
 
+def access_check(user: str, project_dir: Path, project_name: str,
+                 require_auth: bool) -> tuple:
+    """(allowed, problem) — may_access, plus WHY the metadata failed closed, for an operator log.
+
+    One code path, so the two cannot drift; same split, and the same reason for it, as
+    projects_meta.load_with_problem and app._note_metadata. The problem must never reach a caller:
+    "this project's metadata is corrupt" tells them the project exists.
+    """
+    if not require_auth:
+        return True, None
+    meta, problem = load_with_problem(project_dir, project_name)
+    return can_access(Identity(user=user, device="bus"), meta), problem
+
+
 def may_access(user: str, project_dir: Path, project_name: str, *,
                require_auth: bool = True) -> bool:
     """Is this user allowed into this project *right now*?
@@ -522,9 +545,7 @@ def may_access(user: str, project_dir: Path, project_name: str, *,
     project_tools.share validates every member, so such a user is never an owner or a member and
     reaches shared projects only, exactly as can_access would have it.
     """
-    if not require_auth:
-        return True
-    return can_access(Identity(user=user, device="bus"), load_meta(project_dir, project_name))
+    return access_check(user, project_dir, project_name, require_auth)[0]
 
 
 def authorize_key(hub: Hub, key: str, project_dir: Path, project_name: str, *,
@@ -534,23 +555,38 @@ def authorize_key(hub: Hub, key: str, project_dir: Path, project_name: str, *,
     Returns (peer, user), because authorising the handshake is not authorising the socket: the
     caller keeps the user so it can ask again while the connection is open.
     """
-    return _authorized(hub.redeem_key(key), project_dir, project_name, require_auth)
+    return _authorized(hub, hub.redeem_key(key), project_dir, project_name, require_auth)
 
 
 def authorize_ticket(hub: Hub, ticket: str, project_dir: Path, project_name: str, *,
                      require_auth: bool = True) -> Optional[tuple]:
     """Burn the ticket AND re-check the ACL. Same rule as a key, on a much shorter fuse: a ticket
     is single-use and lasts `TICKET_TTL`, but the socket it opens lasts as long as any other."""
-    return _authorized(hub.redeem(ticket), project_dir, project_name, require_auth)
+    return _authorized(hub, hub.redeem(ticket), project_dir, project_name, require_auth)
 
 
-def _authorized(got: Optional[tuple], project_dir: Path, project_name: str,
+def _authorized(hub: Hub, got: Optional[tuple], project_dir: Path, project_name: str,
                 require_auth: bool) -> Optional[tuple]:
     """Shared tail of both credentials: (peer, user) if that user may still reach the project."""
     if got is None:
         return None
-    return got if may_access(got[1], project_dir, project_name,
-                             require_auth=require_auth) else None
+    peer, user = got
+    if may_access(user, project_dir, project_name, require_auth=require_auth):
+        return got
+    # Denied — and the peer must not be left parked. redeem_key CREATES one on demand (that is what
+    # lets a listener reconnect after a restart), and _forget_locked refuses to sweep a peer once
+    # it holds queued mail, so a refused credential would otherwise leave a label that bus_peers
+    # lists and bus_send queues into, answering "queued for reconnect" about someone whose
+    # reconnect can no longer be authorised. Nothing in that queue is ever delivered: draining it
+    # needs a fresh attach, which needs this check again.
+    #
+    # Only when it is offline. A label is caller-chosen at mint time, so forcing a LIVE peer out
+    # would let a revoked member evict another agent by presenting a key it minted under that
+    # agent's label — revocation must not hand anyone a new lever. A live socket that is genuinely
+    # revoked is closed by its own re-check within one HEARTBEAT anyway.
+    if not peer.online:
+        hub.forget(peer, force=True)     # force: the queue guard is exactly what we are clearing
+    return None
 
 
 async def websocket_endpoint(ws: Any, project_name: str, project_dir: Path, *,
@@ -606,24 +642,51 @@ async def websocket_endpoint(ws: Any, project_name: str, project_dir: Path, *,
         # The handshake authorised ONE connection, and this socket then stays up for days: the
         # listener reconnects only on a blip or a restart, so a handshake-only check would in
         # practice almost never fire and a revoked member would keep receiving indefinitely.
-        # Re-ask on a timer instead. The floor is HEARTBEAT, because that is how often this loop
-        # wakes when the client is silent, and the gate is a deadline rather than "once per
-        # timeout" so a chatty client cannot spin the loop past its own re-check.
+        # Re-ask on an ABSOLUTE deadline instead — and never wait past it. The wait below is the
+        # only thing that wakes this loop, so a full-HEARTBEAT timeout issued just after an inbound
+        # frame would carry the loop well beyond `recheck_at`: a client that spoke at t+29.9 bought
+        # itself a fresh 30 seconds and doubled its own window to 2×HEARTBEAT. A client that has
+        # stopped cooperating is precisely the threat model for a revocation check, so the wait is
+        # clamped to the time remaining. HEARTBEAT is then the true upper bound on how long a
+        # revoked listener keeps receiving, whatever it sends.
         recheck_at = _now() + HEARTBEAT
         while True:
             if _now() >= recheck_at:
+                # Deadline first, so successive checks START exactly HEARTBEAT apart whatever
+                # the check itself costs — that is the bound the comment above claims.
                 recheck_at = _now() + HEARTBEAT
-                if not may_access(user, project_dir, project_name,
-                                  require_auth=require_auth):
+                allowed, problem = access_check(user, project_dir, project_name, require_auth)
+                if not allowed:
+                    if problem:
+                        # Unreadable metadata denies like any other failure, but this close is
+                        # TERMINAL for the listener (bus-listen.py prints and exits rather than
+                        # retrying), so every agent on this project must re-run bus_connect once
+                        # the file is fixed — they do not recover on their own the way an HTTP
+                        # caller does. An operator has to be able to tell that from a real
+                        # revocation, which is what app._note_metadata does for the HTTP path.
+                        # Logged only on eviction, never on a refused handshake: this is bounded by
+                        # the sockets already admitted, while a handshake is not, and an outsider
+                        # could flood the log with refusals on purpose.
+                        log.warning("bus: dropping peer %r on project %r: %s — failing closed; "
+                                    "listeners must re-run bus_connect once this is fixed",
+                                    peer.label, project_name, problem)
                     # Post-accept, so unlike the refusal above this close code DOES reach the
                     # client: the listener treats 4401 as terminal and tells its agent to re-run
                     # bus_connect. No oracle either — this caller was already admitted.
                     await ws.close(code=4401)
+                    # Forget it outright rather than parking it: detach() alone leaves the peer in
+                    # the registry for as long as it holds queued mail, so an evicted label would
+                    # stay listed by bus_peers and bus_send would keep telling senders "queued for
+                    # reconnect" about someone whose reconnect can no longer be authorised. The
+                    # queue goes with it, which is right — a revoked peer must never drain one.
+                    hub.forget(peer, force=True)
                     break
             # Heartbeat: if nothing arrives within the window, ping. A dead peer fails here and
-            # we drop it, which is what keeps `bus_peers` honest without a TTL sweeper.
+            # we drop it, which is what keeps `bus_peers` honest without a TTL sweeper. The wait
+            # never outlasts the re-check deadline above; see there.
             try:
-                await asyncio.wait_for(ws.receive_text(), timeout=HEARTBEAT)
+                await asyncio.wait_for(ws.receive_text(),
+                                       timeout=min(HEARTBEAT, max(0.0, recheck_at - _now())))
             except asyncio.TimeoutError:
                 try:
                     await ws.send_text(json.dumps({"v": PROTOCOL_VERSION, "type": "ping",

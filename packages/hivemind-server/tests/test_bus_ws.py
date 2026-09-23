@@ -4,6 +4,8 @@ These target the specific ways v1 lost messages, so a regression shows up as a f
 rather than as an agent quietly never hearing from a peer.
 """
 import json
+import logging
+import time
 
 import pytest
 
@@ -599,3 +601,139 @@ async def test_with_auth_off_the_bus_applies_no_acl_either(tmp_path):
     open_mode = HandshakeWS(key=k)
     await bus_ws.websocket_endpoint(open_mode, "nik.private", proj_dir, require_auth=False)
     assert open_mode.accepted is True, "with auth off there is nobody to authorize"
+
+
+@pytest.mark.anyio
+async def test_a_frame_just_before_the_deadline_cannot_buy_a_heartbeat(tmp_path, monkeypatch):
+    """The re-check deadline is absolute, but the wait it sits behind used not to be: an inbound
+    frame at t+29.9 bought a fresh full HEARTBEAT, so the true window was 2×HEARTBEAT and the
+    revoked client chose where in it to land. A client that has stopped cooperating is exactly the
+    threat model for a revocation check, so the wait must never outlast the deadline."""
+    import asyncio as _asyncio
+
+    monkeypatch.setattr(bus_ws, "HEARTBEAT", 0.2)
+    proj_dir = _private_project(tmp_path)
+    hub = bus_ws.hub_for(proj_dir)
+    k = hub.mint_listen_key("ana-box", user="ana")["listen_key"]
+
+    class ChattyWS(HandshakeWS):
+        waits = 0
+
+        async def receive_text(self):
+            self.waits += 1
+            if self.waits == 1:
+                _revoke(proj_dir)
+                await _asyncio.sleep(bus_ws.HEARTBEAT * 0.9)   # speak just before the deadline
+                return "noise"
+            await _asyncio.sleep(3600)                          # ...then go quiet again
+
+    ws = ChattyWS(key=k)
+    started = time.monotonic()
+    await _asyncio.wait_for(bus_ws.websocket_endpoint(ws, "nik.private", proj_dir), timeout=10)
+    elapsed = time.monotonic() - started
+
+    assert ws.closed_with == 4401
+    assert elapsed < bus_ws.HEARTBEAT * 1.5, (
+        f"closed after {elapsed:.3f}s, more than one {bus_ws.HEARTBEAT}s heartbeat — a frame just "
+        f"before the deadline bought a fresh full wait")
+
+
+@pytest.mark.anyio
+async def test_a_socket_dropped_for_unreadable_metadata_says_so_in_the_log(tmp_path, monkeypatch,
+                                                                          caplog):
+    """Failing closed on a corrupt project.json is the right ACL answer, but this close is TERMINAL
+    for the listener — bus-listen.py prints and exits rather than retrying — so every agent on the
+    project must re-run bus_connect once the file is fixed, unlike an HTTP caller, who just
+    recovers. An operator has to be able to tell that from a real revocation; the HTTP path says it
+    through app._note_metadata. The response still says nothing: that would be the oracle."""
+    import asyncio as _asyncio
+
+    monkeypatch.setattr(bus_ws, "HEARTBEAT", 0.01)
+    proj_dir = _private_project(tmp_path)
+    hub = bus_ws.hub_for(proj_dir)
+    k = hub.mint_listen_key("ana-box", user="ana")["listen_key"]
+
+    class SilentWS(HandshakeWS):
+        waits = 0
+
+        async def receive_text(self):
+            self.waits += 1
+            if self.waits == 1:
+                (proj_dir / "project.json").write_text("{ truncated mid-write")
+            if self.waits > 20:
+                raise ConnectionError("recheck never fired")
+            await _asyncio.sleep(3600)
+
+    ws = SilentWS(key=k)
+    with caplog.at_level(logging.WARNING, logger="hivemind_server.bus_ws"):
+        await bus_ws.websocket_endpoint(ws, "nik.private", proj_dir)
+
+    assert ws.closed_with == 4401, "unreadable metadata must still fail closed"
+    assert any("project.json" in r.getMessage() and "ana-box" in r.getMessage()
+               for r in caplog.records), \
+        f"an operator must be able to tell a broken file from a revocation: {caplog.records}"
+
+
+@pytest.mark.anyio
+async def test_a_refused_handshake_leaves_no_peer_for_senders_to_queue_into(tmp_path):
+    """redeem_key CREATES the peer on demand — that is what lets a listener reconnect after a
+    restart — so a credential the ACL then refuses would leave a label behind that bus_peers lists
+    and bus_send queues into, and _forget_locked will not sweep a peer once it holds mail. Nothing
+    in that queue is ever delivered: draining it needs a fresh attach, which re-runs the ACL."""
+    proj_dir = _private_project(tmp_path)
+    hub = bus_ws.hub_for(proj_dir)
+    k = hub.mint_listen_key("ana-box", user="ana")["listen_key"]
+    assert hub.peer("ana-box") is not None, "minting creates it; the refusal is what must clear it"
+    _revoke(proj_dir)
+
+    ws = HandshakeWS(key=k)
+    await bus_ws.websocket_endpoint(ws, "nik.private", proj_dir)
+    assert ws.accepted is False
+    assert hub.peer("ana-box") is None, "a refused credential must not leave a peer behind"
+    with pytest.raises(BusError) as e:
+        await hub.send("nik", "ana-box", "are you still there?")
+    assert "no peer" in str(e.value), "the sender must be told, not handed a silent queue"
+
+
+@pytest.mark.anyio
+async def test_an_evicted_live_peer_is_forgotten_not_parked(tmp_path, monkeypatch):
+    """Same rule on the eviction path. detach() alone keeps a peer that holds queued mail, so the
+    revoked label would stay online=False in bus_peers with senders told "queued for reconnect"."""
+    import asyncio as _asyncio
+
+    monkeypatch.setattr(bus_ws, "HEARTBEAT", 0.01)
+    proj_dir = _private_project(tmp_path)
+    hub = bus_ws.hub_for(proj_dir)
+    k = hub.mint_listen_key("ana-box", user="ana")["listen_key"]
+
+    class SilentWS(HandshakeWS):
+        waits = 0
+
+        async def receive_text(self):
+            self.waits += 1
+            if self.waits == 1:
+                await hub.send("nik", "ana-box", "mail that must not outlive the eviction")
+                _revoke(proj_dir)
+            if self.waits > 20:
+                raise ConnectionError("recheck never fired")
+            await _asyncio.sleep(3600)
+
+    ws = SilentWS(key=k)
+    await bus_ws.websocket_endpoint(ws, "nik.private", proj_dir)
+    assert ws.closed_with == 4401
+    assert hub.peer("ana-box") is None, "an evicted peer must be forgotten, not parked"
+    assert [p["peer"] for p in hub.peers()] == []
+
+
+def test_two_spellings_of_one_directory_are_one_hub_and_one_secret(tmp_path):
+    """Keyed by the literal string, a relative path or a data root reached through a symlink would
+    split the hub AND the secret in two — a tool's send would land on one hub while the socket sat
+    on the other, and a key minted through one spelling would not verify through the other."""
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real, target_is_directory=True)
+
+    assert bus_ws.hub_for(real) is bus_ws.hub_for(link)
+    k = bus_ws.hub_for(real).mint_listen_key("mac", user="nik")["listen_key"]
+    assert bus_ws.hub_for(link).redeem_key(k) is not None, "one directory, one signing secret"
