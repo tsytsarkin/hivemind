@@ -459,7 +459,17 @@ async def websocket_endpoint(ws: Any, project_name: str) -> None:
     key = ws.query_params.get("key", "")
     peer = hub.redeem_key(key) if key else hub.redeem(ws.query_params.get("ticket", ""))
     if peer is None:
-        # 4401 is in the private range; the close code surfaces to Monitor so the agent sees WHY.
+        # This refusal MUST stay pre-accept. uvicorn collapses any close sent before accept into a
+        # bare 403 with an empty body and discards the code — every implementation does it
+        # (websockets_sansio_impl, websockets_impl, wsproto_impl all reject with FORBIDDEN) — so the
+        # 4401 below never reaches the client. That is the property we want, not a bug to fix: a bad
+        # credential is then byte-identical to a project with no ws route at all.
+        #
+        # So do NOT call accept() first to make the code visible. An accepted-then-closed socket IS
+        # distinguishable from an unmounted path, and since this endpoint is reached without a
+        # bearer token that instantly hands an unauthenticated caller an existence oracle for
+        # /p/<private>/bus/ws — the same oracle app.PROJECT_DENIED exists to remove on every other
+        # path. 4401 (private range) is kept for the in-process/ASGI callers that do see it.
         await ws.close(code=4401)
         return
 

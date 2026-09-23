@@ -62,15 +62,18 @@ async def test_a_private_project_is_indistinguishable_from_a_missing_one(two_use
                                     {"name": "graph_types", "arguments": {}})
         missing_mcp = await _post(c, "/p/does.not.exist", ana, "tools/call",
                                   {"name": "graph_types", "arguments": {}})
-        forbidden_blob = await c.get("/p/nik.private/blobs/sha256:" + "0" * 64,
+        forbidden_blob = await c.get("/p/nik.private/blobs/sha256/" + "0" * 64,
                                      headers=_auth(ana))
-        missing_blob = await c.get("/p/does.not.exist/blobs/sha256:" + "0" * 64,
+        missing_blob = await c.get("/p/does.not.exist/blobs/sha256/" + "0" * 64,
                                    headers=_auth(ana))
         forbidden_index = await c.get("/p/nik.private/")
         missing_index = await c.get("/p/does.not.exist/")
         forbidden_health = await c.get("/p/nik.private/healthz")
         missing_health = await c.get("/p/does.not.exist/healthz")
 
+    # Volatile only: a real server stamps these, an in-process transport does not, and neither
+    # says anything about the project.
+    volatile = {"date", "server"}
     for what, forbidden, missing in [("mcp", forbidden_mcp, missing_mcp),
                                      ("blob", forbidden_blob, missing_blob),
                                      ("index", forbidden_index, missing_index),
@@ -79,6 +82,12 @@ async def test_a_private_project_is_indistinguishable_from_a_missing_one(two_use
         assert forbidden.text == missing.text, what
         assert forbidden.status_code == 404, what
         assert "nik.private" not in forbidden.text, what
+        # Headers as well as status and body. Both answers come from the same _json call today, so
+        # this holds for free — but a `www-authenticate` added to the forbidden branch alone would
+        # be the same existence oracle wearing a different field, and nothing else would fail.
+        assert ({k: v for k, v in forbidden.headers.items() if k.lower() not in volatile}
+                == {k: v for k, v in missing.headers.items() if k.lower() not in volatile}), \
+            f"{what}: {dict(forbidden.headers)} != {dict(missing.headers)}"
 
 
 @pytest.mark.anyio
@@ -86,8 +95,9 @@ async def test_the_blob_surface_is_not_a_bypass(two_users):
     """The REST routes never reach the tool layer; this is the hole an ACL there would miss.
 
     Asserted on the body as well as the status, because a missing blob is a 404 too: a status-only
-    assertion would still pass with the ACL deleted. The control at the end is the identical
-    request against a project ana may use, which must answer something else.
+    assertion would still pass with the ACL deleted. The controls at the end are the same requests
+    against a project ana may use, which must answer something else — and must prove the path
+    reaches a handler rather than 404ing at the router.
     """
     application, _, ana = two_users
     transport = httpx.ASGITransport(app=application)
@@ -95,8 +105,8 @@ async def test_the_blob_surface_is_not_a_bypass(two_users):
                                                         base_url="http://t", timeout=30) as c:
         # Every REST route the project mount registers, so this is an inventory and not a sample;
         # the two that answer without a token (healthz and the index) are in the test above.
-        for method, path in [("GET", "/p/nik.private/blobs/sha256:" + "0" * 64),
-                             ("PUT", "/p/nik.private/blobs/sha256:" + "0" * 64),
+        for method, path in [("GET", "/p/nik.private/blobs/sha256/" + "0" * 64),
+                             ("PUT", "/p/nik.private/blobs/sha256/" + "0" * 64),
                              ("POST", "/p/nik.private/blobs/batch"),
                              ("GET", "/p/nik.private/guide"),
                              ("GET", "/p/nik.private/guide/core"),
@@ -107,9 +117,16 @@ async def test_the_blob_surface_is_not_a_bypass(two_users):
             r = await c.request(method, path, headers=_auth(ana))
             assert r.status_code == 404, f"{method} {path} -> {r.status_code}"
             assert r.json() == appmod.PROJECT_DENIED, f"{method} {path} -> {r.text}"
-        control = await c.get("/p/default/blobs/sha256:" + "0" * 64, headers=_auth(ana))
-        assert control.text != json.dumps(appmod.PROJECT_DENIED), \
-            "the 404s above came from the blob store, not from the ACL"
+        # Controls on a project ana MAY use, to prove those paths reach the blob handler at all:
+        # the routes are /blobs/{algo}/{hex}, TWO segments, so `sha256:<hex>` (one segment, as this
+        # test first had it) matches no route and 404s at the router — the assertions above would
+        # then hold with the ACL deleted. A router miss is a 9-byte text/plain "Not Found"; the
+        # handler's own answers are an EMPTY-bodied 404 and a JSON 400 digest-mismatch.
+        got = await c.get("/p/default/blobs/sha256/" + "0" * 64, headers=_auth(ana))
+        assert (got.status_code, got.text) == (404, ""), \
+            f"GET control -> {got.status_code} {got.text!r}"
+        put = await c.request("PUT", "/p/default/blobs/sha256/" + "0" * 64, headers=_auth(ana))
+        assert put.status_code == 400 and "digest mismatch" in put.text, put.text
 
 
 @pytest.mark.anyio

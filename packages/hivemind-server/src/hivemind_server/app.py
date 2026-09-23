@@ -64,11 +64,13 @@ def _transport_security(cfg: Config) -> TransportSecuritySettings:
 class ProjectAuthMiddleware:
     """Bearer-token gate AND project ACL for every /p/<name>/… request.
 
-    This is the one place a token becomes a person: the caller is resolved once, here, and
-    published on the identity contextvar, which is where a tool body reads the caller from
+    For project traffic this is where a token becomes a person: the caller is resolved once, here,
+    and published on the identity contextvar, which is where a tool body reads the caller from
     (identity.current_identity; today only tests do, the write path lands in a later task).
     Server-level identities are tried first, then the project's own legacy tokens (see
-    identity.resolve).
+    identity.resolve). It is not the only caller of identity.resolve — the root `GET /projects`
+    route resolves independently, because it is outside any project prefix and so never reaches
+    this middleware; it publishes no contextvar, since no tool runs on it.
 
     The ACL lives here rather than in the tool decorator because the REST surface — blob GET/PUT,
     guide, skills, the project index — never reaches a tool at all: an ACL in the tool layer would
@@ -126,9 +128,13 @@ class ProjectAuthMiddleware:
     def _authorize(self, hdrs, name: str, tail: str) -> Union[Identity, None, Denied]:
         """Resolve the caller and decide whether this project is theirs to reach.
 
-        Returns the caller (or None when auth is off), or a Denied to send back instead. Lifted out
-        of __call__ so the request path stays readable as guard clauses; every refusal here answers
-        with PROJECT_DENIED, so an outsider cannot tell a private project from a typo.
+        Three verdicts, and None means ALLOW rather than "no caller resolved": an Identity to
+        publish; None for the two allowed requests that have no caller — auth is off, or a shared
+        project's health/index answering without a token; or a Denied to send back instead. Do not
+        read None as "auth is off"; it is "proceed with nobody".
+
+        Lifted out of __call__ so the request path stays readable as guard clauses; every refusal
+        here answers with PROJECT_DENIED, so an outsider cannot tell a private project from a typo.
         """
         project = self.registry.get(name)
         if project is None:
@@ -136,6 +142,9 @@ class ProjectAuthMiddleware:
         if not self.cfg.require_auth:
             # HIVEMIND_REQUIRE_AUTH=0 is the supported no-auth local mode: with no credential there
             # is nobody to authorize, so there is no ACL either — by construction, not by omission.
+            # Deliberately BEFORE the metadata read, so this mode never touches project.json on the
+            # request path: nothing here consults the file, so a broken one changes nothing and
+            # warning about it would be noise. A local operator who wants it checked turns auth on.
             return None
         meta, problem = load_with_problem(project.dir, project.name)
         self._note_metadata(project, problem)
