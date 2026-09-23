@@ -77,8 +77,10 @@ _AUTHOR_COLUMNS = (
 
 # Rows per committed batch. SQLite rebuilds a row's whole payload on UPDATE, overflow pages
 # included, so this is really "how many megabytes of props to rewrite while holding the single
-# writer lock": measured on a 7.95 GB proxy carrying the live row counts, 5,000 node_version rows
-# took 1.04 s on average (2.50 s worst) per batch.
+# writer lock": on a 7.95 GB proxy at the live row counts, 5,000 node_version rows took 1.04 s on
+# average, 2.50 s worst. Those rows carried SYNTHETIC ~20 KB props and the live size distribution
+# is unknown, so re-measure before trusting that shape — bench/backfill_authors_bench.py rebuilds
+# the proxy and re-runs both arms, and lists what they do not establish.
 _BATCH = 5000
 
 
@@ -90,8 +92,17 @@ def _legacy_author_sql(row_tx: str) -> str:
     those labels are self-declared strings and some of them are usernames. Never `legacy:None`
     either: a tx row that is missing, or whose label is NULL or blank, collapses to the same
     `legacy:unknown` that every read path already shows for a NULL column.
+
+    The double-prefix this command prevents is a second RUN turning `legacy:cli` into
+    `legacy:legacy:cli`, and that is the `WHERE ... IS NULL` filter's doing rather than this
+    expression's. A row whose original agent LABEL was itself `legacy:cli` does come out
+    `legacy:legacy:cli`, deliberately: the prefix marks what the server can vouch for, and a label
+    claiming to be legacy was still only a string its writer chose.
     """
-    return ("'legacy:' || COALESCE((SELECT CASE WHEN TRIM(COALESCE(agent_id,'')) = '' THEN NULL "
+    return ("'legacy:' || COALESCE((SELECT CASE WHEN TRIM(COALESCE(agent_id,''), "
+            # One-argument TRIM strips U+0020 and nothing else, so a label of "\t\n" came out as
+            # the literal `legacy:<tab><newline>` instead of reading as blank.
+            "char(32)||char(9)||char(10)||char(13)) = '' THEN NULL "
             f"ELSE agent_id END FROM tx WHERE tx.tx_id = {row_tx}), 'unknown')")
 
 
@@ -107,9 +118,11 @@ def _fill_null(db, table: str, column: str, tx_column: str, batch: int) -> int:
     duration, which on a shared database is an outage: measured on a 7.95 GB proxy with the live
     row counts, one statement took 83.0 s and another process attempting a small write every 200 ms
     was refused 147 times out of 152 across that window, while the same work in 5,000-row batches
-    took 81.1 s in total and let that writer in on half its attempts. Each batch commits on its
-    own, so an interrupted sweep leaves a consistent, re-runnable state: the rows it already
-    filled stay filled, and the WHERE clause only ever sees the ones it did not reach.
+    took 81.1 s in total and let that writer in on half its attempts.
+    bench/backfill_authors_bench.py re-derives both arms and states what they do not establish.
+    Each batch commits on its own, so an interrupted sweep leaves a consistent, re-runnable state:
+    the rows it already filled stay filled, and the WHERE clause only ever sees the ones it did
+    not reach.
     """
     sql = (f"UPDATE {table} SET {column} = {_legacy_author_sql(f'{table}.{tx_column}')} "
            f"WHERE rowid IN (SELECT rowid FROM {table} WHERE {column} IS NULL LIMIT ?)")
@@ -118,6 +131,10 @@ def _fill_null(db, table: str, column: str, tx_column: str, batch: int) -> int:
     # instead of failing. ceil(rows/batch) passes fill it and one more reads zero, and that bound
     # held exactly on the proxy — 380,729 rows at 5,000 drained in 78.
     remaining = _count_null(db, table, column)
+    if remaining == 0:
+        # A re-run is the ordinary case (the command is safe to repeat), and it should not take
+        # the writer lock once per table to change nothing.
+        return 0
     done = 0
     for _ in range(remaining // batch + 2):
         with db.write_light() as cur:

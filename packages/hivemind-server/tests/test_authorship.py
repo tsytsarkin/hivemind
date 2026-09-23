@@ -590,16 +590,37 @@ def test_a_dry_run_reports_per_table_and_writes_nothing(db):
 
 
 def test_running_the_backfill_twice_does_not_double_prefix(db):
-    """`legacy:legacy:cli` is what a second run produces if it does not filter on NULL."""
+    """A second pass must not turn `legacy:cli` into `legacy:legacy:cli`.
+
+    It cannot, and for a better reason than the NULL filter: the value is computed from the tx's
+    agent label and never from the column being written, so recomputing it over a row that is
+    already filled yields the identical string. Pinned over the mixed state an interrupted sweep
+    leaves behind, since that is where a filled row meets a running sweep. (What the NULL filter
+    protects is the values this command did not write — see the "left alone" test.)
+    """
     from hivemind_server.admin import backfill_authors
     out = graph.upsert_node(db, "cli", "component", {"title": "old"}, reason="x")
+    other = graph.upsert_node(db, "cli", "component", {"title": "older"}, reason="x")
     _blank_every_author_column(db)
+    with db.write_light() as cur:      # as a sweep killed between batches leaves it
+        cur.execute("UPDATE node_version SET author_user=\'legacy:cli\' WHERE node_id=?",
+                    (other["node_id"],))
     first = backfill_authors(db, dry_run=False)
     again = backfill_authors(db, dry_run=False)
     assert first["updated"] >= 2 and again["updated"] == 0
     assert again["dry_run"] is False
     assert _authors(db, "node_version", "author_user") == ["legacy:cli"]
     assert graph.get_node(db, node_id=out["node_id"])["author"] == "legacy:cli"
+    # The one doubled prefix that IS reachable: a label that declared itself legacy. Recorded as
+    # `legacy:legacy:cli` on purpose — the prefix says what the server can vouch for, and this
+    # label was still just a string its writer chose. It is no more mintable than any other.
+    claimed = graph.upsert_node(db, "legacy:cli", "component", {"title": "self-declared"},
+                                reason="x")
+    with db.write_light() as cur:
+        cur.execute("UPDATE node_version SET author_user=NULL WHERE node_id=?",
+                    (claimed["node_id"],))
+    backfill_authors(db, dry_run=False)
+    assert graph.get_node(db, node_id=claimed["node_id"])["author"] == "legacy:legacy:cli"
 
 
 def test_rows_written_since_authorship_landed_are_left_alone(db):
@@ -611,12 +632,22 @@ def test_rows_written_since_authorship_landed_are_left_alone(db):
     mine = graph.upsert_node(db, "cli", "component", {"title": "nik wrote this"}, reason="x")
     set_identity(None)
     nobody = graph.upsert_node(db, "cli", "component", {"title": "no principal"}, reason="x")
+    # A third row that really does predate the column, so the sweep has work and actually runs:
+    # with nothing to do it returns before opening a transaction, and a filter-less UPDATE would
+    # then never get the chance to relabel the two rows above.
+    older = graph.upsert_node(db, "atlas-migration", "component", {"title": "predates"},
+                              reason="x")
+    with db.write_light() as cur:
+        cur.execute("UPDATE node_version SET author_user=NULL WHERE node_id=?",
+                    (older["node_id"],))
+        cur.execute("UPDATE node SET created_by=NULL WHERE node_id=?", (older["node_id"],))
 
-    assert backfill_authors(db, dry_run=True)["would_update"] == 0
-    assert backfill_authors(db, dry_run=False)["updated"] == 0
+    assert backfill_authors(db, dry_run=True)["would_update"] == 2
+    assert backfill_authors(db, dry_run=False)["updated"] == 2
     assert graph.get_node(db, node_id=mine["node_id"])["author"] == "nik"
     assert graph.get_node(db, node_id=nobody["node_id"])["author"] == "legacy:unknown"
     assert graph.get_node(db, node_id=mine["node_id"])["created_by"] == "nik"
+    assert graph.get_node(db, node_id=older["node_id"])["author"] == "legacy:atlas-migration"
 
 
 def test_a_missing_tx_or_a_blank_agent_label_still_gets_an_honest_author(db):
@@ -625,6 +656,7 @@ def test_a_missing_tx_or_a_blank_agent_label_still_gets_an_honest_author(db):
     from hivemind_server.admin import backfill_authors
     orphan = graph.upsert_node(db, "cli", "component", {"title": "its tx is gone"}, reason="x")
     blank = graph.upsert_node(db, "   ", "component", {"title": "blank label"}, reason="x")
+    tabbed = graph.upsert_node(db, "\t\n", "component", {"title": "tab label"}, reason="x")
     _blank_every_author_column(db)
     # FK enforcement is per-connection and a PRAGMA inside a transaction is a no-op, so this goes
     # on the connection first. It simulates the one row shape the SQL has to survive: a version
@@ -640,6 +672,9 @@ def test_a_missing_tx_or_a_blank_agent_label_still_gets_an_honest_author(db):
     backfill_authors(db, dry_run=False)
     assert graph.get_node(db, node_id=orphan["node_id"])["author"] == "legacy:unknown"
     assert graph.get_node(db, node_id=blank["node_id"])["author"] == "legacy:unknown"
+    # SQLite's one-argument TRIM strips U+0020 only, so this label used to survive as the literal
+    # `legacy:<tab><newline>` while the space-only one next to it read as blank.
+    assert graph.get_node(db, node_id=tabbed["node_id"])["author"] == "legacy:unknown"
     assert "None" not in str(_authors(db, "node_version", "author_user"))
     assert None not in _authors(db, "node_version", "author_user")
 
@@ -707,7 +742,59 @@ def test_the_cli_backfill_is_a_dry_run_unless_it_is_told_otherwise(projects_dir,
     assert dry["dry_run"] is True and dry["skill_versions"] == 1
     assert skills.get(d, "re/x")["author_user"] == "legacy:unknown"
 
+    # ...and asking for both forms at once resolves to the one that cannot be undone by mistake
+    assert admin.main(["backfill-authors", "--dry-run", "--yes"]) in (0, None)
+    assert json.loads(capsys.readouterr().out)["dry_run"] is True
+    assert skills.get(d, "re/x")["author_user"] == "legacy:unknown"
+
     assert admin.main(["backfill-authors", "--yes"]) in (0, None)
     done = json.loads(capsys.readouterr().out)
     assert done["dry_run"] is False and done["updated"] == 1
     assert skills.get(d, "re/x")["author_user"] == "legacy:old-job"
+
+
+def test_the_sweep_crosses_batch_boundaries(db):
+    """Every other test here fits inside one batch, so the LIMIT binding, the running total and
+    the loop bound each run exactly once — and a sweep that quietly stopped after its first batch
+    would satisfy all of them."""
+    from hivemind_server.admin import backfill_authors
+    made = [graph.upsert_node(db, f"job-{i}", "component", {"title": f"n{i}"}, reason="x")
+            for i in range(5)]
+    _blank_every_author_column(db)
+
+    report = backfill_authors(db, dry_run=False, batch=2)   # 5 rows = 3 passes, not 1
+    assert report["node_versions"] == 5 and report["nodes"] == 5
+    assert report["updated"] == 10
+    assert _authors(db, "node_version", "author_user") == [f"legacy:job-{i}" for i in range(5)]
+    assert _authors(db, "node", "created_by") == [f"legacy:job-{i}" for i in range(5)]
+    assert backfill_authors(db, dry_run=True, batch=2)["would_update"] == 0
+    assert graph.get_node(db, node_id=made[4]["node_id"])["author"] == "legacy:job-4"
+
+
+def test_the_backfill_covers_every_authorship_column_the_migration_adds(db):
+    """Three hand-written lists have to agree, and none of them is derived from another: the
+    migration in db.py is the ground truth, admin's is what the sweep walks, and this module's is
+    what the tests blank. An eighth column added to one and not the others is exactly the defect
+    this task found in its own brief — a command that skips columns nobody notices."""
+    from hivemind_server.admin import _AUTHOR_COLUMNS as swept
+    from hivemind_server.db import Database
+    migrated = {(t, c) for t, c, _ in Database._MIGRATIONS
+                if c in ("author_user", "created_by", "user_id")}
+    # tx.user_id is the one authorship column the sweep deliberately leaves alone: a tx row
+    # already carries agent_id beside it, so 'legacy:' || agent_id there restates its neighbour.
+    assert migrated - {("tx", "user_id")} == {(t, c) for t, c, _ in swept} == set(_AUTHOR_COLUMNS)
+
+
+def test_a_re_run_on_a_filled_database_takes_no_write_lock(db, monkeypatch):
+    """The command is meant to be safe to repeat, and on the live database repeating it would
+    otherwise open the single writer lock once per table to change nothing."""
+    from hivemind_server.admin import backfill_authors
+    graph.upsert_node(db, "cli", "component", {"title": "old"}, reason="x")
+    _blank_every_author_column(db)
+    backfill_authors(db, dry_run=False)
+
+    opened = []
+    real = db.write_light
+    monkeypatch.setattr(db, "write_light", lambda: (opened.append(1), real())[1])
+    assert backfill_authors(db, dry_run=False)["updated"] == 0
+    assert opened == []
