@@ -39,7 +39,7 @@ def hub():
 def connect(hub, label):
     """Mint + redeem, i.e. what the WS handshake does."""
     t = hub.mint_ticket(label)
-    peer = hub.redeem(t["ticket"])
+    peer, _user = hub.redeem(t["ticket"])
     return peer, FakeWS(), t
 
 
@@ -402,8 +402,9 @@ async def test_connect_then_list_does_not_break_the_pending_connection(hub):
     assert hub.peers() is not None            # the sweep runs here
     assert hub.peer("pending") is not None, "a peer awaiting its listener must survive a sweep"
 
-    peer = hub.redeem(t["ticket"])
-    assert peer is not None, "the ticket must still resolve after a listing"
+    got = hub.redeem(t["ticket"])
+    assert got is not None, "the ticket must still resolve after a listing"
+    peer, _user = got
 
     ws = FakeWS()
     await hub.attach(peer, ws)
@@ -418,3 +419,183 @@ async def test_a_peer_whose_ticket_expired_unused_is_still_swept(hub, monkeypatc
     monkeypatch.setattr(bus_ws, "_now", lambda: bus_ws.time.time() + bus_ws.TICKET_TTL + 1)
     hub.peers()
     assert hub.peer("abandoned") is None
+
+
+# ── the credential names its user, and the ACL is re-checked ──────────────────
+def test_a_listen_key_carries_its_user(hub):
+    k = hub.mint_listen_key("mac", user="nik")["listen_key"]
+    peer, user = hub.redeem_key(k)
+    assert peer is not None and user == "nik"
+
+
+def test_a_key_minted_for_another_user_cannot_be_reassigned(hub):
+    k = hub.mint_listen_key("mac", user="nik")["listen_key"]
+    scheme, label, user_b64, exp, sig = k.split(".")
+    forged = ".".join([scheme, label, bus_ws._b64(b"ana"), exp, sig])
+    assert hub.redeem_key(forged) is None, "the user must be inside the signature"
+
+
+def test_a_ticket_carries_its_user_too(hub):
+    """Both credentials, one shape: the handshake must know whose access to check either way."""
+    t = hub.mint_ticket("mac", user="nik")["ticket"]
+    peer, user = hub.redeem(t)
+    assert peer is not None and user == "nik"
+
+
+def _private_project(tmp_path, name="nik.private", members=("ana",)):
+    from hivemind_server import projects_meta as pm
+
+    proj_dir = tmp_path / name
+    proj_dir.mkdir()
+    pm.save(proj_dir, pm.ProjectMeta(name=name, visibility="private", owner="nik",
+                                     members=list(members)))
+    return proj_dir
+
+
+def _revoke(proj_dir, name="nik.private"):
+    from hivemind_server import projects_meta as pm
+
+    meta = pm.load(proj_dir, name)
+    meta.members = []
+    pm.save(proj_dir, meta)
+
+
+@pytest.mark.anyio
+async def test_a_revoked_member_is_refused_at_the_handshake(hub, tmp_path):
+    """The WS route never passes through the auth middleware, so the ACL must be re-checked here."""
+    from hivemind_server import projects_meta as pm
+
+    proj_dir = tmp_path / "nik.private"
+    proj_dir.mkdir()
+    pm.save(proj_dir, pm.ProjectMeta(name="nik.private", visibility="private", owner="nik",
+                                     members=["ana"]))
+    k = hub.mint_listen_key("ana-box", user="ana")["listen_key"]
+    assert bus_ws.authorize_key(hub, k, proj_dir, "nik.private") is not None
+
+    meta = pm.load(proj_dir, "nik.private")
+    meta.members = []
+    pm.save(proj_dir, meta)
+    assert bus_ws.authorize_key(hub, k, proj_dir, "nik.private") is None, \
+        "revocation must bite before the key expires"
+
+
+# ── the endpoint itself: where the refusal actually has to happen ─────────────
+class HandshakeWS:
+    """Just enough Starlette WebSocket for websocket_endpoint: params, accept, close, send."""
+
+    def __init__(self, **params):
+        self.query_params = params
+        self.accepted = False
+        self.closed_with = None
+        self.sent = []
+
+    async def accept(self):
+        self.accepted = True
+
+    async def close(self, code: int = 1000):
+        self.closed_with = code
+
+    async def send_text(self, text: str) -> None:
+        self.sent.append(json.loads(text))
+
+    async def receive_text(self):
+        raise ConnectionError("the client went away")
+
+
+@pytest.mark.anyio
+async def test_the_handshake_refuses_a_revoked_member_without_accepting(tmp_path):
+    """Both halves of the fix, at the endpoint rather than the helper.
+
+    The refusal must stay PRE-accept: uvicorn collapses any pre-accept close into a bare 403 and
+    discards the code, which is exactly what makes a refused credential indistinguishable from a
+    project that has no ws route at all. Accepting first to surface 4401 would hand an
+    unauthenticated caller an existence oracle for /p/<private>/bus/ws.
+    """
+    proj_dir = _private_project(tmp_path)
+    hub = bus_ws.hub_for(proj_dir)
+    k = hub.mint_listen_key("ana-box", user="ana")["listen_key"]
+
+    ok = HandshakeWS(key=k)
+    await bus_ws.websocket_endpoint(ok, "nik.private", proj_dir)
+    assert ok.accepted is True, "a current member must still get in"
+
+    _revoke(proj_dir)
+    refused = HandshakeWS(key=k)
+    await bus_ws.websocket_endpoint(refused, "nik.private", proj_dir)
+    assert refused.accepted is False, "the refusal must happen before accept(), or it is an oracle"
+    assert refused.closed_with == 4401
+    assert refused.sent == [], "a refused listener must be told nothing about the project"
+
+
+@pytest.mark.anyio
+async def test_the_handshake_checks_the_acl_on_the_ticket_path_too(tmp_path):
+    proj_dir = _private_project(tmp_path)
+    hub = bus_ws.hub_for(proj_dir)
+    _revoke(proj_dir)
+    t = hub.mint_ticket("ana-box", user="ana")["ticket"]
+
+    ws = HandshakeWS(ticket=t)
+    await bus_ws.websocket_endpoint(ws, "nik.private", proj_dir)
+    assert ws.accepted is False and ws.closed_with == 4401
+
+
+@pytest.mark.anyio
+async def test_a_live_socket_is_dropped_when_its_user_loses_access(tmp_path, monkeypatch):
+    """A handshake-only check would in practice never fire: the listener opens one socket and
+    holds it for days, reconnecting only on a blip. So the socket has to be re-checked while it
+    is open, not just when it is opened."""
+    import asyncio as _asyncio
+
+    monkeypatch.setattr(bus_ws, "HEARTBEAT", 0.01)
+    proj_dir = _private_project(tmp_path)
+    hub = bus_ws.hub_for(proj_dir)
+    k = hub.mint_listen_key("ana-box", user="ana")["listen_key"]
+
+    class SilentWS(HandshakeWS):
+        waits = 0
+
+        async def receive_text(self):
+            self.waits += 1
+            if self.waits == 1:
+                _revoke(proj_dir)          # revoked while the socket is up
+            if self.waits > 20:
+                raise ConnectionError("recheck never fired")
+            await _asyncio.sleep(3600)     # a listener sends nothing; the heartbeat wakes the loop
+
+    ws = SilentWS(key=k)
+    await bus_ws.websocket_endpoint(ws, "nik.private", proj_dir)
+    assert ws.accepted is True, "it was authorised when it connected"
+    assert ws.closed_with == 4401, "a revoked user's open socket must be closed, not left feeding"
+
+
+def test_two_deployments_of_one_project_name_do_not_share_a_bus(tmp_path):
+    """_hubs and _SECRETS were keyed by project NAME, so two apps in one process holding a
+    same-named project shared one hub and one signing secret — and a listen key minted against
+    one would then verify against the other. Keyed by directory, as projects_meta._CACHE is."""
+    a, b = tmp_path / "a" / "team", tmp_path / "b" / "team"
+    a.mkdir(parents=True)
+    b.mkdir(parents=True)
+    bus_ws.register_secret(a)
+    bus_ws.register_secret(b)
+    assert bus_ws.hub_for(a) is not bus_ws.hub_for(b)
+    k = bus_ws.hub_for(a).mint_listen_key("mac", user="nik")["listen_key"]
+    assert bus_ws.hub_for(b).redeem_key(k) is None, "a listen key must not cross deployments"
+
+
+@pytest.mark.anyio
+async def test_with_auth_off_the_bus_applies_no_acl_either(tmp_path):
+    """HIVEMIND_REQUIRE_AUTH=0 is the supported local mode: nothing names a person, so
+    app._authorize applies no ACL on any other surface. Credentials minted in that mode carry no
+    user at all, so a bus that failed closed on them would refuse every listener of a private
+    project left over from an auth-on run — the one surface such a deployment could not use."""
+    proj_dir = _private_project(tmp_path, members=())
+    hub = bus_ws.hub_for(proj_dir)
+    k = hub.mint_listen_key("box")["listen_key"]        # no identity in scope
+
+    strict = HandshakeWS(key=k)
+    await bus_ws.websocket_endpoint(strict, "nik.private", proj_dir)
+    assert strict.accepted is False, "the default must be the strict rule, never the bypass"
+
+    open_mode = HandshakeWS(key=k)
+    await bus_ws.websocket_endpoint(open_mode, "nik.private", proj_dir, require_auth=False)
+    assert open_mode.accepted is True, "with auth off there is nobody to authorize"

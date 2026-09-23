@@ -408,3 +408,41 @@ async def test_a_handshake_era_request_resolves_identity_per_request(env, monkey
             "bob's call was answered on a different session, so it did not reuse alice's"
         assert "error" not in _parse(r), r.text
     assert [w.user for w in seen] == ["bob"], seen
+
+
+@pytest.mark.anyio
+async def test_a_refused_bus_handshake_looks_exactly_like_a_project_that_does_not_exist(env):
+    """The bus ws route answers without a bearer token, so its refusal is the one place an
+    unauthenticated stranger could probe for /p/<private>/bus/ws. It must not become an oracle.
+
+    Neither path may accept(): uvicorn collapses ANY pre-accept close into `HTTP/1.1 403 Forbidden`
+    with `Content-Length: 0` and discards the close code — measured on this repo's pinned uvicorn
+    against a real socket, byte-identical for both requests below — while an accepted-then-closed
+    socket is plainly distinguishable from an unmounted path.
+    """
+    application, proj, _tok = env
+
+    async def drive(path, query):
+        sent = []
+        scope = {"type": "websocket", "asgi": {"version": "3.0", "spec_version": "2.3"},
+                 "http_version": "1.1", "scheme": "ws", "path": path, "raw_path": path.encode(),
+                 "query_string": query.encode(), "root_path": "",
+                 "headers": [(b"host", b"testserver")], "client": ("1.2.3.4", 1234),
+                 "server": ("testserver", 80), "subprotocols": [], "state": {}}
+
+        async def receive():
+            return {"type": "websocket.connect"}
+
+        async def send(m):
+            sent.append(m)
+
+        await asyncio.wait_for(application(scope, receive, send), timeout=5)
+        return sent
+
+    refused = await drive(f"/p/{proj.name}/bus/ws", "key=hk1.a.b.c.d")
+    missing = await drive("/p/no-such-project/bus/ws", "key=hk1.a.b.c.d")
+    for got, what in ((refused, "a refused credential"), (missing, "an unknown project")):
+        assert [m["type"] for m in got] == ["websocket.close"], f"{what} -> {got}"
+    # The codes differ (4401 vs the router's own close) and that is fine: uvicorn drops the code of
+    # a pre-accept close. What must never differ is whether the socket was accepted.
+    assert all(m["type"] != "websocket.accept" for m in refused + missing)

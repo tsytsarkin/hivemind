@@ -10,6 +10,7 @@ from typing import Optional
 
 from .bus_ws import BusError, MAX_BODY, current_origin, hub_for, register_secret
 from .envelope import RO, WRITE, current_project, envelope as _envelope
+from .identity import current_identity
 
 
 # Where the skill installs the dependency-free listener. It must be an absolute path that any
@@ -27,8 +28,8 @@ def attach(mcp, cfg) -> None:
         project created after startup, which build_app never looped over.
         """
         p = current_project()
-        register_secret(p.name, p.dir / "bus_secret")
-        return hub_for(p.name)
+        register_secret(p.dir)
+        return hub_for(p.dir)
 
     def _ws_url() -> str:
         """Build a ws:// URL from the address THIS caller used, falling back to config.
@@ -53,8 +54,13 @@ def attach(mcp, cfg) -> None:
     @_envelope
     def bus_connect(label: str, meta: Optional[dict] = None) -> dict:
         hub = _hub()
-        k = hub.mint_listen_key(label, meta)
-        t = hub.mint_ticket(label, meta)
+        # Both credentials record WHO asked for them, from the token rather than from an argument.
+        # The WS handshake re-checks that user against the project ACL, which is the only thing
+        # standing between a removed member and this project's traffic.
+        who = current_identity()
+        user = who.user if who else None
+        k = hub.mint_listen_key(label, meta, user=user)
+        t = hub.mint_ticket(label, meta, user=user)
         ws_url = _ws_url()
         return {
             "peer": k["label"],

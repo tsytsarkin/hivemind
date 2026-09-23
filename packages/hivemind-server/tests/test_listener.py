@@ -102,9 +102,9 @@ def hub():
 
 
 def test_listen_key_round_trips(hub):
-    k = hub.mint_listen_key("mac")["listen_key"]
-    peer = hub.redeem_key(k)
-    assert peer is not None and peer.label == "mac"
+    k = hub.mint_listen_key("mac", user="nik")["listen_key"]
+    peer, user = hub.redeem_key(k)
+    assert peer is not None and peer.label == "mac" and user == "nik"
 
 
 def test_listen_key_is_reusable(hub):
@@ -114,24 +114,31 @@ def test_listen_key_is_reusable(hub):
     assert hub.redeem_key(k) is not None
 
 
-def test_listen_key_survives_a_server_restart(hub, tmp_path):
+def test_listen_key_survives_a_server_restart(tmp_path):
     """A fresh Hub with the same on-disk secret must still admit an existing listener."""
-    path = tmp_path / "bus_secret"
-    bus_ws.register_secret("restart", path)
-    k = bus_ws.Hub("restart").mint_listen_key("mac")["listen_key"]
+    scope = bus_ws._scope(tmp_path)
+    bus_ws.register_secret(tmp_path)
+    k = bus_ws.Hub(scope).mint_listen_key("mac", user="nik")["listen_key"]
 
-    bus_ws._SECRETS.pop("restart", None)          # simulate the process going away
-    bus_ws.register_secret("restart", path)       # ...and coming back on the same data dir
-    fresh = bus_ws.Hub("restart")
-    peer = fresh.redeem_key(k)
+    bus_ws._SECRETS.pop(scope, None)              # simulate the process going away
+    bus_ws.register_secret(tmp_path)              # ...and coming back on the same data dir
+    fresh = bus_ws.Hub(scope)
+    peer, user = fresh.redeem_key(k)
     assert peer is not None and peer.label == "mac", "a restart must not orphan every listener"
+    assert user == "nik", "and it must still know whose access to check"
 
 
 def test_tampered_or_foreign_listen_key_is_refused(hub, tmp_path):
-    k = hub.mint_listen_key("mac")["listen_key"]
-    scheme, label, exp, sig = k.split(".")
-    assert hub.redeem_key(f"{scheme}.{label}.{int(exp) + 86400}.{sig}") is None, "expiry is signed"
-    assert hub.redeem_key(f"{scheme}.{bus_ws._b64(b'root')}.{exp}.{sig}") is None, "label is signed"
+    k = hub.mint_listen_key("mac", user="nik")["listen_key"]
+    scheme, label, user, exp, sig = k.split(".")
+    assert hub.redeem_key(f"{scheme}.{label}.{user}.{int(exp) + 86400}.{sig}") is None, \
+        "expiry is signed"
+    assert hub.redeem_key(f"{scheme}.{bus_ws._b64(b'root')}.{user}.{exp}.{sig}") is None, \
+        "label is signed"
+    assert hub.redeem_key(f"{scheme}.{label}.{bus_ws._b64(b'root')}.{exp}.{sig}") is None, \
+        "user is signed"
+    assert hub.redeem_key(f"{scheme}.{label}.{exp}.{sig}") is None, \
+        "a pre-user key names nobody, so there is no access to re-check"
     assert hub.redeem_key("garbage") is None
     assert hub.redeem_key("") is None
     assert bus_ws.Hub("other-project").redeem_key(k) is None, "keys must not cross projects"
@@ -144,8 +151,8 @@ def test_expired_listen_key_is_refused(hub, monkeypatch):
 
 
 def test_secret_file_is_owner_only(tmp_path):
+    bus_ws.register_secret(tmp_path)
     path = tmp_path / "bus_secret"
-    bus_ws.register_secret("perm", path)
     assert path.stat().st_mode & 0o077 == 0, "the bus signing key must not be group/world readable"
 
 

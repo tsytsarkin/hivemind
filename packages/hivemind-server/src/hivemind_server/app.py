@@ -110,9 +110,10 @@ class ProjectAuthMiddleware:
         if scope["type"] != "http":
             # The only non-http route under /p/ is the bus WebSocket, which carries its own
             # credential in the query string (a single-use ticket or a listen key, both minted by
-            # bus_connect inside the project and redeemable only against that project's hub) —
-            # see bus_ws.websocket_endpoint. It cannot use the bearer header: the listener is
-            # launched by Monitor, which cannot set one.
+            # bus_connect inside the project and redeemable only against that project's hub). It
+            # cannot use the bearer header: the listener is launched by Monitor, which cannot set
+            # one. Because this returns before the ACL below, bus_ws.websocket_endpoint runs that
+            # check itself — at the handshake and again on the open socket.
             return await self.app(scope, receive, send)
         path = scope.get("path", "")
         hdrs = {k.decode().lower(): v.decode() for k, v in scope.get("headers", [])}
@@ -262,15 +263,21 @@ def build_app(cfg: Optional[Config] = None) -> Starlette:
         # At startup, not on first use: a listener reconnecting after a server restart redeems a
         # listen key signed with this secret, and no tool call need have happened first. Without it
         # bus_ws._secret would mint a throwaway one and reject the key.
-        _bus_ws_mod.register_secret(project.name, project.dir / "bus_secret")
+        _bus_ws_mod.register_secret(project.dir)
         # The bus WebSocket is mounted at the Starlette level: MCPServer.custom_route registers
         # HTTP methods only, so a ws route cannot go through it. Auth is the connect ticket in the
         # query string (see bus_ws), not the bearer header, because the listener is launched by
-        # Monitor and cannot set headers.
-        def _ws_route(p=project):
+        # Monitor and cannot set headers. The project DIRECTORY goes with the name because the
+        # endpoint is where the bus ACL is enforced (the middleware below skips non-HTTP scopes),
+        # and it reads project.json from that directory on every check.
+        # require_auth travels with it for the same reason envelope.set_registry takes it
+        # explicitly: with auth off _authorize above applies no ACL to any other surface, and a bus
+        # that failed closed on the same request would be the one thing such a deployment could not
+        # use — its credentials are minted with no user in them at all.
+        def _ws_route(p=project, require_auth=cfg.require_auth):
             async def endpoint(ws):
                 from . import bus_ws as _b
-                await _b.websocket_endpoint(ws, p.name)
+                await _b.websocket_endpoint(ws, p.name, p.dir, require_auth=require_auth)
             return endpoint
         # Registered BEFORE the Mount: Starlette takes the first matching route, and
         # Mount("/p/<name>") would otherwise swallow this path into the MCP app, which has no
