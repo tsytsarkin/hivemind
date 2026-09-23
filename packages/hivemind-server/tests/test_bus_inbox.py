@@ -494,8 +494,18 @@ async def _max_recordable_line(listener, tmp_path):
     else:
         raise AssertionError("could not fit a frame to the wire cap")
     assert wire <= listener.MAX_FRAME, "a frame over MAX_FRAME is refused, so it is not a ceiling"
+
+    # Maximality, proved without assuming WHICH limit binds — that assumption is what went wrong
+    # before. Nothing more can go in either field: one more code point of body is refused by the
+    # server outright, and one more in `from` either does not fit the wire or is dropped by the
+    # send path's own cap (in which case the frame is unchanged).
+    from hivemind_server.bus_ws import BusError
+    with pytest.raises(BusError):
+        await _server_frame(fill_ch * n, body + body_ch)
     _, over = await _server_frame(fill_ch * (n + 1), body)
-    assert over > listener.MAX_FRAME, "and this is the largest one that does fit"
+    assert over > listener.MAX_FRAME or over == wire, \
+        "either one more code point does not fit the wire, or the field is capped"
+
     _MAX_LINE[key] = _line_bytes(listener, tmp_path, frame, "max-" + key)
     return _MAX_LINE[key]
 
@@ -529,32 +539,41 @@ async def test_the_ceiling_is_derived_from_a_frame_that_really_fits_the_wire(tmp
     """The number `docs/bus.md` quotes. Every part of it is measured: the envelope comes from
     `Hub.send`, the line from `_record`, and the frame is proven deliverable against `MAX_FRAME`
     — which is the check that matters, because a frame the listener refuses is not a ceiling."""
+    from hivemind_server.bus_ws import LABEL_CAP, MAX_BODY
     listener = _load()
     line = await _max_recordable_line(listener, tmp_path)
-    # What sets this is the WIRE, not MAX_BODY: a frame has to fit MAX_FRAME as UTF-8, and
-    # ensure_ascii inflates it by at most 3x (both a 2-byte and a 4-byte character escape to
-    # three bytes per wire byte). So the ceiling tracks MAX_FRAME and moves with it.
-    assert round(line / listener.MAX_FRAME, 1) == 3.0, "the wire budget times the escape ratio"
-    assert round(line / 1048576, 2) == 6.00, "6.00 MiB is the largest recordable line"
+
+    # What binds is the body cap — but only because every OTHER caller-controlled field on a
+    # frame is capped at LABEL_CAP on the send path. Without that, `from` carries a payload of
+    # its own and the wire becomes the constraint instead (measured then: 6.00 MiB, a ceiling of
+    # 20.00). This assertion is that cap's tripwire as much as it is the ceiling's: the two
+    # labels can contribute at most twelve bytes per code point each, so everything that is not
+    # body is a rounding error.
+    assert 12 * MAX_BODY <= line <= 12 * MAX_BODY + 2 * 12 * LABEL_CAP + 256, \
+        "the body is what binds; the names on a frame are bounded by LABEL_CAP"
+    assert round(line / 1048576, 2) == 3.00, "3.00 MiB is the largest recordable line"
     ceiling = 2 * (listener.INBOX_MAX_BYTES + line)
-    assert round(ceiling / 1048576, 2) == 20.00, "so 20.00 MiB is the ceiling across both files"
+    assert round(ceiling / 1048576, 2) == 14.00, "so 14.00 MiB is the ceiling across both files"
 
 
 @pytest.mark.anyio
-async def test_a_record_larger_than_a_whole_generation_still_lands(tmp_path):
-    """The floor assertion this file used to carry said a maximal message must fit in one
-    generation "or it could never land". Both halves were false: it does not fit (6.00 MiB against
-    a 4 MiB cap) and it lands anyway, because the rotation runs first and the append is
-    unconditional. What the cap bounds is the file, not the record."""
+async def test_a_record_larger_than_a_whole_generation_would_still_land(tmp_path):
+    """A maximal record fits in a generation today — 3.00 MiB against a 4 MiB cap — but the two
+    limits are set independently, in different files, for different reasons, so nothing keeps
+    that true. It does not need to be: this file once asserted that a maximal message must fit
+    "or it could never land", and that premise was false. The rotation runs first and the append
+    is unconditional, so an oversized record opens a generation of its own and rolls the previous
+    one away. The cap bounds the file, not the record."""
     listener = _load()
     line = await _max_recordable_line(listener, tmp_path)
-    assert line > listener.INBOX_MAX_BYTES, "the premise of the old floor does not hold"
+    assert line < listener.INBOX_MAX_BYTES, "today it fits — see the comment for why that is not " \
+                                            "something to rely on"
 
-    from hivemind_server.bus_ws import MAX_BODY
     inbox = tmp_path / "oversize.jsonl"
-    frame, _wire = await _server_frame("p", "\U0001F600" * MAX_BODY)
+    frame, _wire = await _server_frame("p", "x")
+    frame["body"] = "L" * (listener.INBOX_MAX_BYTES + 1024)      # larger than a whole generation
     assert listener._record(frame, inbox) is True, "an oversized record must still be recorded"
-    assert inbox.stat().st_size > listener.INBOX_MAX_BYTES / 2
+    assert inbox.stat().st_size > listener.INBOX_MAX_BYTES
     assert json.loads(inbox.read_text())["body"] == frame["body"], "and it must still parse"
 
 
@@ -572,8 +591,8 @@ async def test_both_halves_agree_on_the_cap(tmp_path):
     # what is asserted is the ceiling both halves produce, identically.
     for mod in (plugin, client):
         line = await _max_recordable_line(mod, tmp_path)
-        assert round(2 * (mod.INBOX_MAX_BYTES + line) / 1048576, 2) == 20.00, \
-            "each half's cap and largest line must give the 20.00 MiB ceiling the docs state"
+        assert round(2 * (mod.INBOX_MAX_BYTES + line) / 1048576, 2) == 14.00, \
+            "each half's cap and largest line must give the 14.00 MiB ceiling the docs state"
     assert _MAX_LINE[plugin.__name__] == _MAX_LINE[client.__name__], \
         "and the two halves must record a frame identically, byte for byte"
 

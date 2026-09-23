@@ -72,6 +72,7 @@ From a shell: `hivemind bus connect <label>` · `listen --url …` · `peers` ·
 | Long bodies | kept locally in full (4 MiB, one rotation); also retained ~1 h server-side | A notification is clipped near 512 characters, so the wire frame cannot be the only copy. The listener appends every frame to a local JSONL inbox and the line points at both routes; `bus_message(id)` returns the rest from the server. The local file is bounded for the same reason the offline queue is: an append-only file nobody prunes is how the blob store reached 94 GB. |
 | Identity | stable per label | A reconnect reuses the same peer, so queued mail is not orphaned and peers keep addressing the same name. |
 | Displaced sockets | closed with 4409 | A second connection for one identity supersedes the first instead of leaving a ghost peer "online" forever. |
+| Caller-supplied names | truncated to `LABEL_CAP` (64) at the send path | The queue and the recent buffer both account for what they hold as `sum(len(frame["body"]))`, so any *other* caller-controlled field is footprint those caps cannot see. `from` is the `agent` argument of `bus_send`; before it was normalised, an authenticated peer could park ~200 MB per offline peer and ~1 GB in the recent buffer with both caps reading it as zero. Truncated rather than refused, matching the ticket mints and the renderers' `_label()`. |
 | Auth | reusable signed listen key (7 d), or a single-use 60 s ticket | The listener connects by URL and cannot set an `Authorization` header, so an authenticated MCP call mints a ticket. The long-lived bearer token never lands in a URL, a shell history or an access log. The default is the **listen key**: HMAC-signed over (label, expiry) with a per-project secret in `<project>/bus_secret`, so verification needs no table and a key keeps working across a server restart — a listener reconnects on its own instead of dying until a human notices. It grants only "join the bus as this label", expires, and is revoked wholesale by deleting the secret. |
 
 ## The listener is shipped by the plugin, not the CLI
@@ -138,28 +139,29 @@ Details that are load-bearing:
   size is checked *before* the append, so every generation ends one whole record over the cap
   (measured: a `.1` of 4,194,648 B). With ordinary traffic that overshoot is ~1 KB.
 
-  The absolute ceiling is **20.00 MiB**, and what sets it is the **wire**, not `MAX_BODY`. A frame
-  has to fit `MAX_FRAME` (2 MiB) as UTF-8 or the listener refuses it and it is never recorded at
-  all; `ensure_ascii` then inflates what did arrive by at most 3× (a 2-byte and a 4-byte character
-  both escape to three bytes per wire byte). So the largest line a listener can be made to write
-  is 6.00 MiB, and two generations of `cap + one such record` is 20.00 MiB. `MAX_BODY` does not
-  bound it, because `from` is the `agent` argument of `bus_send` and **nothing caps it** — it can
-  carry a payload of its own. A record that large is hostile traffic, not ordinary use.
+  The absolute ceiling is **14.00 MiB**: the largest line a listener can be made to write is
+  **3.00 MiB** (measured: 3,147,418 B), and two generations of `cap + one such record` is
+  14.00 MiB. What binds is `MAX_BODY` — 256 Ki **code points**, so a body of astral characters is
+  legal and `ensure_ascii` writes each as a surrogate *pair*, twelve bytes — **but only because
+  every other caller-controlled field on a frame is capped at `LABEL_CAP` on the send path**
+  (see *Names are bounded* below). Without that cap the binding constraint is not the body at
+  all: `from` carries a payload of its own, the wire becomes the limit, and the measured figures
+  were 6.00 MiB and 20.00 MiB. A record anywhere near this is hostile traffic, not ordinary use.
 
   Do not take those numbers on trust, and do not re-derive them from an expansion factor: this
-  file has carried a wrong quantified ceiling three times (implicitly ×1, then ×6, then ×12 —
-  and ×12 was still wrong, because it was the wrong constraint). They are measured end to end by
+  file has carried a wrong quantified ceiling four times (implicitly ×1, then ×6, then ×12, then
+  ×12-against-the-wrong-constraint). They are measured end to end by
   `test_the_ceiling_is_derived_from_a_frame_that_really_fits_the_wire`: the envelope comes from
-  `Hub.send`, the line from the listener's own `_record`, the frame is proved to fit `MAX_FRAME`,
-  and the character that maximises it is *chosen by measuring every UTF-8 width* rather than
-  named. `test_both_halves_agree_on_the_cap` then pins both halves to the same ceiling.
-* **A record can be larger than a whole generation, and that is fine.** 6.00 MiB against a 4 MiB
-  cap. It still lands: the rotation runs first and the append is unconditional, so an oversized
-  record simply opens a generation of its own and rolls the previous one away. An earlier version
-  of this file asserted the opposite ("a maximal message must fit in one generation, or it could
-  never land") — pinned now by
-  `test_a_record_larger_than_a_whole_generation_still_lands`. What the cap bounds is the file, not
-  the record.
+  `Hub.send`, the line from the listener's own `_record`, the frame is proved to fit `MAX_FRAME`
+  and to be maximal (one more code point of body is refused by the server, one more of name is
+  dropped by the cap), and the character that maximises it is *chosen by measuring every UTF-8
+  width* rather than named. `test_both_halves_agree_on_the_cap` pins both halves to the ceiling.
+* **The cap bounds the file, not the record.** A maximal record fits inside a generation today —
+  3.00 MiB against 4 MiB — but the two limits live in different files and move for different
+  reasons, and nothing needs that to hold. An earlier version of this file asserted that it must
+  ("or it could never land"), which was false: the rotation runs first and the append is
+  unconditional, so a record larger than a whole generation opens one of its own and rolls the
+  previous away. Pinned by `test_a_record_larger_than_a_whole_generation_would_still_land`.
 * **A failed rotation costs nothing.** It is attempted before the append, inside the same
   best-effort discipline: if `os.replace` fails the message is still appended, to the oversized
   file, and still printed. The append uses `os.open(…, 0o600)` rather than `open()` so the
@@ -191,6 +193,23 @@ Details that are load-bearing:
   inbox; a second on the same machine gets `--inbox <another path>`.
 * The inbox is **not** a server archive and not durable knowledge. It is this machine's receipt log;
   anything worth keeping still goes in the graph.
+
+## Names are bounded
+
+`Hub.send` and `Hub.broadcast` normalise every name a caller controls — `from`, and `room` for a
+broadcast — through `_norm_label`: stripped, truncated to `LABEL_CAP` (64), falling back to
+`agent`/`lobby` when empty. `to` was already normalised, at the ticket mint.
+
+This is a memory bound rather than cosmetics, and the tests pin the consequence rather than the
+size: `test_the_offline_queue_counts_what_it_actually_holds` and
+`test_the_recent_buffer_counts_what_it_actually_holds` assert that what those buffers physically
+hold is within the byte caps that exist to bound them. Both fail without the normalisation, which
+is the point — the accounting bug is what a refactor would silently reintroduce, not the cap.
+
+Truncation, not rejection: a send that failed because a caller passed a long agent name would be a
+worse outcome than one recorded under a shortened name, and refusing would be a behaviour change
+callers could trip over. `_label()` in both renderers already truncates further, to 48, for
+display.
 
 ## Safety
 

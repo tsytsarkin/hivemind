@@ -69,6 +69,7 @@ TICKET_TTL = 60.0            # seconds a mint stays redeemable; single use
 MAX_QUEUE = 100              # per-peer offline messages
 QUEUE_TTL = 3600.0           # seconds an undelivered message is worth keeping
 MAX_BODY = 256 * 1024        # per-frame body cap; big payloads belong in the blob store
+LABEL_CAP = 64               # agent labels and room names; see _norm_label for why it is a cap
 HEARTBEAT = 30.0             # server->client ping interval
 RECENT_MAX = 500             # recent frames kept retrievable by id
 RECENT_TTL = 3600.0          # ...and for how long
@@ -167,6 +168,23 @@ def _unb64(txt: str) -> bytes:
     return base64.urlsafe_b64decode(txt + "=" * (-len(txt) % 4))
 
 
+def _norm_label(value: Optional[str], default: str) -> str:
+    """Normalise anything that names a thing on the bus: a peer label, a sender, a room.
+
+    Truncating rather than rejecting, because a caller who passed a long agent name should have
+    its message delivered under a shortened one rather than refused — which is what `_label()` in
+    the renderers already does downstream, and what the ticket mints have always done here.
+
+    This is a memory bound, not cosmetics. `_remember` and the offline queue both account for the
+    bytes they hold as `sum(len(frame["body"]))`, so any OTHER caller-controlled field on a frame
+    is footprint those caps cannot see: before this was applied at the send path, an authenticated
+    peer could park ~200 MB per offline peer in `from`, and ~1 GB in the recent buffer, with both
+    caps reading it as zero. An identifier longer than this is not a name, it is a payload wearing
+    one.
+    """
+    return (value or default).strip()[:LABEL_CAP] or default
+
+
 class BusError(Exception):
     """Bad request against the bus (unknown peer, oversized body, spent ticket)."""
 
@@ -263,7 +281,7 @@ class Hub:
         ticket needs no signature for that — it is a random token this process holds in memory and
         burns on first use, so its user cannot be edited by whoever carries it.
         """
-        label = (label or "agent").strip()[:64]
+        label = _norm_label(label, "agent")
         with self._guard:
             peer_id = self._ensure_peer(label, meta).peer_id
             ticket = secrets.token_urlsafe(24)
@@ -286,7 +304,7 @@ class Hub:
         project ACL against that user (see authorize_key), and a user field the holder could edit
         would let any key holder nominate the owner of the project it is aimed at.
         """
-        label = (label or "agent").strip()[:64]
+        label = _norm_label(label, "agent")
         user = user or UNKNOWN_USER
         with self._guard:
             self._ensure_peer(label, meta)
@@ -461,6 +479,7 @@ class Hub:
 
     async def send(self, sender: str, to: str, body: str,
                    kind: str = "message", data: Optional[dict] = None) -> dict:
+        sender = _norm_label(sender, "agent")
         if len(body) > MAX_BODY:
             raise BusError(f"body is {len(body)} bytes; cap is {MAX_BODY}. "
                            f"Upload large payloads as an artifact and send the digest.")
@@ -468,6 +487,8 @@ class Hub:
         if target is None:
             known = [p.label for p in self._peers.values()]
             raise BusError(f"no peer {to!r}; connected peers: {known or '(none)'}")
+        # `to` is already normalised — it is the registered peer's label — but `sender` arrives
+        # straight from the `agent` argument of bus_send, so it is normalised here.
         frame = {"v": PROTOCOL_VERSION, "type": kind, "id": ulid(), "from": sender,
                  "to": target.label, "room": None, "body": body, "ts": _iso()}
         if data:
@@ -480,6 +501,9 @@ class Hub:
 
     async def broadcast(self, sender: str, body: str, room: str = "lobby",
                         data: Optional[dict] = None) -> dict:
+        # Both are caller-controlled and neither is counted by the queue or the recent buffer.
+        sender = _norm_label(sender, "agent")
+        room = _norm_label(room, "lobby")
         if len(body) > MAX_BODY:
             raise BusError(f"body is {len(body)} bytes; cap is {MAX_BODY}")
         frame = {"v": PROTOCOL_VERSION, "type": "broadcast", "id": ulid(), "from": sender,

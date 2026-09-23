@@ -117,6 +117,65 @@ async def test_offline_queue_is_bounded(hub):
     assert drained[-1]["body"] == f"m{bus_ws.MAX_QUEUE + 49}"   # newest kept
 
 
+def _caller_bytes(frame):
+    """The bytes of a frame that a caller chose. Everything else is fixed-width envelope."""
+    return sum(len(frame.get(k) or "") for k in ("body", "from", "to", "room"))
+
+
+@pytest.mark.anyio
+async def test_the_offline_queue_counts_what_it_actually_holds(hub):
+    """The byte cap counts BODIES — `sum(len(f["body"]))` — so any other caller-controlled field
+    is footprint it cannot see.
+
+    Measured before the send path normalised them: `from` comes straight from the `agent`
+    argument of bus_send and nothing capped it, so MAX_QUEUE frames with an empty body and a
+    multi-megabyte agent name held ~200 MB for an offline peer while the cap read it as 0 bytes.
+    That is the exact footprint QUEUE_BYTES exists to bound, reachable by any authenticated peer.
+    """
+    b, _, _ = connect(hub, "receiver")                      # never attached, so everything queues
+    payload = "\U0001F600" * (1024 * 1024)                   # a "name" of 1 Mi code points
+    for _ in range(20):
+        await hub.send(payload, "receiver", "")
+        await hub.broadcast(payload, "", room=payload)
+
+    held = sum(_caller_bytes(f) for f in b.queue)
+    assert held <= bus_ws.QUEUE_BYTES, \
+        "the queue must hold no more than its own accounting believes it holds"
+    assert all(len(f["from"]) <= bus_ws.LABEL_CAP for f in b.queue), "the name is a name"
+
+
+@pytest.mark.anyio
+async def test_the_recent_buffer_counts_what_it_actually_holds(hub):
+    """Same hole, same fix, wider blast radius: `_remember` keeps RECENT_MAX frames for an hour
+    for `bus_message`, and its byte trim counts bodies only. An uncapped name field there was
+    ~1 GB, held process-wide rather than per-peer."""
+    b, bws, _ = connect(hub, "receiver")
+    await hub.attach(b, bws)                                # connected: delivered, still remembered
+    payload = "\U0001F600" * (1024 * 1024)
+    for _ in range(40):                                     # 40 Mi, against a 32 MiB ceiling
+        await hub.send(payload, "receiver", "")
+
+    held = sum(_caller_bytes(f) for f in hub._recent)
+    assert held <= bus_ws.RECENT_BYTES, \
+        "the recent buffer must hold no more than its own accounting believes it holds"
+
+
+@pytest.mark.anyio
+async def test_a_long_agent_name_is_shortened_not_refused(hub):
+    """Truncation, not rejection: a caller who passes a long agent name should have its message
+    delivered under a shortened one. Refusing would be a behaviour change callers could trip
+    over, and `_label()` in the renderers already truncates downstream."""
+    b, bws, _ = connect(hub, "receiver")
+    await hub.attach(b, bws)
+    out = await hub.send("n" * 500, "receiver", "still delivered")
+    assert out["delivered"] is True
+    assert bws.sent[-1]["from"] == "n" * bus_ws.LABEL_CAP
+    assert bws.sent[-1]["body"] == "still delivered", "the body is untouched by any of this"
+
+    out = await hub.broadcast("  ", "hello", room="  ")
+    assert out["room"] == "lobby", "an empty name falls back rather than becoming empty"
+
+
 @pytest.mark.anyio
 async def test_a_send_that_races_a_dead_socket_is_queued_not_lost(hub):
     """The socket can die between the liveness check and the write."""
