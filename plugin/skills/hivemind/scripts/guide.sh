@@ -14,22 +14,27 @@ done
 HERE="$(cd "$(dirname "$0")" && pwd)"
 OFFLINE="$HERE/../references/OFFLINE.md"
 
-# Install the bus listener at a fixed, shell-expandable path.
+# Install the agent-runnable scripts at fixed, shell-expandable paths.
 #
 # bus_connect hands the agent a Monitor command, and a Monitor command runs in a plain shell where
 # — measured — neither CLAUDE_PLUGIN_ROOT nor CLAUDE_SKILL_DIR is set. So the command cannot name
 # the plugin directory, and the server cannot know it either. Copying the listener to a path built
-# only from $HOME makes one fixed string work on every machine. Refreshed on each skill load, so
-# it tracks the installed plugin version. Silent and best-effort: this must never fail the skill.
-LISTENER_SRC="$HERE/bus-listen.py"
-LISTENER_DST="${HIVEMIND_LISTENER:-$HOME/.hivemind/bus-listen.py}"
-if [ -f "$LISTENER_SRC" ]; then
-  if ! cmp -s "$LISTENER_SRC" "$LISTENER_DST" 2>/dev/null; then
-    mkdir -p "$(dirname "$LISTENER_DST")" 2>/dev/null &&
-      cp "$LISTENER_SRC" "$LISTENER_DST" 2>/dev/null &&
-      chmod +x "$LISTENER_DST" 2>/dev/null
-  fi
-fi
+# only from $HOME makes one fixed string work on every machine. The project-pin helper is here for
+# the same reason: /hivemind:project and the agent itself invoke it from a plain shell. (The
+# SessionStart hook can reach the plugin copy — hooks.json commands do get CLAUDE_PLUGIN_ROOT
+# substituted — and falls back to it when the skill has never loaded on this machine.)
+# Refreshed on each skill load, so both track the installed plugin version. Silent and
+# best-effort: this must never fail the skill.
+install_script() {           # $1 = file in this directory, $2 = destination path
+  [ -f "$HERE/$1" ] || return 0
+  cmp -s "$HERE/$1" "$2" 2>/dev/null && return 0
+  mkdir -p "$(dirname "$2")" 2>/dev/null &&
+    cp "$HERE/$1" "$2" 2>/dev/null &&
+    chmod +x "$2" 2>/dev/null
+  return 0
+}
+install_script bus-listen.py "${HIVEMIND_LISTENER:-$HOME/.hivemind/bus-listen.py}"
+install_script hivemind-project.py "${HIVEMIND_PIN_HELPER:-$HOME/.hivemind/hivemind-project.py}"
 CACHE_DIR="${HIVEMIND_CACHE_DIR:-$HOME/.cache/hivemind}"
 CACHE="$CACHE_DIR/guide-$SECTION.md"
 ETAG="$CACHE_DIR/guide-$SECTION.etag"

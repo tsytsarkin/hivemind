@@ -9,7 +9,7 @@ description: >-
   Hivemind REPLACES local memory: read it before any work and persist all work into it. Domain-agnostic — call schema_get and guide_get first to learn this project's vocabulary.
 allowed-tools: Bash(${CLAUDE_SKILL_DIR}/scripts/guide.sh *) Read
 metadata:
-  version: "1.0.1"
+  version: "1.1.0"
 ---
 
 # Hivemind
@@ -17,6 +17,33 @@ metadata:
 Hivemind is a **shared, versioned** knowledge graph + artifact store + tool registry served over
 MCP. The MCP tools (prefix `hivemind`) are connected once the plugin is configured. This file is a
 small bootstrap; the **authoritative, live** guidance comes from the server.
+
+
+## Every call names a project — pin it once, first
+
+A Hivemind server holds several **projects**: separate graphs, some shared with everyone, some
+private to one user. **Every tool takes a `project=<name>` argument, and write tools refuse when no
+project is resolvable** — deliberately, because a defaulted write is how private work would land in
+a graph everyone can read.
+
+- **If a project is pinned for this session** you will have been told which on the way in (the
+  plugin's `SessionStart` hook re-injects it on startup, `/clear` and compaction). Pass that name
+  as `project=` on every call.
+- **If nothing is pinned, ask once — do not pick for the user.** `project_list` shows what they can
+  use, grouped: shared with everyone, theirs, shared with them. Offer their private graph and a new
+  scratch project too, create it with `project_create` if they want a new one, then pin it:
+
+      python3 "$HOME/.hivemind/hivemind-project.py" --pin <name> --label "<what this is for>"
+
+  `/hivemind:project` runs that whole flow, including the create.
+- **The `project` echoed in a tool result is authoritative.** It is what the server actually used.
+  If it differs from what you meant, stop and say so rather than continuing to write.
+
+The pin is local state keyed by the session id: it survives a compaction, and a `--resume` lands
+back on the same project. It is a reminder for you, not an authority — the server takes the project
+from the argument you pass, and only if you pass none does it fall back to the project your server
+URL names. That fallback is why you pass the argument every time: omitting it writes into whatever
+the URL points at — usually the shared graph — with nothing to notice.
 
 
 ## Hivemind replaces your local memory

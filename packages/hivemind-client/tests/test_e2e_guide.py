@@ -46,8 +46,10 @@ def test_guide_tool_and_rest(server):
 
 def test_guide_sh_live_then_304(server, tmp_path):
     base, tok, proj = server
-    env = dict(os.environ, HIVEMIND_SERVER_URL=base, HIVEMIND_TOKEN=tok,
-               HIVEMIND_CACHE_DIR=str(tmp_path / "cache"))
+    # HOME is redirected because guide.sh installs the agent-runnable scripts under $HOME/.hivemind
+    # on every load; without this the suite writes into the developer's real home.
+    env = dict(os.environ, HOME=str(tmp_path / "home"), HIVEMIND_SERVER_URL=base,
+               HIVEMIND_TOKEN=tok, HIVEMIND_CACHE_DIR=str(tmp_path / "cache"))
     r1 = subprocess.run(["bash", str(PLUGIN_GUIDE_SH), "--section", "core"],
                         capture_output=True, text=True, env=env)
     assert r1.returncode == 0 and "live: guide 'core'" in r1.stdout

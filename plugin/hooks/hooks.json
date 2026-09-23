@@ -1,0 +1,17 @@
+{
+  "description": "Re-injects this session's Hivemind project pin on startup, clear and compact, so a rebuilt context never leaves the project choice behind.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/session-start\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
