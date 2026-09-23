@@ -89,6 +89,20 @@ UNKNOWN_USER = "unknown:bus"
 # Keyed by _scope(), never by project name — see there.
 _SECRETS: Dict[str, bytes] = {}
 
+# Projects that actually have a /p/<name>/ prefix in a live app. build_app fills this in as it
+# builds the mounts; nothing removes an entry, because Starlette never removes a route.
+#
+# This exists because bus_connect used to hand back a ws:// URL and a monitor_command for a project
+# created AFTER startup, where the whole prefix 404s. The listener then got a 403, classified it
+# `refused`, and printed "call bus_connect for a fresh URL" — so the agent looped. project_tools
+# already knew (its create reply says so) and so did project.md and SKILL.md; bus_connect is the
+# surface the agent acts on, so it has to say so itself.
+#
+# Keyed by directory for the same reason _scope() gives: nothing enforces one app per process, and
+# two deployments can hold a same-named project. Keyed by NAME, a project mounted in one app would
+# report itself reachable in the other.
+_MOUNTED: set = set()
+
 
 def _scope(project_dir: Path) -> str:
     """The key under which a project's hub and signing secret are held.
@@ -108,6 +122,32 @@ def _scope(project_dir: Path) -> str:
     makes it safe by construction.
     """
     return os.path.realpath(project_dir)
+
+
+def register_mount(project_dir: Path) -> None:
+    """Record that this project has its own /p/<name>/ routes. Called by app.build_app per mount."""
+    _MOUNTED.add(_scope(project_dir))
+
+
+def is_mounted(project_dir: Path) -> bool:
+    """Does /p/<name>/ exist for this project, or does the whole prefix 404 until a restart?"""
+    return _scope(project_dir) in _MOUNTED
+
+
+# What bus_connect and bus_send say instead of handing back a URL that cannot work. One wording,
+# because two spellings of "this project has no routes yet" would drift, and this one is what an
+# agent acts on.
+NOT_MOUNTED = ("project {name!r} has no /p/{name}/ routes yet, so it has no bus: the server builds "
+               "those mounts at startup and this project was created after it. Nothing here would "
+               "connect — the URL would 404 and the listener would report `refused` and ask you to "
+               "call bus_connect again, forever. Restart the server (deploy/restart.sh), then call "
+               "bus_connect again. Until then the project is fully usable on the project-neutral "
+               "/mcp endpoint with project={name!r}; only the bus, blob transfer and the guide and "
+               "skill REST routes need the restart.")
+
+
+def not_mounted_error(name: str) -> "BusError":
+    return BusError(NOT_MOUNTED.format(name=name))
 
 
 # The address the CURRENT caller used to reach us, captured per request by the ASGI middleware.

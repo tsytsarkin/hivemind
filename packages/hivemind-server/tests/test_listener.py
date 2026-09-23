@@ -193,6 +193,10 @@ def test_bus_connect_returns_a_command_a_plugin_only_machine_can_run(tmp_path):
         dir = tmp_path / "plugin-only"
 
     FakeProject.dir.mkdir()
+    # build_app does this for every project it mounts; this test stands in for build_app, and
+    # bus_connect now refuses a project with no /p/<name>/ prefix rather than handing back a URL
+    # that 404s. test_bus_connect_refuses_a_project_that_has_no_routes_yet covers the other side.
+    bus_ws.register_mount(FakeProject.dir)
     bus_ws_tools.attach(FakeMCP(), type("C", (), {"public_url": "http://box:8787"}))
 
     # The hub and the ws URL are resolved per CALL now, from the project of the call in flight —

@@ -75,6 +75,25 @@ From a shell: `hivemind bus connect <label>` · `listen --url …` · `peers` ·
 | Caller-supplied names | truncated to `LABEL_CAP` (64) at the send path | The queue and the recent buffer account for the **body** of each frame and nothing else, so any *other* caller-controlled field is footprint those caps cannot see. `from` is the `agent` argument of `bus_send`; before it was normalised, an authenticated peer could park ~200 MB per offline peer and ~1 GB in the recent buffer with both caps reading it as zero. What the cap leaves uncounted afterwards is 3 fields x 64 code points x 4 bytes = 768 B per frame, i.e. at most 75 KiB on top of `QUEUE_BYTES` per peer and 375 KiB on top of `RECENT_BYTES` — under a thousandth of either. Truncated rather than refused, matching the ticket mints and the renderers' `_label()`. |
 | Auth | reusable signed listen key (7 d), or a single-use 60 s ticket | The listener connects by URL and cannot set an `Authorization` header, so an authenticated MCP call mints a ticket. The long-lived bearer token never lands in a URL, a shell history or an access log. The default is the **listen key**: HMAC-signed over (label, expiry) with a per-project secret in `<project>/bus_secret`, so verification needs no table and a key keeps working across a server restart — a listener reconnects on its own instead of dying until a human notices. It grants only "join the bus as this label", expires, and is revoked wholesale by deleting the secret. |
 
+## A project created after startup has no bus
+
+`build_app` registers `WebSocketRoute("/p/<name>/bus/ws")` once per project, from the projects the
+registry held **at startup**. A project created later through `project_create` is fully usable on
+the neutral `/mcp` endpoint immediately, but its whole `/p/<name>/` prefix 404s until a restart —
+including the bus.
+
+`bus_connect` therefore refuses on such a project and names the restart, instead of minting a key
+and handing back a `ws_url`. That is not tidiness: measured, the URL it used to return produced a
+403, which the listener classifies `refused` and answers with *"call `bus_connect` for a fresh
+URL"* — so the agent called it again, got another dead URL, and looped. `bus_send` says the same
+thing in place of "peer offline; queued for reconnect", which on an unmounted project is a promise
+the server cannot keep: there is no route to reconnect through, so the message expires in the queue.
+
+`build_app` records the mounted set (`bus_ws.register_mount`, keyed by project **directory** for the
+same reason the hub and the signing secret are — nothing enforces one app per process) and
+`bus_connect` consults it. `test_bus_connect_refuses_a_project_that_has_no_routes_yet` pins both the
+refusal and the control: the same call on a project that *was* mounted still returns a working URL.
+
 ## The listener is shipped by the plugin, not the CLI
 
 A machine that installed the Claude Code plugin has the MCP tools and nothing else. `hivemind bus

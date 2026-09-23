@@ -6,6 +6,7 @@ import httpx
 import pytest
 from conftest import Lifespan, _call, _parse, _post
 
+from hivemind_server import bus_ws
 from hivemind_server import project_tools as pt
 from hivemind_server import projects_meta as pm
 from hivemind_server import schemas
@@ -553,6 +554,56 @@ async def test_a_new_project_is_immediately_usable_on_the_neutral_endpoint(serve
         # answering, not the ACL.
         r = await c.get("/p/nik.live/healthz", headers={"Authorization": f"Bearer {nik}"})
         assert r.status_code == 404
+
+
+@pytest.mark.anyio
+async def test_bus_connect_refuses_a_project_that_has_no_routes_yet(served):
+    """Measured before this refusal existed: project_create("nik.fresh2") then
+    bus_connect(label="box", project="nik.fresh2") returned ok:true with a monitor_command, a
+    ws_url and a `next` telling the agent to run it — while the whole /p/nik.fresh2/ prefix 404s
+    until a restart.
+
+    The listener then got a 403, classified it `refused`, printed "call bus_connect for a fresh
+    URL", and the agent looped. project_tools' create reply already said so, and so did project.md
+    and SKILL.md; bus_connect is the surface the agent acts on, so it has to say so itself.
+
+    The control at the end is the point: the same call on a project that IS mounted must still
+    hand back a working URL, or this "fix" would simply have broken the bus.
+    """
+    application, nik = served
+    transport = httpx.ASGITransport(app=application)
+    async with Lifespan(application), httpx.AsyncClient(transport=transport,
+                                                        base_url="http://t", timeout=30) as c:
+        _call(await _post(c, "", nik, "tools/call", {
+            "name": "project_create",
+            "arguments": {"name": "nik.fresh2", "schema": "bare"}}, 2))
+
+        out = _call(await _post(c, "", nik, "tools/call", {
+            "name": "bus_connect",
+            "arguments": {"label": "box", "project": "nik.fresh2"}}, 3))
+        assert out["ok"] is False and out["error_kind"] == "bus", out
+        assert "restart" in out["error"].lower(), out["error"]
+        assert "nik.fresh2" in out["error"], out["error"]
+        # No usable-looking credential or URL may come back with it: every one of these is a thing
+        # the agent would then act on, and none of them can work.
+        for leak in ("ws_url", "monitor_command", "listen_key", "ticket", "next"):
+            assert leak not in out, f"{leak} handed back for a project with no routes: {out}"
+        assert "ws://" not in out["error"] and "wss://" not in out["error"], out["error"]
+
+        # bus_send must not promise a reconnect that cannot happen either.
+        hub = bus_ws.hub_for(application.state.registry.get("nik.fresh2").dir)
+        hub.mint_ticket("box")                      # a peer exists, offline, with no way to attach
+        sent = _call(await _post(c, "", nik, "tools/call", {
+            "name": "bus_send",
+            "arguments": {"to": "box", "body": "hi", "project": "nik.fresh2"}}, 4))
+        assert sent["queued"] is True and "restart" in sent["note"].lower(), sent
+        assert "queued for reconnect" not in sent["note"], sent["note"]
+
+        # Control: `default` WAS mounted at build time, so the bus still works there.
+        ok = _call(await _post(c, "", nik, "tools/call", {
+            "name": "bus_connect",
+            "arguments": {"label": "box", "project": "default"}}, 5))
+        assert ok["ok"] is True and ok["ws_url"].endswith("/p/default/bus/ws"), ok
 
 
 def test_the_admin_cli_shares_as_the_project_owner(projects_dir, monkeypatch, capsys):

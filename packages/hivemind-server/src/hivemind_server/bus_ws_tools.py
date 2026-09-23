@@ -8,7 +8,8 @@ from __future__ import annotations
 
 from typing import Optional
 
-from .bus_ws import BusError, MAX_BODY, current_origin, hub_for, register_secret
+from .bus_ws import (BusError, MAX_BODY, current_origin, hub_for, is_mounted, not_mounted_error,
+                     register_secret)
 from .envelope import RO, WRITE, current_project, envelope as _envelope
 from .identity import current_identity
 
@@ -53,6 +54,14 @@ def attach(mcp, cfg) -> None:
                           "stable and descriptive (the machine or the job, not a random id).")
     @_envelope
     def bus_connect(label: str, meta: Optional[dict] = None) -> dict:
+        # Before anything is minted. A project created after startup has no /p/<name>/ prefix at
+        # all, so every credential handed out here would open a URL that 404s — and the listener
+        # reads that 403 as `refused` and tells its agent to call bus_connect for a fresh URL,
+        # which produces the same dead URL. Refusing with the restart named is the only answer
+        # that terminates.
+        project = current_project()
+        if not is_mounted(project.dir):
+            raise not_mounted_error(project.name)
         hub = _hub()
         # Both credentials record WHO asked for them, from the token rather than from an argument.
         # The WS handshake re-checks that user against the project ACL, which is the only thing
@@ -95,7 +104,17 @@ def attach(mcp, cfg) -> None:
                           "EPHEMERAL — anything worth keeping goes in the graph.")
     @_envelope
     def bus_send(to: str, body: str, agent: str = "agent") -> dict:
-        return _run(_hub().send(agent, to, body))
+        out = _run(_hub().send(agent, to, body))
+        # "queued for reconnect" is a promise, and on an unmounted project it is one the server
+        # cannot keep: there is no ws route for a listener to reconnect THROUGH, so the message
+        # sits in the queue until QUEUE_TTL drops it. Say that instead. Hub.send stays unaware of
+        # mounts — it answers for a bus, not for a URL space.
+        if out.get("queued") and not is_mounted(current_project().dir):
+            out["note"] = ("peer offline, and this project has no /p/<name>/ bus route to "
+                           "reconnect through until the server is restarted — the message will "
+                           "expire in the queue rather than arrive. Restart the server, then have "
+                           "the peer call bus_connect.")
+        return out
 
     @mcp.tool(annotations=WRITE,
               description="Send a message to every other connected peer in a room (default "

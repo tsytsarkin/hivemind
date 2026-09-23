@@ -42,6 +42,8 @@ a graph everyone can read.
   reach it immediately via `project=<name>`, but `/p/<name>/…` answers 404 until then — so the
   `hivemind` CLI cannot upload artifacts to it or join its bus yet. Use an existing project for
   those, or say that a restart is needed; do not read the 404 as the project having failed.
+  `bus_connect` refuses outright on such a project and names the restart, rather than handing back
+  a `ws_url` that cannot connect — if you get that refusal, do not retry it in a loop.
 
 The pin is local state keyed by the session id: it survives a compaction, and a `--resume` lands
 back on the same project. It is a reminder for you, not an authority — the server takes the project

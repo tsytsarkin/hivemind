@@ -270,6 +270,11 @@ def build_app(cfg: Optional[Config] = None) -> Starlette:
         # listen key signed with this secret, and no tool call need have happened first. Without it
         # bus_ws._secret would mint a throwaway one and reject the key.
         _bus_ws_mod.register_secret(project.dir)
+        # ...and record that this project HAS a /p/<name>/ prefix, which is the thing bus_connect
+        # cannot otherwise know: a project created through project_create is served by the neutral
+        # /mcp immediately but gets no mount until the next build_app, so a ws URL for it would
+        # 404. Recorded here, beside the mount it describes, so the two cannot disagree.
+        _bus_ws_mod.register_mount(project.dir)
         # The bus WebSocket is mounted at the Starlette level: MCPServer.custom_route registers
         # HTTP methods only, so a ws route cannot go through it. Auth is the connect ticket in the
         # query string (see bus_ws), not the bearer header, because the listener is launched by
