@@ -31,8 +31,14 @@ packs/<name>/
   }
 }
 ```
-The engine enforces these **traits**, never the type *names* — a `contradicts` edge is just an
+The engine acts on these **traits**, never on the type *names* — a `contradicts` edge is just an
 `assertive` type; a `calls` graph is just a `versioned:false` type. (See [data-model.md](data-model.md).)
+
+Not all of them are enforced, and a pack author should know which: `versioned`, `symmetric`,
+`acyclic`, `assertive` and `src_types`/`dst_types` change what a write or a read does;
+`transitive`, `cardinality` and `directed` are stored and returned by `schema_get`, but no engine
+code reads them — they document intent. Depth in `graph_neighbors`, not `transitive`, is what
+reaches A→C.
 
 ## Applying a pack
 ```sh
