@@ -94,7 +94,9 @@ def _scope(project_dir: Path) -> str:
     several, and an embedding may too — and two deployments can hold a same-named project. Keyed by
     name, the second build_app to run would overwrite the first's signing secret and both would
     share one hub, so a listen key minted against one deployment would verify against the other's
-    and admit its holder to that bus. Same hazard, same fix, same key as projects_meta._CACHE.
+    and admit its holder to that bus. Same hazard, and the same shape of fix, as the one
+    projects_meta._CACHE applies to its own name collision (that one keys on the literal
+    project.json path, not on this; the two need not agree, they only need to be per-directory).
 
     realpath, not str(): two spellings of ONE directory — a relative path, or a data root reached
     through a symlink — would split the hub and the secret in two, so a message sent by a tool
@@ -293,8 +295,13 @@ class Hub:
         return {"listen_key": f"hk1.{body}.{_b64(sig)}", "label": label, "user": user,
                 "expires_in": LISTEN_KEY_TTL}
 
-    def redeem_key(self, key: str) -> Optional[tuple]:
-        """Verify a listen key and return (peer, user), creating the peer after a restart.
+    def verify_key(self, key: str) -> Optional[tuple]:
+        """Check a listen key's signature and expiry; return (label, user). NO SIDE EFFECTS.
+
+        Split from redeem_key because the project ACL runs between the two, and nothing that has
+        not passed it may touch the registry. The registry is keyed by LABEL and the label is
+        chosen by whoever minted the key, so a write from an unauthorized caller lands on a peer it
+        named rather than one it owns — see authorize_key.
 
         A key in the pre-user format has four fields, not five, so it fails to unpack and is
         refused. That is deliberate: such a key names nobody, so there is no access to re-check and
@@ -317,10 +324,23 @@ class Hub:
             user = _unb64(user_b64).decode()
         except (ValueError, UnicodeDecodeError):
             return None
-        # Re-create on demand: after a restart the registry is empty, and refusing here would mean
-        # every listener stayed dead until a human noticed.
+        return label, user
+
+    def admit(self, label: str) -> _Peer:
+        """The peer for a connection that HAS passed the ACL, created on demand.
+
+        Re-create on demand: after a restart the registry is empty, and refusing here would mean
+        every listener stayed dead until a human noticed. Reached only from authorize_key, after
+        can_access — that ordering is what keeps an unauthorized caller out of the registry.
+        """
         with self._guard:
-            return self._ensure_peer(label, None), user
+            return self._ensure_peer(label, None)
+
+    def redeem_key(self, key: str) -> Optional[tuple]:
+        """verify_key plus the peer it names. Callers that must gate on the ACL use the two halves
+        separately (authorize_key); this is the whole handshake for an in-process caller."""
+        got = self.verify_key(key)
+        return None if got is None else (self.admit(got[0]), got[1])
 
     def _ensure_peer(self, label: str, meta: Optional[dict]) -> _Peer:
         """Get-or-create the peer for a label. Caller holds the guard."""
@@ -554,39 +574,47 @@ def authorize_key(hub: Hub, key: str, project_dir: Path, project_name: str, *,
 
     Returns (peer, user), because authorising the handshake is not authorising the socket: the
     caller keeps the user so it can ask again while the connection is open.
+
+    The peer is materialised only AFTER can_access, and a refusal writes nothing at all. That
+    ordering is the whole defence, because peers are keyed by LABEL while authorization is keyed by
+    USER and the label is chosen by whoever mints the credential: the two do not name the same
+    principal, so any write from this path would land on a peer the caller merely named. Measured,
+    when a refusal used to drop the peer it resolved: a revoked member holding a key minted under
+    another agent's label destroyed that agent's queued mail, and — because forget(force=True) also
+    clears the reprieve _forget_locked gives a peer whose listener has not attached yet — made that
+    agent's own bus_connect ticket resolve to a deleted peer, refused 4401, replayable at will.
+
+    Recording the minting user on _Peer and forgetting only "its own" peer does NOT fix that, and
+    it was measured too: _ensure_peer is get-or-create by label, so whichever rule names the owner,
+    the attacker just mints on the other side of the victim. Owner-on-create leaves the victim
+    exposed when the attacker mints FIRST; letting an authenticated mint re-claim leaves them
+    exposed when it mints LAST. Not writing at all is the only rule with no ordering in it.
     """
-    return _authorized(hub, hub.redeem_key(key), project_dir, project_name, require_auth)
+    got = hub.verify_key(key)
+    if got is None:
+        return None
+    label, user = got
+    if not may_access(user, project_dir, project_name, require_auth=require_auth):
+        return None
+    return hub.admit(label), user
 
 
 def authorize_ticket(hub: Hub, ticket: str, project_dir: Path, project_name: str, *,
                      require_auth: bool = True) -> Optional[tuple]:
     """Burn the ticket AND re-check the ACL. Same rule as a key, on a much shorter fuse: a ticket
-    is single-use and lasts `TICKET_TTL`, but the socket it opens lasts as long as any other."""
-    return _authorized(hub, hub.redeem(ticket), project_dir, project_name, require_auth)
+    is single-use and lasts `TICKET_TTL`, but the socket it opens lasts as long as any other.
 
-
-def _authorized(hub: Hub, got: Optional[tuple], project_dir: Path, project_name: str,
-                require_auth: bool) -> Optional[tuple]:
-    """Shared tail of both credentials: (peer, user) if that user may still reach the project."""
+    Nothing to undo on a refusal here: redeem() only looks a peer up, and the one it finds was
+    created by the authenticated bus_connect that minted this ticket. A refused ticket is then
+    exactly an expired one, which is how they were always treated.
+    """
+    got = hub.redeem(ticket)
     if got is None:
         return None
     peer, user = got
-    if may_access(user, project_dir, project_name, require_auth=require_auth):
-        return got
-    # Denied — and the peer must not be left parked. redeem_key CREATES one on demand (that is what
-    # lets a listener reconnect after a restart), and _forget_locked refuses to sweep a peer once
-    # it holds queued mail, so a refused credential would otherwise leave a label that bus_peers
-    # lists and bus_send queues into, answering "queued for reconnect" about someone whose
-    # reconnect can no longer be authorised. Nothing in that queue is ever delivered: draining it
-    # needs a fresh attach, which needs this check again.
-    #
-    # Only when it is offline. A label is caller-chosen at mint time, so forcing a LIVE peer out
-    # would let a revoked member evict another agent by presenting a key it minted under that
-    # agent's label — revocation must not hand anyone a new lever. A live socket that is genuinely
-    # revoked is closed by its own re-check within one HEARTBEAT anyway.
-    if not peer.online:
-        hub.forget(peer, force=True)     # force: the queue guard is exactly what we are clearing
-    return None
+    if not may_access(user, project_dir, project_name, require_auth=require_auth):
+        return None
+    return peer, user
 
 
 async def websocket_endpoint(ws: Any, project_name: str, project_dir: Path, *,
@@ -647,8 +675,10 @@ async def websocket_endpoint(ws: Any, project_name: str, project_dir: Path, *,
         # frame would carry the loop well beyond `recheck_at`: a client that spoke at t+29.9 bought
         # itself a fresh 30 seconds and doubled its own window to 2×HEARTBEAT. A client that has
         # stopped cooperating is precisely the threat model for a revocation check, so the wait is
-        # clamped to the time remaining. HEARTBEAT is then the true upper bound on how long a
-        # revoked listener keeps receiving, whatever it sends.
+        # clamped to the time remaining. HEARTBEAT is then the upper bound on how long a revoked
+        # listener keeps receiving, whatever it SENDS. Not "whatever it does": a client that stops
+        # READING applies back-pressure to the send_text and close awaits below, and those are the
+        # only awaits here the deadline does not clamp.
         recheck_at = _now() + HEARTBEAT
         while True:
             if _now() >= recheck_at:
@@ -664,9 +694,12 @@ async def websocket_endpoint(ws: Any, project_name: str, project_dir: Path, *,
                         # the file is fixed — they do not recover on their own the way an HTTP
                         # caller does. An operator has to be able to tell that from a real
                         # revocation, which is what app._note_metadata does for the HTTP path.
-                        # Logged only on eviction, never on a refused handshake: this is bounded by
-                        # the sockets already admitted, while a handshake is not, and an outsider
-                        # could flood the log with refusals on purpose.
+                        # Logged on eviction only, never on a refused handshake. Not because an
+                        # outsider could flood it — they cannot reach it at all, since a bad
+                        # signature returns before any metadata is read — but because eviction is
+                        # BOUNDED at one line per socket already admitted, whereas nothing limits
+                        # how often a credential holder retries a handshake, and each attempt would
+                        # log another line for as long as the file stayed broken.
                         log.warning("bus: dropping peer %r on project %r: %s — failing closed; "
                                     "listeners must re-run bus_connect once this is fixed",
                                     peer.label, project_name, problem)
@@ -674,12 +707,22 @@ async def websocket_endpoint(ws: Any, project_name: str, project_dir: Path, *,
                     # client: the listener treats 4401 as terminal and tells its agent to re-run
                     # bus_connect. No oracle either — this caller was already admitted.
                     await ws.close(code=4401)
-                    # Forget it outright rather than parking it: detach() alone leaves the peer in
+                    # Then drop the peer, rather than leaving it parked: detach() alone keeps it in
                     # the registry for as long as it holds queued mail, so an evicted label would
                     # stay listed by bus_peers and bus_send would keep telling senders "queued for
-                    # reconnect" about someone whose reconnect can no longer be authorised. The
-                    # queue goes with it, which is right — a revoked peer must never drain one.
-                    hub.forget(peer, force=True)
+                    # reconnect" about someone whose reconnect can no longer be authorised.
+                    #
+                    # Void the mail and then use the ORDINARY sweep rule — deliberately not
+                    # force=True. force bypasses two guards, and only one of them is the queue:
+                    # the other reprieves a peer whose listener has not attached yet, and
+                    # _forget_locked records the regression that reprieve exists to prevent. A
+                    # label is caller-chosen at mint time, so this peer may be one another agent
+                    # is mid-connect on; forcing past that would refuse ITS bus_connect. Voiding
+                    # the queue first is what this eviction is entitled to do — a revoked peer
+                    # must never drain one — and forget() then declines if a connect is in flight.
+                    await hub.detach(peer, ws)
+                    peer.queue.clear()
+                    hub.forget(peer)
                     break
             # Heartbeat: if nothing arrives within the window, ping. A dead peer fails here and
             # we drop it, which is what keeps `bus_peers` honest without a TTL sweeper. The wait

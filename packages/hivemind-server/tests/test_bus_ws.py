@@ -448,17 +448,18 @@ def _private_project(tmp_path, name="nik.private", members=("ana",)):
     from hivemind_server import projects_meta as pm
 
     proj_dir = tmp_path / name
-    proj_dir.mkdir()
+    proj_dir.mkdir(parents=True)
     pm.save(proj_dir, pm.ProjectMeta(name=name, visibility="private", owner="nik",
                                      members=list(members)))
     return proj_dir
 
 
-def _revoke(proj_dir, name="nik.private"):
+def _revoke(proj_dir, name="nik.private", keep=()):
+    """Rewrite the member list. `keep` is who survives, so one member can be revoked alone."""
     from hivemind_server import projects_meta as pm
 
     meta = pm.load(proj_dir, name)
-    meta.members = []
+    meta.members = list(keep)
     pm.save(proj_dir, meta)
 
 
@@ -675,24 +676,86 @@ async def test_a_socket_dropped_for_unreadable_metadata_says_so_in_the_log(tmp_p
 
 
 @pytest.mark.anyio
-async def test_a_refused_handshake_leaves_no_peer_for_senders_to_queue_into(tmp_path):
-    """redeem_key CREATES the peer on demand — that is what lets a listener reconnect after a
-    restart — so a credential the ACL then refuses would leave a label behind that bus_peers lists
-    and bus_send queues into, and _forget_locked will not sweep a peer once it holds mail. Nothing
-    in that queue is ever delivered: draining it needs a fresh attach, which re-runs the ACL."""
+async def test_a_refused_handshake_writes_nothing_to_the_registry(tmp_path):
+    """A credential the ACL refuses must leave no trace at all.
+
+    verify_key checks the signature, the ACL runs, and only then is the peer materialised. The
+    ordering is the defence, not a tidy-up afterwards: the registry is keyed by LABEL and the label
+    is chosen by whoever minted the key, so ANY write from this path lands on a peer the caller
+    merely named rather than one it owns — which is what the two tests below measure."""
     proj_dir = _private_project(tmp_path)
     hub = bus_ws.hub_for(proj_dir)
     k = hub.mint_listen_key("ana-box", user="ana")["listen_key"]
-    assert hub.peer("ana-box") is not None, "minting creates it; the refusal is what must clear it"
+    hub.forget(hub.peer("ana-box"), force=True)      # start from an empty registry
     _revoke(proj_dir)
 
     ws = HandshakeWS(key=k)
     await bus_ws.websocket_endpoint(ws, "nik.private", proj_dir)
     assert ws.accepted is False
-    assert hub.peer("ana-box") is None, "a refused credential must not leave a peer behind"
+    assert hub.peer("ana-box") is None, "a refused credential must not create a peer"
     with pytest.raises(BusError) as e:
         await hub.send("nik", "ana-box", "are you still there?")
     assert "no peer" in str(e.value), "the sender must be told, not handed a silent queue"
+
+
+@pytest.mark.anyio
+async def test_a_revoked_members_refusal_cannot_touch_another_agents_queued_mail(tmp_path):
+    """Peers are keyed by LABEL; authorization is keyed by USER; the label is caller-chosen at mint
+    time. So a revoked member holding a key minted under someone else's label must not be able to
+    reach that agent's peer by presenting it. Measured before the fix: the refusal destroyed it.
+
+    Note this is ordering-independent on purpose. Recording the minting user on _Peer and dropping
+    only "its own" peer does not achieve that — _ensure_peer is get-or-create by label, so
+    owner-on-create fails when the attacker mints FIRST, and mint-re-claims fails when it mints
+    LAST. Both orderings are exercised here."""
+    for who_mints_first in ("attacker", "victim"):
+        proj_dir = _private_project(tmp_path / who_mints_first, members=("ana", "nik"))
+        hub = bus_ws.hub_for(proj_dir)
+        if who_mints_first == "attacker":
+            ana_key = hub.mint_listen_key("nik-box", user="ana")["listen_key"]
+            hub.mint_listen_key("nik-box", user="nik")
+        else:
+            hub.mint_listen_key("nik-box", user="nik")
+            ana_key = hub.mint_listen_key("nik-box", user="ana")["listen_key"]
+        await hub.send("carol", "nik-box", "for nik's eyes")
+        _revoke(proj_dir, keep=["nik"])              # ana alone loses access
+
+        ws = HandshakeWS(key=ana_key)
+        await bus_ws.websocket_endpoint(ws, "nik.private", proj_dir)
+        assert ws.accepted is False, who_mints_first
+
+        peer = hub.peer("nik-box")
+        assert peer is not None, f"[{who_mints_first}] the victim's peer must survive the refusal"
+        assert [m["body"] for m in peer.queue] == ["for nik's eyes"], \
+            f"[{who_mints_first}] the victim's queued mail must survive it too"
+
+
+@pytest.mark.anyio
+async def test_a_revoked_members_refusal_cannot_kill_another_agents_pending_connect(tmp_path):
+    """_forget_locked reprieves a peer whose listener has not attached yet, and the comment there
+    records the regression that reprieve exists to prevent: a swept peer made the ticket resolve to
+    a deleted peer and the connect was refused. A revoked member must not be able to re-open it by
+    presenting a key minted under the connecting agent's label. Both orderings, as above."""
+    for who_mints_first in ("attacker", "victim"):
+        proj_dir = _private_project(tmp_path / who_mints_first, members=("ana", "nik"))
+        hub = bus_ws.hub_for(proj_dir)
+        if who_mints_first == "attacker":
+            ana_key = hub.mint_listen_key("nik-box2", user="ana")["listen_key"]
+            ticket = hub.mint_ticket("nik-box2", user="nik")["ticket"]
+        else:
+            ticket = hub.mint_ticket("nik-box2", user="nik")["ticket"]
+            ana_key = hub.mint_listen_key("nik-box2", user="ana")["listen_key"]
+        _revoke(proj_dir, keep=["nik"])
+
+        refused = HandshakeWS(key=ana_key)
+        await bus_ws.websocket_endpoint(refused, "nik.private", proj_dir)
+        assert refused.accepted is False, who_mints_first
+
+        victim = HandshakeWS(ticket=ticket)
+        await bus_ws.websocket_endpoint(victim, "nik.private", proj_dir)
+        assert victim.accepted is True, \
+            f"[{who_mints_first}] nik's own connect must still succeed"
+        assert victim.closed_with is None, f"[{who_mints_first}] and must not be refused 4401"
 
 
 @pytest.mark.anyio
@@ -737,3 +800,79 @@ def test_two_spellings_of_one_directory_are_one_hub_and_one_secret(tmp_path):
     assert bus_ws.hub_for(real) is bus_ws.hub_for(link)
     k = bus_ws.hub_for(real).mint_listen_key("mac", user="nik")["listen_key"]
     assert bus_ws.hub_for(link).redeem_key(k) is not None, "one directory, one signing secret"
+
+
+@pytest.mark.anyio
+async def test_eviction_spares_a_peer_whose_connect_is_in_flight(tmp_path, monkeypatch):
+    """The eviction voids the revoked peer's mail and then uses the ORDINARY sweep rule. It must
+    not force past the reprieve _forget_locked gives a peer whose listener has not attached yet: a
+    label is caller-chosen, so the evicted peer may be one another agent is mid-connect on."""
+    import asyncio as _asyncio
+
+    monkeypatch.setattr(bus_ws, "HEARTBEAT", 0.01)
+    proj_dir = _private_project(tmp_path, members=("ana", "nik"))
+    hub = bus_ws.hub_for(proj_dir)
+    ana_key = hub.mint_listen_key("nik-box3", user="ana")["listen_key"]
+    ticket = hub.mint_ticket("nik-box3", user="nik")["ticket"]     # nik's connect in flight
+
+    class SilentWS(HandshakeWS):
+        waits = 0
+
+        async def receive_text(self):
+            self.waits += 1
+            if self.waits == 1:
+                _revoke(proj_dir, keep=["nik"])
+            if self.waits > 20:
+                raise ConnectionError("recheck never fired")
+            await _asyncio.sleep(3600)
+
+    evicted = SilentWS(key=ana_key)
+    await bus_ws.websocket_endpoint(evicted, "nik.private", proj_dir)
+    assert evicted.closed_with == 4401, "ana's live socket must still be evicted"
+
+    victim = HandshakeWS(ticket=ticket)
+    await bus_ws.websocket_endpoint(victim, "nik.private", proj_dir)
+    assert victim.accepted is True, "nik's pending connect must survive ana's eviction"
+    assert victim.closed_with is None
+
+
+@pytest.mark.anyio
+async def test_eviction_voids_the_revoked_peers_queued_mail(tmp_path, monkeypatch):
+    """The eviction uses the plain sweep rule, which declines while a peer holds mail — so it has
+    to void that mail first or a revoked peer stays parked, which is the point of dropping it. A
+    queue can exist at eviction time: a send that fails mid-flight marks the peer offline and
+    queues, and the re-check still fires afterwards."""
+    import asyncio as _asyncio
+
+    monkeypatch.setattr(bus_ws, "HEARTBEAT", 0.01)
+    proj_dir = _private_project(tmp_path)
+    hub = bus_ws.hub_for(proj_dir)
+    k = hub.mint_listen_key("ana-box", user="ana")["listen_key"]
+
+    class HalfDeadWS(HandshakeWS):
+        """A socket that has stopped accepting message frames but still takes keepalives — which is
+        how _deliver reaches its queueing branch: the failed write marks the peer offline."""
+
+        waits = 0
+
+        async def send_text(self, text: str) -> None:
+            frame = json.loads(text)
+            if frame.get("type") == "message":
+                raise ConnectionError("the write side is gone")
+            self.sent.append(frame)
+
+        async def receive_text(self):
+            self.waits += 1
+            if self.waits == 1:
+                await hub.send("carol", "ana-box", "queued when the write failed")
+                assert hub.peer("ana-box").queue, "the failed write must have queued it"
+                _revoke(proj_dir)
+            if self.waits > 20:
+                raise ConnectionError("recheck never fired")
+            await _asyncio.sleep(3600)
+
+    ws = HalfDeadWS(key=k)
+    await bus_ws.websocket_endpoint(ws, "nik.private", proj_dir)
+    assert ws.closed_with == 4401
+    assert hub.peer("ana-box") is None, \
+        "a revoked peer holding queued mail must still be dropped, not parked"
