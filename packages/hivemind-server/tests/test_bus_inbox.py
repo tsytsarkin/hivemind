@@ -393,17 +393,52 @@ def test_a_failed_rotation_never_costs_the_message(listener, tmp_path, monkeypat
     assert (blocked / "occupied").exists(), "a rotation that cannot happen changes nothing"
 
 
+def _worst_case_record():
+    """The largest single line the server can ever make a listener write, built rather than
+    reasoned about.
+
+    `MAX_BODY` counts **code points**, so a body of astral characters is server-legal, and
+    `ensure_ascii` writes each one as a surrogate PAIR — twelve bytes, not the six a BMP character
+    costs. Such a body is only 1.00 MiB on the wire under UTF-8, comfortably inside `MAX_FRAME`,
+    so this is reachable traffic and not a construction.
+    """
+    from hivemind_server.bus_ws import MAX_BODY
+    frame = {"v": 1, "type": "message", "id": "01K5ZQ2ZABCDEFGHJKMNPQRSTV", "from": "mac-studio",
+             "to": "lab-box", "room": None, "body": "\U0001F600" * MAX_BODY,
+             "ts": "2026-09-23T10:00:00Z"}
+    assert len(frame["body"]) == MAX_BODY, "exactly at the server's limit, in code points"
+    assert len(frame["body"].encode("utf-8")) <= _load().MAX_FRAME, "and it fits a wire frame"
+    return len(json.dumps(frame, ensure_ascii=True)) + 1
+
+
+def test_the_worst_case_record_is_measured_not_assumed():
+    """Every quantified ceiling for this file has so far been written from an expansion factor
+    someone reasoned out, and the factor has been wrong twice (x1, then x6; it is x12). So derive
+    it: this is the number the docs quote, and it will move on its own if MAX_BODY does."""
+    from hivemind_server.bus_ws import MAX_BODY
+    worst = _worst_case_record()
+    assert worst == 12 * MAX_BODY + 159, "12 bytes per code point, plus the frame's envelope"
+    assert 3.00 <= worst / 1048576 < 3.01, "3.00 MiB — the figure docs/bus.md states"
+    ceiling = 2 * (4 * 1024 * 1024 + worst)
+    assert 14.00 <= ceiling / 1048576 < 14.01, "and 14.00 MiB across both generations"
+
+
 def test_both_halves_agree_on_the_cap():
     from hivemind import bus as client
     from hivemind_server.bus_ws import MAX_BODY
     plugin = _load()
     assert plugin.INBOX_MAX_BYTES == client.INBOX_MAX_BYTES == 4 * 1024 * 1024
     assert plugin.MAX_FRAME == client.MAX_FRAME, "both halves must accept the same frame size"
-    # The binding floor is the largest record the SERVER will ever hand a listener: MAX_BODY is
-    # counted in characters, and ensure_ascii turns a BMP character into six bytes.
+    # The floor that binds is the largest record the server can hand a listener — see
+    # _worst_case_record. 6 * MAX_BODY, which this assertion used to say, is 1.50 MiB: LOWER than
+    # the MAX_FRAME floor it replaced, so it passed at caps where one record was twice a whole
+    # generation. 12 * MAX_BODY is 3.00 MiB, above both.
+    worst = _worst_case_record()
     for mod in (plugin, client):
-        assert mod.INBOX_MAX_BYTES >= 6 * MAX_BODY, \
+        assert mod.INBOX_MAX_BYTES >= 12 * MAX_BODY, \
             "a maximal server-legal message must fit in one generation, or it could never land"
+        assert mod.INBOX_MAX_BYTES >= worst, "and the measured record, envelope included, must fit"
+        assert mod.INBOX_MAX_BYTES > mod.MAX_FRAME, "never below the floor this replaced"
 # ── write(2) is allowed to take less than you gave it, and the count is the only way to know ──
 class _PartialOS:
     """Stands in for the `os` a listener module imported, shortening every write.
@@ -504,3 +539,60 @@ def test_an_inherited_wider_mode_is_narrowed_at_startup(tmp_path, permissive_uma
         assert rolled.stat().st_mode & 0o777 == 0o600, "and so is the generation beside it"
         assert json.loads(inbox.read_text())["body"] == "from an earlier version", "content kept"
         assert json.loads(rolled.read_text())["body"] == "and its rolled generation"
+
+
+def test_a_tear_that_placed_nothing_leaves_no_blank_line(listener, tmp_path, monkeypatch):
+    """A write can fail having placed nothing at all, so "torn" does not imply "a fragment is
+    there". Prefixing a newline on that assumption puts a blank line at the top of the file, and
+    the skill tells agents an unparseable line means a message was cut short — a blank one means
+    nothing was."""
+    monkeypatch.setattr(listener, "os", _PartialOS(chunk=64, allowed=0))
+    inbox = tmp_path / "i.jsonl"
+    line = listener.render({"type": "message", "id": "01GONE", "from": "p", "body": "L" * 900},
+                           inbox=inbox)
+    assert "i.jsonl" not in line, "nothing landed, so nothing is promised"
+    assert inbox.read_text() == "", "and nothing is on disk either"
+    assert str(inbox) in listener._TORN, "but the next write is told to check"
+
+    monkeypatch.setattr(listener, "os", os)
+    listener.render({"type": "message", "id": "01NEXT", "from": "p", "body": "fine"}, inbox=inbox)
+    lines = inbox.read_text().splitlines()
+    assert len(lines) == 1 and json.loads(lines[0])["id"] == "01NEXT", "no blank line above it"
+
+
+def test_a_rotation_absorbs_a_torn_line_without_leaving_a_blank_one(listener, tmp_path,
+                                                                   monkeypatch):
+    """The fragment leaves with the generation that rolls away, so the fresh file starts clean."""
+    inbox, rolled = tmp_path / "i.jsonl", tmp_path / "i.jsonl.1"
+    monkeypatch.setattr(listener, "os", _PartialOS(chunk=64, allowed=1))
+    listener.render({"type": "message", "id": "01TORN", "from": "p", "body": "L" * 900},
+                    inbox=inbox)
+    assert str(inbox) in listener._TORN
+
+    monkeypatch.setattr(listener, "os", os)
+    monkeypatch.setattr(listener, "INBOX_MAX_BYTES", 1)      # the next record must roll first
+    listener.render({"type": "message", "id": "01FRESH", "from": "p", "body": "clean"},
+                    inbox=inbox)
+
+    assert rolled.exists(), "the generation holding the fragment rolled away"
+    lines = inbox.read_text().splitlines()
+    assert len(lines) == 1 and json.loads(lines[0])["id"] == "01FRESH", "no blank first line"
+
+
+def test_the_rolled_generation_is_not_followed_when_it_is_a_symlink(listener, tmp_path,
+                                                                   permissive_umask):
+    """Narrowing an inherited mode is a new operation on `.1` — a path this code otherwise only
+    ever renames onto, and os.replace does not follow its destination. os.stat/os.chmod do, so a
+    link left there would hand the chmod to whatever it points at."""
+    victim = tmp_path / "someone-elses-file"
+    victim.write_text("not ours")
+    os.chmod(victim, 0o666)
+    inbox = tmp_path / "i.jsonl"
+    inbox.write_text('{"body": "ours"}\n')
+    os.chmod(inbox, 0o644)
+    os.symlink(str(victim), str(inbox) + ".1")
+
+    assert listener.prepare_inbox(inbox) == str(inbox)
+    assert inbox.stat().st_mode & 0o777 == 0o600, "our own file is still narrowed"
+    assert victim.stat().st_mode & 0o777 == 0o666, "the link's target must be left alone"
+    assert os.path.islink(str(inbox) + ".1"), "and the link itself is not replaced"

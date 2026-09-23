@@ -136,11 +136,19 @@ Details that are load-bearing:
   blob store to 94 GB.
 * **The size on disk is 8 MiB plus at most one record per generation** — not "at most 8 MiB". The
   size is checked *before* the append, so every generation ends one whole record over the cap
-  (measured: a `.1` of 4,194,648 B). With ordinary traffic that overshoot is ~1 KB; with
-  server-legal maxima it is not — `MAX_BODY` is 256 KiB **of characters**, and `ensure_ascii`
-  turns a non-ASCII character into six bytes, so one record can reach 1.50 MiB and the pair of
-  files ~11.00 MiB. That is the honest ceiling. The cap is set above that worst-case record on
-  purpose: below it, a maximal message could never be recorded at all.
+  (measured: a `.1` of 4,194,648 B). With ordinary traffic that overshoot is ~1 KB. With
+  server-legal maxima it is 3.00 MiB, for a **ceiling of 14.00 MiB** across the two files, because
+  `MAX_BODY` is 256 Ki **code points** — so a body of astral characters (emoji) is legal, and
+  `ensure_ascii` writes each one as a surrogate *pair*, twelve bytes rather than the six a BMP
+  character costs. Such a body is only 1.00 MiB on the wire under UTF-8, well inside `MAX_FRAME`,
+  so this is reachable traffic and not a construction.
+
+  Do not take that number on trust, and do not re-derive it from an expansion factor: this file
+  has carried a wrong quantified ceiling three times (once implicitly, then ×6, now ×12). It is
+  *built and measured* by `test_the_worst_case_record_is_measured_not_assumed`, and
+  `test_both_halves_agree_on_the_cap` asserts `INBOX_MAX_BYTES` against that measurement, so the
+  floor moves on its own if `MAX_BODY` or the encoding does. The cap is deliberately above the
+  worst-case record: below it, a maximal message could never be recorded at all.
 * **A failed rotation costs nothing.** It is attempted before the append, inside the same
   best-effort discipline: if `os.replace` fails the message is still appended, to the oversized
   file, and still printed. The append uses `os.open(…, 0o600)` rather than `open()` so the
@@ -148,17 +156,21 @@ Details that are load-bearing:
   world-readable.
 * **A torn write is never vouched for.** `os.write` is `write(2)` and may take less than the whole
   buffer; the loop insists on the rest and reports `False` the moment it cannot finish, so a
-  truncated record is never sold to an agent as the full text. The fragment keeps its own line —
-  it is sealed at the next append in this process, or at startup for a tear an earlier one left —
-  so the damage stops at the one message that was being written. Verified on a 2 MB filesystem
-  driven to `ENOSPC` with 40 KB bodies: record #48 is truncated and unparseable, is *not* named in
-  its own notification, every earlier line still parses, and the first message after space
-  returned lands cleanly on a new line.
-* **Two listeners must not share one inbox.** Nothing locks the file. Ordinary appends interleave
-  safely (`O_APPEND` is atomic for a single write), but two processes can both see the file over
-  the cap and both `os.replace` it, and the second roll then overwrites a full `.1` with a
-  near-empty one. One listener per inbox; a second on the same machine should be given
-  `--inbox <another path>`.
+  truncated record is never sold to an agent as the full text. The fragment keeps its own line: the
+  next writer checks the file and starts a new one, either within this process (`_TORN` marks the
+  inbox) or at startup (for a tear an earlier process left). Sealing the line at the moment of the
+  tear is *not* the mechanism, because it is unreliable — measured on a full filesystem, a 1-byte
+  newline after a torn write landed in 3 of 5 trials and hit `ENOSPC` in the other 2. Verified on a
+  2 MB filesystem driven to `ENOSPC` with 40 KB bodies: the torn record is the only unparseable
+  line, is *not* named in its own notification, the notification still prints, every earlier line
+  still parses, and the first message after space returned lands cleanly on a new line.
+* **Two listeners must not share one inbox.** Nothing locks the file, and three things go wrong.
+  `O_APPEND` is atomic per *write*, not per line, and after a short write this code finishes the
+  line in further writes — so under a filesystem that splits writes, two interleaved appends can
+  interleave *within* a line. Both processes can see the file over the cap and both `os.replace`
+  it, the second roll overwriting a full `.1` with a near-empty one. And a tear left by one is
+  invisible to the other's `_TORN`, so the other can append onto the fragment. One listener per
+  inbox; a second on the same machine gets `--inbox <another path>`.
 * The inbox is **not** a server archive and not durable knowledge. It is this machine's receipt log;
   anything worth keeping still goes in the graph.
 

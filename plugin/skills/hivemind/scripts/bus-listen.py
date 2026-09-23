@@ -97,6 +97,11 @@ def prepare_inbox(path):
             _TORN.add(str(path))
         for p in (str(path), str(path) + ".1"):
             try:
+                # Never follow a link here. `.1` is a path this code otherwise only ever renames
+                # — os.replace does not follow its destination — so a symlink left there is not
+                # an inbox of ours and chmod would land on whatever it points at.
+                if os.path.islink(p):
+                    continue
                 mode = os.stat(p).st_mode & 0o777
                 if mode & 0o077:
                     os.chmod(p, mode & 0o700)
@@ -124,16 +129,20 @@ def _rotate(path):
     prune is the shape that took the blob store to 94 GB. The offline queue in this same subsystem
     is bounded for exactly that reason, and so is this. One generation is enough: the inbox is a
     recovery buffer for a message that scrolled past, not an archive — the graph is the archive.
+
+    Returns whether it rolled, which the caller needs: a fresh generation starts clean, so it
+    needs no repair for a line torn in the one that just rolled away.
     """
     try:
         if os.path.getsize(path) < INBOX_MAX_BYTES:
-            return
+            return False
     except OSError:
-        return                  # nothing there yet, or unreadable — the append will report it
+        return False            # nothing there yet, or unreadable — the append will report it
     try:
         os.replace(path, path + ".1")   # atomic; whatever .1 held is what falls off the horizon
+        return True
     except OSError:
-        pass                    # a failed rotation must never cost the message being written
+        return False            # a failed rotation must never cost the message being written
 
 
 _TORN = set()       # inboxes whose last line is known to be incomplete (see _write_line)
@@ -163,10 +172,15 @@ def _ends_mid_line(path):
     """Does the file end without a newline — i.e. did a previous write tear?
 
     Damage from a torn write has to stop at one line: appended straight after a fragment, the next
-    message would share that unparseable line and be reported as landed. Sealing cannot happen at
-    the moment of the tear, because the device that could not finish the line cannot take a
-    newline either. So the repair happens wherever there is somewhere to put it: at the next
-    append in this process (`_TORN`), and at startup for a tear some earlier process left behind.
+    message would share that unparseable line and be reported as landed.
+
+    Sealing at the moment of the tear is *unreliable*, which is why it is not the mechanism.
+    Measured on a filesystem driven to ENOSPC: a 1-byte newline after a torn write succeeded in 3
+    of 5 trials (one accepted 200 consecutive 1-byte writes) and failed with ENOSPC in the other 2.
+    Something that works most of the time cannot be depended on for the invariant, so the repair
+    is instead done by whoever writes next — verified against the file, here, rather than assumed:
+    `_TORN` says "check before appending" within this process, and prepare_inbox checks once at
+    startup for a tear an earlier process left behind.
     """
     try:
         with open(path, "rb") as fh:
@@ -192,10 +206,15 @@ def _record(frame, inbox):
         return False
     path = str(inbox)
     payload = (line + "\n").encode("utf-8")        # ASCII by construction, see above
-    if path in _TORN:
-        payload = b"\n" + payload                  # a previous write tore; do not share its line
     try:
-        _rotate(path)
+        rolled = _rotate(path)
+        if path in _TORN and not rolled and _ends_mid_line(path):
+            # A previous write tore and nothing has closed the line: do not share it. Confirmed
+            # against the file rather than taken from the flag, because a tear does not always
+            # leave a fragment (a write can fail having placed nothing) and the seal at the tear
+            # sometimes does land — either way a blank first line would be a false positive for
+            # "an unparseable line is a message whose write was cut short".
+            payload = b"\n" + payload
         # os.open, not open(): after a rotation this call creates the file, and the mode has to
         # travel with the creation or the new generation would land world-readable.
         fd = os.open(path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
