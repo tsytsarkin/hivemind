@@ -66,7 +66,7 @@ FRAMES = [
 ]
 
 
-def test_listener_render_matches_the_client_exactly():
+def test_listener_render_matches_the_client_exactly(tmp_path):
     """Two copies of the rendering rules exist because the plugin cannot import the client
     package. This test is what keeps them from drifting apart."""
     from hivemind.bus import render as client_render
@@ -75,14 +75,26 @@ def test_listener_render_matches_the_client_exactly():
         assert listener_render(f) == client_render(f), f
     assert listener_render({"type": "ping"}) is None
 
-
-def test_listener_never_emits_a_clippable_line():
-    listener_render = _load_listener().render
+    # The local inbox travels with the rendering rules: a clipped line names the file it was
+    # appended to, so an implementation that forgot to record would say so in its own output.
+    # One shared path, since the pointer names it and two paths would differ only there.
+    inbox = tmp_path / "bus-inbox.jsonl"
     for f in FRAMES:
-        line = listener_render(f)
-        if line is not None:
-            assert len(line) <= 512, (len(line), f)
-            assert "\n" not in line
+        assert listener_render(f, inbox=inbox) == client_render(f, inbox=inbox), f
+    lines = inbox.read_text().splitlines()
+    assert lines and lines[0::2] == lines[1::2], "both halves must record the same bytes"
+
+
+def test_listener_never_emits_a_clippable_line(tmp_path):
+    listener_render = _load_listener().render
+    inbox = tmp_path / "bus-inbox.jsonl"
+    for f in FRAMES:
+        # With an inbox the pointer names two routes, so the tail is longer and `room` smaller;
+        # the budget is what must hold, whichever way the line was built.
+        for line in (listener_render(f), listener_render(f, inbox=inbox)):
+            if line is not None:
+                assert len(line) <= 512, (len(line), f)
+                assert "\n" not in line
 
 
 def test_guide_sh_installs_the_listener(tmp_path, monkeypatch):

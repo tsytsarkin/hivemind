@@ -107,7 +107,10 @@ def attach(mcp, cfg) -> None:
     @mcp.tool(annotations=RO,
               description="Fetch the FULL text of a bus message by id. Notifications are clipped "
                           "at ~512 characters, so a long message arrives truncated with its id — "
-                          "call this to read the rest. Ids stay resolvable for about an hour.")
+                          "call this to read the rest. Ids stay resolvable for about an hour. A "
+                          "listener also appends every message it received to "
+                          "~/.hivemind/bus-inbox.jsonl in full, which is the route that still "
+                          "works when this tool is unavailable or the id has aged out.")
     @_envelope
     def bus_message(message_id: str) -> dict:
         return _hub().message(message_id)

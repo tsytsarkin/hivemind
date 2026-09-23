@@ -50,8 +50,12 @@ Monitor(command=<monitor_command>, description="hivemind bus", persistent=True)
 bus_peers()                          # who is connected
 bus_send(to="lab-box", body="census done, 4712 gated entry points")
 bus_broadcast(body="pausing writes for a migration")
-bus_message("<id>")                  # full text of a clipped message
+bus_message("<id>")                  # full text of a clipped message, from the server
 bus_disconnect(label="mac-studio")
+```
+
+```bash
+grep '<id>' ~/.hivemind/bus-inbox.jsonl    # the same text, from this machine's own copy
 ```
 
 From a shell: `hivemind bus connect <label>` · `listen --url …` · `peers` · `send <to> <body>` ·
@@ -64,7 +68,9 @@ From a shell: `hivemind bus connect <label>` · `listen --url …` · `peers` ·
 | Presence | the socket | A peer is connected exactly while its WebSocket is open. No TTL, no reaper — the two things that made v1 lose messages. |
 | State | in memory | Bus traffic is ephemeral; persisting chat meant provenance rows outliving the messages they described. A restart is a clean slate. |
 | Offline messages | bounded queue (100 / 1 h) | A message sent during a brief disconnect survives the reconnect. Bounded, because unbounded retention is how the blob store reached 94 GB. The reference implementation drops these entirely. |
-| Long bodies | retained ~1 h, fetched by id | A notification is clipped near 512 characters, so the wire frame cannot be the only copy. The line carries a pointer; `bus_message(id)` returns the rest. |
+| Long bodies | kept locally in full; also retained ~1 h server-side | A notification is clipped near 512 characters, so the wire frame cannot be the only copy. The listener appends every frame to a local JSONL inbox and the line points at both routes; `bus_message(id)` returns the rest from the server. |
+| Identity | stable per label | A reconnect reuses the same peer, so queued mail is not orphaned and peers keep addressing the same name. |
+| Displaced sockets | closed with 4409 | A second connection for one identity supersedes the first instead of leaving a ghost peer "online" forever. |
 | Auth | reusable signed listen key (7 d), or a single-use 60 s ticket | The listener connects by URL and cannot set an `Authorization` header, so an authenticated MCP call mints a ticket. The long-lived bearer token never lands in a URL, a shell history or an access log. The default is the **listen key**: HMAC-signed over (label, expiry) with a per-project secret in `<project>/bus_secret`, so verification needs no table and a key keeps working across a server restart — a listener reconnects on its own instead of dying until a human notices. It grants only "join the bus as this label", expires, and is revoked wholesale by deleting the secret. |
 
 ## The listener is shipped by the plugin, not the CLI
@@ -91,8 +97,37 @@ Because two copies of the rendering rules now exist (the plugin script cannot im
 package), `test_listener_render_matches_the_client_exactly` pins them together frame by frame.
 
 `monitor_command_cli` is still returned for a machine that does have the CLI installed.
-| Identity | stable per label | A reconnect reuses the same peer, so queued mail is not orphaned and peers keep addressing the same name. |
-| Displaced sockets | closed with 4409 | A second connection for one identity supersedes the first instead of leaving a ghost peer "online" forever. |
+
+## The listener keeps what it could only preview
+
+The 512-character clip is applied **here**, by `render()`, with the whole frame in hand — the
+server sent everything. So the remainder used to be thrown away on the receiving machine, and
+`bus_message("<id>")` was its only route back. That route is conditional twice over: the reading
+host has to expose the tool, and the server only retains the body for about an hour. When it did
+not resolve, an agent answered a message having read a ~300-character preview.
+
+Every `message` and `broadcast` frame is therefore appended verbatim, as one JSON line, to
+`~/.hivemind/bus-inbox.jsonl` before the preview is printed — `--inbox PATH` overrides the
+location, on the plugin listener and on `hivemind bus listen` alike. A clipped line then names both
+routes, because they fail differently:
+
+```
+[hivemind msg=2ZABCDEF from="labbox" chars=9000] <first ~300 chars>… full text: grep 2ZABCDEF ~/.hivemind/bus-inbox.jsonl · or bus_message("2ZABCDEF")
+```
+
+Details that are load-bearing:
+
+* **Short messages are recorded too.** Otherwise the local record has holes exactly where the
+  conversation was cheap, and no tail is a transcript.
+* **Presence, keepalives, the greeting and transport errors are not.** They carry nothing an agent
+  would reread.
+* **A failed append never costs the printed line**, and the pointer then names only
+  `bus_message` — an agent sent to a file with no such line in it reads the preview and answers
+  anyway, which is the bug this fixes.
+* **One frame is one line by construction**: the JSON is written with `ensure_ascii`, because
+  `str.splitlines()` breaks on U+2028/U+2029 and a peer chooses its own body.
+* The inbox is **not** a server archive and not durable knowledge. It is this machine's receipt log;
+  anything worth keeping still goes in the graph.
 
 ## Safety
 

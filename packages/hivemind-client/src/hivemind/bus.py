@@ -8,8 +8,11 @@ turns into a notification.
 Two constraints shape the output format:
 
 * Claude Code clips a notification at roughly 512 characters. A long body must not push the
-  header — who sent it, and its id — off the end, so the body is capped and the id is how you
-  retrieve the rest.
+  header — who sent it, and its id — off the end, so the body is capped. Because that truncation
+  happens here — with the whole frame in hand — every message is first appended verbatim to
+  `~/.hivemind/bus-inbox.jsonl`. The remainder used to be dropped on the floor, leaving
+  `bus_message("<id>")` as its only route, which resolves only if the reading host exposes that
+  tool; when it does not, an agent answers a message having read a ~300-character preview.
 * The sender's label and body are attacker-controlled in the sense that any agent can set them,
   and an LLM reads the result as text. Control characters are stripped and the delimiters used by
   the header are removed from the label, so a peer cannot forge a second header or inject a
@@ -19,11 +22,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import random
 import re
 from typing import Optional
 
 BODY_CAP = 300            # leaves room for the prefix AND the "fetch the rest" pointer
+INBOX_HINT_CAP = 64       # the inbox path shares the line's budget with the body
 NOTIFICATION_BUDGET = 512 # measured clip point in Claude Code; a longer line loses its tail
 RECONNECT_MIN = 0.25
 RECONNECT_MAX = 8.0
@@ -45,8 +50,75 @@ def _label(s: str) -> str:
     return _clean(s).replace("]", "").replace("[", "").replace('"', "")[:48] or "?"
 
 
-def render(frame: dict) -> Optional[str]:
-    """One frame -> one notification line, or None for frames an agent should not be woken for."""
+def default_inbox() -> str:
+    """Where a listener keeps every message it received.
+
+    A fixed $HOME path, for the same reason the plugin's listener is one: a Monitor command runs in
+    a plain shell where no plugin variable is set. The skill tells every agent this exact path.
+    Resolved per call rather than at import so a changed HOME is honoured.
+    """
+    return os.path.join(os.path.expanduser("~"), ".hivemind", "bus-inbox.jsonl")
+
+
+def prepare_inbox(path) -> Optional[str]:
+    """Create the inbox's directory once, at startup, so appending a frame stays a plain append.
+
+    Returns the path to record to, or None when the location cannot be written — keeping a local
+    copy is best-effort and never worth refusing to carry messages over.
+    """
+    try:
+        parent = os.path.dirname(os.path.abspath(str(path)))
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        # Create it now, owner-only: peer bodies are coordination traffic between agents and have
+        # no business being world-readable on a shared box. Creating it here also means an
+        # unusable location is discovered at startup, where it can be reported once, rather than
+        # silently per message. The mode applies to a file we create; an existing one is left as
+        # the operator set it.
+        os.close(os.open(str(path), os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600))
+        return str(path)
+    except OSError:
+        return None
+
+
+def _inbox_hint(inbox) -> str:
+    """How the inbox is named inside a notification: bounded, because it shares the line's budget
+    with the body, and cleaned, because one frame must stay one line."""
+    s = _clean(str(inbox))
+    home = os.path.expanduser("~")
+    if home and s.startswith(home + os.sep):
+        s = "~" + s[len(home):]
+    return s if len(s) <= INBOX_HINT_CAP else "…" + s[-(INBOX_HINT_CAP - 1):]
+
+
+def _record(frame: dict, inbox) -> bool:
+    """Append the whole frame as one JSON line; returns whether it landed.
+
+    ensure_ascii is deliberate: a JSONL reader splits on line breaks, and Python's own
+    splitlines() breaks on U+2028/U+2029 — which a peer could put in a body to forge a second
+    record. Escaping every non-ASCII character makes one frame one line by construction.
+    """
+    try:
+        line = json.dumps(frame, ensure_ascii=True)
+    except (TypeError, ValueError):
+        return False
+    try:
+        with open(str(inbox), "a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+        return True
+    except OSError:
+        return False        # silent: a message that printed but was not recorded beats neither
+
+
+def render(frame: dict, inbox=None) -> Optional[str]:
+    """One frame -> one notification line, or None for frames an agent should not be woken for.
+
+    Recording is a side effect on purpose. This is the one place that already knows a frame is
+    worth waking an agent for and holds the body it is about to abbreviate, and knowing whether
+    the append landed is what lets the pointer name the local copy only when there is one.
+    `inbox=None` records nothing: the default path belongs to a listener's startup, not to any
+    caller that passes a frame through for inspection.
+    """
     kind = frame.get("type")
     if kind in ("ping", "pong"):
         return None
@@ -63,12 +135,18 @@ def render(frame: dict) -> Optional[str]:
         mid = str(frame.get("id", ""))[-8:]
         who = _label(frame.get("from", "?"))
         scope = f" room={_label(frame.get('room') or '')}" if kind == "broadcast" else ""
+        kept = _record(frame, inbox) if inbox else False
         if len(body) > BODY_CAP:
             # The notification is clipped around 512 chars, so a long body cannot travel in it.
-            # Send a pointer instead: the id resolves to the full text via bus_message, which
-            # goes over the normal tool channel and has no such limit.
+            # Send a pointer instead: to the line just appended to the local inbox, and to the id,
+            # which resolves to the full text via bus_message over the normal tool channel.
             head = f'[hivemind msg={mid} from="{who}"{scope} chars={len(body)}]'
-            tail = f'… bus_message("{mid}") for the rest'
+            if kept:
+                # Two routes, because they fail differently: the local file is always readable but
+                # only on this machine, and bus_message needs the host to expose that tool.
+                tail = f'… full text: grep {mid} {_inbox_hint(inbox)} · or bus_message("{mid}")'
+            else:
+                tail = f'… bus_message("{mid}") for the rest'
             room = max(0, 500 - len(head) - len(tail) - 2)
             return f"{head} {body[:min(BODY_CAP, room)]}{tail}"
         return f'[hivemind msg={mid} from="{who}"{scope}] {body}'
@@ -77,7 +155,7 @@ def render(frame: dict) -> Optional[str]:
     return None
 
 
-async def _once(url: str) -> str:
+async def _once(url: str, inbox=None) -> str:
     """One connection. Returns why it ended, so the caller can decide whether to retry."""
     import websockets
 
@@ -89,13 +167,13 @@ async def _once(url: str) -> str:
                 frame = json.loads(raw)
             except ValueError:
                 continue
-            line = render(frame)
+            line = render(frame, inbox)
             if line:
                 print(line, flush=True)
     return "closed"
 
 
-async def listen(url: str, *, retry: bool = True, remint=None) -> int:
+async def listen(url: str, *, retry: bool = True, remint=None, inbox=None) -> int:
     """Hold the connection for the life of the process, reconnecting through outages.
 
     Connect tickets are single-use, so a reconnect cannot replay the URL it was given: the second
@@ -108,7 +186,7 @@ async def listen(url: str, *, retry: bool = True, remint=None) -> int:
     while True:
         refused = False
         try:
-            await _once(current)
+            await _once(current, inbox)
             backoff = RECONNECT_MIN          # a clean close is not a failure
         except Exception as e:
             msg = str(e)
@@ -135,8 +213,14 @@ async def listen(url: str, *, retry: bool = True, remint=None) -> int:
         backoff = min(backoff * 2, RECONNECT_MAX)
 
 
-def run_listen(url: str, retry: bool = True, remint=None) -> int:
+def run_listen(url: str, retry: bool = True, remint=None, inbox=None) -> int:
+    resolved = prepare_inbox(inbox or default_inbox())
+    if resolved is None:
+        # Said once, at startup, rather than per message: an agent that is going to be pointed at
+        # `bus_message` alone for every long body should know why.
+        print(f"[hivemind bus] cannot open a local inbox at {inbox or default_inbox()}; "
+              "messages will print but not be kept", flush=True)
     try:
-        return asyncio.run(listen(url, retry=retry, remint=remint))
+        return asyncio.run(listen(url, retry=retry, remint=remint, inbox=resolved))
     except KeyboardInterrupt:
         return 0

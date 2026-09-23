@@ -254,7 +254,7 @@ async def test_listener_reconnects_with_a_fresh_ticket():
 
     attempts = []
 
-    async def flaky(url):
+    async def flaky(url, inbox=None):
         attempts.append(url)
         if len(attempts) < 3:
             raise ConnectionError("network blip")
@@ -280,7 +280,7 @@ async def test_listener_without_credentials_stops_instead_of_spinning():
     from hivemind.bus import listen
     import hivemind.bus as busmod
 
-    async def refused(url):
+    async def refused(url, inbox=None):
         raise ConnectionError("server rejected WebSocket connection: HTTP 403")
 
     orig, busmod._once = busmod._once, refused
