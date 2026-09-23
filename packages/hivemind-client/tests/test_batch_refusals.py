@@ -5,8 +5,9 @@ type's enum, the tool answered `{"ok": false}`, `call()` raised, and the excepti
 whole batch mid-run — leaving the graph half-updated with no record of where it stopped.
 
 `call()` still raises by default, because every convenience wrapper and the whole CLI are built on
-that and would otherwise return refusals nobody checks. The batch path is `call_many`, which never
-raises: every item gets a reply, refusal or not.
+that and would otherwise return refusals nobody checks. The batch path is `call_many`: every item
+gets a reply, refusal or failure alike. It does still raise the caller's own bugs — a malformed
+item, an unserialisable argument — because recording those as failed calls hides them.
 """
 import pytest
 
@@ -101,3 +102,56 @@ def test_call_many_of_nothing_is_an_empty_list(fake_transport):
     c = fake_transport([])
     assert c.call_many([]) == []
     assert c.sent == []
+
+
+def test_call_many_does_not_choke_on_a_reply_that_is_not_a_dict(fake_transport):
+    """A tool answering with a text block yields a bare string. That is a reply, not a refusal.
+
+    `.get("ok")` on it is an AttributeError, and a truth test on it is a false failure — either
+    would crash or silently truncate a batch of otherwise fine calls.
+    """
+    text = {"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": "hi"}]}}
+    c = fake_transport([text, text], raw=True)
+    results = c.call_many([("guide_get", {}), ("guide_get", {})], stop_on_error=True)
+    assert results == ["hi", "hi"]
+    assert len(c.sent) == 2                      # it neither raised nor stopped early
+
+
+def test_call_many_does_not_treat_an_ok_less_dict_as_a_refusal(fake_transport):
+    """`call` raises only on `ok is False`, so a dict with no `ok` is a success. Both agree."""
+    c = fake_transport([{"node_id": "a"}, {"node_id": "b"}])
+    results = c.call_many([("graph_get", {}), ("graph_get", {})], stop_on_error=True)
+    assert [r["node_id"] for r in results] == ["a", "b"]
+    assert len(c.sent) == 2
+
+
+def test_call_many_stops_on_a_failure_that_raised_too(fake_transport):
+    """stop_on_error is the only control against an N-item batch re-failing N times.
+
+    A bad token 401s every call and 401 is not retried, so without this the batch quietly makes
+    every remaining request. The stop has to apply to failures that raised, not only to the
+    server's own refusals.
+    """
+    c = fake_transport([{"ok": True}], status=401)
+    results = c.call_many([("graph_upsert", {"i": i}) for i in range(3)], stop_on_error=True)
+    assert [r["error_kind"] for r in results] == ["auth"]
+    assert len(c.sent) == 1                      # calls 2 and 3 were never attempted
+
+
+def test_call_many_raises_a_caller_bug_instead_of_calling_it_transport(fake_transport):
+    """Arguments that cannot be sent are the caller's bug; `error_kind: transport` would send the
+    reader of the batch to look at the network for it."""
+    c = fake_transport([{"ok": True}])
+    with pytest.raises(TypeError):
+        c.call_many([("graph_upsert", {"x": object()})])      # will not serialise
+    with pytest.raises(TypeError):
+        c.call_many([("graph_upsert", 5)])                    # args are not a mapping
+    assert c.sent == []                          # neither one reached the wire
+
+
+def test_call_many_records_a_reply_that_is_neither_result_nor_error(fake_transport):
+    """A body with no `result` is a protocol failure, not a caller bug: it becomes a row."""
+    c = fake_transport([{"jsonrpc": "2.0", "id": 1}], raw=True)
+    results = c.call_many([("graph_upsert", {"i": 0})])
+    assert results[0]["ok"] is False and results[0]["error_kind"] == "transport"
+    assert "KeyError" in results[0]["error"]     # str(KeyError) alone is just 'result'

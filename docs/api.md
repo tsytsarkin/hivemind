@@ -65,10 +65,15 @@ exist. Unknown and forbidden are byte-identical by design — see `app.PROJECT_D
   `.call` raises `HivemindError` when the tool refuses (`ok:false`), carrying `error_kind` as
   `.kind`; `raise_on_error=False` returns that envelope as data instead (auth/HTTP/JSON-RPC
   failures still raise — there is no reply to return). **Batches go through
-  `.call_many([(tool, args), …])`**, which never raises and returns one reply per call, in order,
-  so a single refused row cannot abandon the rest of the batch; anything that did raise is
-  recorded in its place as `{ok:false, error_kind, error}`. `stop_on_error=True` stops after the
-  first non-ok reply and still returns it, so the caller can see where the batch stopped.
+  `.call_many([(tool, args), …])`**, which returns one reply per call, in order, so a single
+  refused row cannot abandon the rest of the batch. A refusal is the server's own envelope,
+  untouched; a call that raised instead is recorded in its place as `{ok:false, error_kind,
+  error}`, where `error_kind` is `HivemindError.kind` when it has one, `"error"` when it has none
+  (an HTTP-status failure carries no kind), and `"transport"` when no usable reply came back at
+  all. The caller's own bug is *not* recorded but raised — an item that is not a `(tool, args)`
+  pair, an argument that will not serialise — since a batch row blaming the network for it is
+  worse than a traceback. `stop_on_error=True` stops after the first non-ok reply, however it
+  failed, and still returns it, so the caller can see where the batch stopped.
 - `hivemind-admin` (operator, on the server host): `mint-token`, `create-project`, `apply-pack`,
   `promote`, `merge-guide`, `set-guide`, `gc`, `reindex`.
 

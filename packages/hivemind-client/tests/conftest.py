@@ -12,6 +12,16 @@ import pytest
 from hivemind import Client
 
 
+class QueueExhausted(BaseException):
+    """The client made more calls than the test queued replies for.
+
+    A BaseException on purpose: an `AssertionError` raised in the handler is an `Exception`, and a
+    client that catches broadly (`call_many` did) would swallow it and turn over-calling into an
+    ordinary failed-call row — a test could then pass while the client made calls it should not
+    have. Nothing catches BaseException, so this always reaches pytest.
+    """
+
+
 def _stub_client(handler, **kw) -> Client:
     c = Client("http://stub.invalid/p/t", "tok", agent="test", **kw)
     c._http.close()                       # drop the real one built in __init__
@@ -25,21 +35,27 @@ def fake_transport():
 
     Each payload is handed back as the tool result's `structuredContent`, which is the shape the
     server sends and the first thing `_tool_payload` looks at. `status` sets the HTTP status of
-    every reply, for the HTTP-level failure cases. The returned client carries `.sent`, the list
-    of `params` actually put on the wire, so a test can check what was and was not sent.
+    every reply, for the HTTP-level failure cases. With `raw=True` each queued item is instead the
+    whole JSON-RPC response body, verbatim — that is how a test reaches a reply that is not a
+    `structuredContent` dict: a bare text content block, or a body carrying neither `result` nor
+    `error`. The returned client carries `.sent`, the list of `params` actually put on the wire,
+    so a test can check what was and was not sent.
     """
     made = []
 
-    def make(payloads, *, status=200, **kw):
+    def make(payloads, *, status=200, raw=False, **kw):
         replies = list(payloads)
         sent = []
 
         def handler(request: httpx.Request) -> httpx.Response:
             body = json.loads(request.content)
             sent.append(body["params"])
-            assert replies, "the client made more calls than the test queued replies for"
-            return httpx.Response(status, json={"jsonrpc": "2.0", "id": body["id"],
-                                                "result": {"structuredContent": replies.pop(0)}})
+            if not replies:
+                raise QueueExhausted(f"call {len(sent)} to {body['params']['name']!r} has no "
+                                     f"queued reply")
+            item = replies.pop(0)
+            return httpx.Response(status, json=item if raw else {
+                "jsonrpc": "2.0", "id": body["id"], "result": {"structuredContent": item}})
 
         c = _stub_client(handler, **kw)
         c.sent = sent
