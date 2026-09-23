@@ -129,6 +129,10 @@ forwards any other arguments to `claude`:
 scripts/hivemind-claude                      # prompt, then launch
 scripts/hivemind-claude --url <host>:8787 --resume
 ```
+The address it passes on is the **server root**, as an install's is, so a launched session has no
+project until `/hivemind:project` pins one — the launcher says so at launch. `--project <name>` uses
+the older `http://host:8787/p/<name>` shape instead.
+
 Nothing is written to your permanent configuration, and the token lives in a `0600` file that is
 removed when the session ends. Good for a borrowed machine or a VM.
 
