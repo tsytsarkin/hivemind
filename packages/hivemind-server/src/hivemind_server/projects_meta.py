@@ -164,6 +164,13 @@ def save(project_dir: Path, meta: ProjectMeta) -> None:
         # a bug in the caller: silently persisting it would produce a project that is unreachable on
         # the next read with nothing pointing at the cause. Refuse before anything is written.
         raise Invalid(f"visibility must be one of {VISIBILITIES} (got {meta.visibility!r})")
+    if not isinstance(meta.members, list) or not all(isinstance(m, str) for m in meta.members):
+        # The read side refuses to coerce an ill-typed members field because list("ab") is
+        # ['a', 'b'] — real single-character usernames. as_json() does exactly that coercion, so the
+        # write side has to refuse too: a caller that assigned members="ab" in memory would
+        # otherwise persist a file that GRANTS access to the users a and b one read later.
+        raise Invalid(f"members must be a list of usernames (got a "
+                      f"{type(meta.members).__name__}: {meta.members!r})")
     project_dir.mkdir(parents=True, exist_ok=True)
     if not meta.created:
         meta.created = now_iso()

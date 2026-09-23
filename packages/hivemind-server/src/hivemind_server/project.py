@@ -97,6 +97,15 @@ class ProjectRegistry:
         self._projects[name] = p
         return p
 
+    def forget(self, name: str) -> None:
+        """Drop a half-created project from the in-memory registry (see project_tools.create).
+
+        The name is claimed on disk before the project is built, so a build that raises has to
+        release the registry entry too — otherwise `get(name)` answers with a project whose
+        directory has just been removed, and the name stays unusable until a restart.
+        """
+        self._projects.pop(name, None)
+
     def all(self) -> list[Project]:
         return list(self._projects.values())
 

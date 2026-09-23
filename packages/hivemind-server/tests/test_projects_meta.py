@@ -236,3 +236,17 @@ def test_a_project_without_metadata_becomes_shared_on_construction(tmp_path):
     again = Project("default", d, max_blob_bytes=1024, blob_grace_seconds=60)
     assert (again.meta.visibility, again.meta.owner) == ("private", "nik")
     assert again.meta.created == stamped, "an existing project.json is never overwritten"
+
+
+@pytest.mark.parametrize("members", ["ab", {"ana": 1}, ["ana", 7], None, ("ana",)])
+def test_saving_an_ill_typed_member_list_is_refused_at_the_write(tmp_path, members):
+    """The mirror of test_an_ill_typed_member_list_fails_closed_instead_of_granting, on the write
+    side: as_json() coerces with list(self.members), so members="ab" would persist ["a", "b"] and
+    GRANT the single-character users a and b on the next read. The read side cannot fix that — by
+    then the file is a perfectly valid ACL — so the write has to refuse."""
+    d, meta = _write(tmp_path, name="nik.p", visibility="private", owner="nik")
+    meta.members = members
+    with pytest.raises(Invalid):
+        pm.save(d, meta)
+    assert pm.load(d, "nik.p").members == [], "the refused write left the file alone"
+    assert sorted(p.name for p in d.iterdir()) == ["project.json"], "and no temp file behind"

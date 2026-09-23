@@ -62,6 +62,7 @@ EXPECTED_TOOLS = {
     "artifact_ref", "artifact_attach", "artifact_refs", "artifact_orphans",
     "tool_publish", "tool_resolve", "tool_search", "tool_yank",
     "tool_catalog", "tool_link", "tool_suggest_links", "tool_unlink", "tool_autolink",
+    "project_list", "project_create", "project_info", "project_share", "project_unshare",
 }
 
 

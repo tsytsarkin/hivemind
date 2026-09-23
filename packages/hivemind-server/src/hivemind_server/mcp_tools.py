@@ -41,8 +41,8 @@ INSTRUCTIONS = (
 
 
 def build_mcp(registry, identities, *, instructions: str = INSTRUCTIONS) -> MCPServer:
-    """One project-neutral MCP server. `identities` is threaded in for the project tools that come
-    next (create/share have to check a user exists); nothing here reads it yet."""
+    """One project-neutral MCP server. `identities` is threaded in for the project tools
+    (project_share has to check the grantee exists before writing a name nobody can hold)."""
     # A default for any caller that is not an HTTP request. ProjectAuthMiddleware re-publishes both
     # per request and THAT is the authoritative one; require_auth stays strict here because
     # build_mcp does not know the deployment's mode.
@@ -344,6 +344,10 @@ def build_mcp(registry, identities, *, instructions: str = INSTRUCTIONS) -> MCPS
 
     from . import registry_tools  # attach artifact + tool-registry tools (added incrementally)
     registry_tools.attach(mcp)
+    from . import project_tools    # the project lifecycle: create/list/info/share/unshare
+    # On `real`, NOT the proxy: these tools are about projects rather than in one, and the `project`
+    # argument they carry themselves would be shadowed by the injected per-call one.
+    project_tools.attach(real, registry, identities)
     from . import bus_ws_tools    # agent bus: WebSocket push, deliberately outside the graph
     from .config import config as _config
     bus_ws_tools.attach(mcp, _config())

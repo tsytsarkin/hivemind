@@ -51,6 +51,15 @@ async def test_the_project_argument_appears_in_every_tool_schema(env):
         r = await _post(c, f"/p/{proj.name}", tok, "tools/list")
         tools = _parse(r)["result"]["tools"]
     assert len(tools) > 40, f"only {len(tools)} tools listed — the surface is bigger than that"
+    # The project_* lifecycle tools are the one exception, by construction: they are ABOUT projects
+    # rather than in one, so they are registered on the real server and never wrapped. Their own
+    # `project` argument names the project they act ON and is mandatory where they have one — an
+    # injected one would have shadowed it. Listed by name, so a tool cannot leave the invariant by
+    # accident; `<=` also asserts they are all there.
+    lifecycle = {"project_list", "project_create", "project_info", "project_share",
+                 "project_unshare"}
+    assert lifecycle <= {t["name"] for t in tools}
+    tools = [t for t in tools if t["name"] not in lifecycle]
     missing = [t["name"] for t in tools
                if "project" not in (t["inputSchema"].get("properties") or {})]
     assert not missing, f"tools with no project parameter: {missing}"
@@ -283,11 +292,17 @@ def test_with_auth_on_a_call_with_no_identity_is_refused(two_projects):
         envelope.resolve_project(None, requires=False)
     with pytest.raises(Invalid):
         envelope.resolve_project("nik.a", requires=True)
-    # Control: the same two calls in the mode that legitimately has nobody to authorize.
-    envelope.set_registry(registry, require_auth=False)
-    assert envelope.resolve_project(None, requires=False).name == "nik.a"
-    assert envelope.resolve_project("nik.b", requires=True).name == "nik.b"
-    envelope.set_mount_default(None)
+    # Control: the same two calls in the mode that legitimately has nobody to authorize. Restored
+    # in a finally, because these contextvars outlive the test: leaving _REQUIRE_AUTH=False bound
+    # would let a later DIRECT-call test run in auth-off mode, where a security assertion would pass
+    # vacuously. Every HTTP test republishes both, which is why nothing notices today.
+    try:
+        envelope.set_registry(registry, require_auth=False)
+        assert envelope.resolve_project(None, requires=False).name == "nik.a"
+        assert envelope.resolve_project("nik.b", requires=True).name == "nik.b"
+    finally:
+        envelope.set_registry(registry, require_auth=True)
+        envelope.set_mount_default(None)
 
 
 @pytest.mark.anyio

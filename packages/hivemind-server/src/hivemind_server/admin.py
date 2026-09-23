@@ -48,6 +48,11 @@ def main(argv=None) -> int:
     sub.add_parser("list-tokens")
     sub.add_parser("list-projects")
     sub.add_parser("create-project")
+    # Recovery from the box: the MCP tools are owner-only (an admin who could share could grant
+    # themselves read access), so an owner who has lost their token has no other way back in. This
+    # acts AS the project's own owner, on a host where direct file access already grants everything.
+    psh = sub.add_parser("project-share"); psh.add_argument("project"); psh.add_argument("user")
+    pun = sub.add_parser("project-unshare"); pun.add_argument("project"); pun.add_argument("user")
     ap_pack = sub.add_parser("apply-pack"); ap_pack.add_argument("pack_file")
     ap_pack.add_argument("--force", action="store_true",
                          help="allow a NON-ADDITIVE change to an existing type")
@@ -67,6 +72,28 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
     reg = _registry()
     cfg = config()
+
+    if args.cmd in ("project-share", "project-unshare"):
+        from . import project_tools
+        from .identity import Identity, IdentityStore
+        project = reg.get(args.project)
+        if project is None:
+            print(f"error: unknown project {args.project!r}", file=sys.stderr)
+            raise SystemExit(2)
+        owner = project.meta.owner
+        if not owner:
+            print(f"error: {args.project!r} has no owner to act as "
+                  f"(a shared project is readable by everyone already)", file=sys.stderr)
+            raise SystemExit(2)
+        actor = Identity(user=owner, device="admin-cli")
+        if args.cmd == "project-share":
+            # identities is passed so a typo'd username is refused here: a share is silent until the
+            # grantee calls, so granting a user who does not exist looks like it worked.
+            _out(project_tools.share(reg, actor, args.project, args.user,
+                                     identities=IdentityStore(cfg.identities_path)))
+        else:
+            _out(project_tools.unshare(reg, actor, args.project, args.user))
+        return 0
 
     if args.cmd == "list-projects":
         _out({"projects": [p.name for p in reg.all()], "root": str(reg.root)}); return 0
