@@ -311,3 +311,120 @@ def test_fields_wins_over_props(db):
     graph.upsert_node(db, "j", "component", {"title": "alpha", "status": "open"}, reason="x")
     hit = graph.search_nodes(db, "alpha", fields=["title"], props=True)["results"][0]
     assert hit["props"] == {"title": "alpha"}
+
+
+# ── search: filter by author ────────────────────────────────────────────────────────
+def test_search_filters_by_author(db):
+    graph.upsert_node(db, "j", "component", {"title": "nik wrote this"}, reason="x")
+    set_identity(Identity(user="ana", device="laptop"))
+    graph.upsert_node(db, "j", "component", {"title": "ana wrote this"}, reason="x")
+
+    nik_only = graph.search_nodes(db, "wrote", author="nik", fields=["title"])["results"]
+    assert [r["props"]["title"] for r in nik_only] == ["nik wrote this"]
+    assert len(graph.search_nodes(db, "wrote")["results"]) == 2
+
+
+def test_the_author_filter_composes_with_types(db):
+    graph.upsert_node(db, "j", "component", {"title": "c"}, reason="x")
+    graph.upsert_node(db, "j", "finding", {"title": "f"}, reason="x")
+    out = graph.search_nodes(db, "", types=["finding"], author="nik")["results"]
+    assert len(out) == 1 and out[0]["node_type"] == "finding"
+
+
+def test_an_author_with_no_writes_returns_nothing_rather_than_everything(db):
+    graph.upsert_node(db, "j", "component", {"title": "c"}, reason="x")
+    assert graph.search_nodes(db, "", author="nobody")["results"] == []
+
+
+def test_fields_composes_with_the_author_filter(db):
+    graph.upsert_node(db, "j", "component", {"title": "mine", "status": "open"}, reason="x")
+    set_identity(Identity(user="ana", device="laptop"))
+    graph.upsert_node(db, "j", "component", {"title": "theirs", "status": "open"}, reason="x")
+    out = graph.search_nodes(db, "", author="nik", fields=["title"])["results"]
+    assert [h["props"] for h in out] == [{"title": "mine"}]
+
+
+def test_the_author_filter_is_applied_before_the_row_cap(db):
+    """A filter applied after the row cap is the bug already fixed once for types."""
+    graph.upsert_node(db, "j", "component", {"title": "the one nik wrote"}, reason="x")
+    set_identity(Identity(user="ana", device="laptop"))
+    for i in range(6):
+        graph.upsert_node(db, "j", "component", {"title": f"ana {i}"}, reason="x")
+    # Browsing pages the node table in SQL (newest first), so with limit=5 nik's node is outside
+    # the rows a post-filter would ever see.
+    out = graph.search_nodes(db, "", author="nik", limit=5, fields=["title"])
+    assert [h["props"]["title"] for h in out["results"]] == ["the one nik wrote"]
+    assert out["total_of_type"] == 1, "...and the count has to answer for the filter too"
+
+
+def test_the_legacy_author_name_finds_the_rows_that_report_it(db):
+    """A NULL author_user reads out as legacy:unknown, so that name has to match those rows."""
+    out = graph.upsert_node(db, "j", "component", {"title": "predates authorship"}, reason="x")
+    with db.write("migration-sim", "blank an author column, as a pre-authorship row has") as tx:
+        tx.cur.execute("UPDATE node_version SET author_user=NULL WHERE node_id=?",
+                       (out["node_id"],))
+    assert graph.get_node(db, node_id=out["node_id"])["author"] == "legacy:unknown"
+    hits = graph.search_nodes(db, "", author="legacy:unknown", fields=["title"])["results"]
+    assert [h["props"]["title"] for h in hits] == ["predates authorship"]
+
+
+def test_skill_trap_and_tool_search_all_filter_by_author(db, tmp_path):
+    from hivemind_server import blobs, registry, skills, traps
+    store = blobs.BlobStore(tmp_path / "blobs", db, max_bytes=1 << 20, grace_seconds=0)
+
+    def publish(who, sid, title, desc, tid, entry, tool_desc, payload):
+        skills.publish(db, "j", id=sid, version="1.0.0", title=title, description=desc,
+                       body="step 1\nstep 2")
+        traps.record(db, "j", title=f"{who} dead end", what_failed="tried it", symptom="hung")
+        dig = store.put_stream([payload], agent_id="j")["digest"]
+        registry.publish(db, "j", {"id": tid, "version": "1.0.0", "runtime": "shell",
+                                   "entrypoint": entry, "description": tool_desc}, dig)
+
+    publish("nik", "ops/restart-the-box", "Restart the box",
+            "power-cycle the lab machine cleanly", "org.x/restart", "restart.sh",
+            "reboots a machine and waits for it", b"#!/bin/sh\n1")
+    set_identity(Identity(user="ana", device="laptop"))
+    publish("ana", "net/trace-a-socket", "Trace a socket",
+            "watch traffic on one file descriptor", "org.x/trace", "trace.sh",
+            "prints every packet crossing a helper port", b"#!/bin/sh\n2")
+
+    # browse (no query)
+    assert [s["id"] for s in skills.search(db, author="nik")["skills"]] == ["ops/restart-the-box"]
+    assert [t["title"] for t in traps.search(db, author="nik")["traps"]] == ["nik dead end"]
+    assert [t["id"] for t in registry.search(db, author="nik")["tools"]] == ["org.x/restart"]
+    # ...and the query path, which draws its candidates from FTS (and embeddings) instead
+    assert [s["id"] for s in skills.search(db, "socket", author="ana")["skills"]] == \
+        ["net/trace-a-socket"]
+    assert [t["title"] for t in traps.search(db, "dead end", author="ana")["traps"]] == \
+        ["ana dead end"]
+    assert [t["id"] for t in registry.search(db, "helper", author="ana")["tools"]] == \
+        ["org.x/trace"]
+    # an author who wrote none of them gets nothing, not everything
+    assert skills.search(db, author="nobody")["count"] == 0
+    assert traps.search(db, "dead end", author="nobody")["count"] == 0
+    assert registry.search(db, "helper", author="nobody")["count"] == 0
+
+
+@pytest.mark.anyio
+async def test_over_the_real_transport_a_search_projects_props_and_filters_by_author(env):
+    """The parameters have to reach the TOOL: its input schema is built from the signature, so a
+    parameter missing there cannot be passed at all, however well the library supports it."""
+    application, proj, _ = env
+    from hivemind_server.identity import IdentityStore
+    store = IdentityStore(application.state.cfg.identities_path)
+    nik, ana = store.mint("nik", "mac-studio"), store.mint("ana", "laptop")
+    transport = httpx.ASGITransport(app=application)
+    base = f"/p/{proj.name}"
+    async with Lifespan(application), httpx.AsyncClient(transport=transport,
+                                                        base_url="http://t", timeout=30) as c:
+        _call(await _post(c, base, nik, "tools/call", {"name": "schema_propose", "arguments": {
+            "kind": "node", "name": "note", "json_schema": {"type": "object"}}}, 2))
+        for tok, who in ((nik, "nik"), (ana, "ana")):
+            _call(await _post(c, base, tok, "tools/call", {"name": "graph_upsert", "arguments": {
+                "type": "note", "props": {"title": f"{who} wrote this", "bulk": "x" * 500}}}, 3))
+        out = _call(await _post(c, base, nik, "tools/call", {"name": "graph_search", "arguments": {
+            "query": "wrote", "fields": ["title"], "author": "nik"}}, 4))
+        every = _call(await _post(c, base, nik, "tools/call", {"name": "graph_search",
+                                                              "arguments": {"query": "wrote"}}, 5))
+    assert [h["props"] for h in out["results"]] == [{"title": "nik wrote this"}]
+    assert len(every["results"]) == 2 and "snippet" in every["results"][0]

@@ -56,14 +56,16 @@ def build_mcp(registry, identities, *, instructions: str = INSTRUCTIONS) -> MCPS
     mcp = ProjectAware(real)
 
     # ── graph reads ──────────────────────────────────────────────────────────────
-    @mcp.tool(annotations=RO, description="Search nodes by text and/or BY TYPE. Pass types=[...] to restrict, and an EMPTY query with types to browse every node of that type (returns total_of_type). graph_types() lists the types that have data. props_filter={'gated': true, 'kind': 'mach-service'} filters on exact FIELD VALUES - the only way to match booleans and numbers, since text search cannot tell gated=true from gated=false (null matches absent). Each hit carries a 200-character `snippet` by default: fields=[\"title\",\"status\"] instead returns just those keys per hit as real `props`, and is the cheap, precise way to read structure across a page. props=true returns every key but clamps the page to 10 hits and truncates any one node over 4000 characters, so prefer fields unless you genuinely need the lot; a reply that hit either bound says props_clamped. Paginated: pass the next_cursor from a reply back as cursor; has_more says when to stop.")
+    @mcp.tool(annotations=RO, description="Search nodes by text and/or BY TYPE. Pass types=[...] to restrict, and an EMPTY query with types to browse every node of that type (returns total_of_type). graph_types() lists the types that have data. props_filter={'gated': true, 'kind': 'mach-service'} filters on exact FIELD VALUES - the only way to match booleans and numbers, since text search cannot tell gated=true from gated=false (null matches absent). Each hit carries a 200-character `snippet` by default: fields=[\"title\",\"status\"] instead returns just those keys per hit as real `props`, and is the cheap, precise way to read structure across a page. props=true returns every key but clamps the page to 10 hits and truncates any one node over 4000 characters, so prefer fields unless you genuinely need the lot; a reply that hit either bound says props_clamped. Paginated: pass the next_cursor from a reply back as cursor; has_more says when to stop. author='<user>' restricts to what that identity wrote.")
     @_envelope
     def graph_search(query: str = "", types: Optional[list[str]] = None,
                      limit: int = 25, cursor: int = 0,
                      props_filter: Optional[dict] = None,
-                     fields: Optional[list[str]] = None, props: bool = False) -> dict:
+                     fields: Optional[list[str]] = None, props: bool = False,
+                     author: Optional[str] = None) -> dict:
         out = graph.search_nodes(db, query, types=types, limit=limit, cursor=cursor,
-                                 props_filter=props_filter, fields=fields, props=props)
+                                 props_filter=props_filter, fields=fields, props=props,
+                                 author=author)
         if query:                       # surface known dead-ends for this query, unprompted
             rel = traps.search(db, query, limit=3)["traps"]
             if rel:
@@ -210,11 +212,14 @@ def build_mcp(registry, identities, *, instructions: str = INSTRUCTIONS) -> MCPS
     @mcp.tool(annotations=RO,
               description="Search the mini-skill registry — procedures other agents wrote down "
                           "(how to do a complex action, with the gotchas). ALWAYS search here "
-                          "before working out a non-obvious procedure from scratch. mode: hybrid (default, lexical+semantic fused), lexical, or semantic.")
+                          "before working out a non-obvious procedure from scratch. mode: hybrid (default, lexical+semantic fused), lexical, or semantic. "
+                          "author='<user>' restricts to what that identity wrote.")
     @_envelope
     def skill_search(query: str = "", tags: Optional[list[str]] = None, limit: int = 20,
-                     response_format: str = "concise", mode: str = "hybrid") -> dict:
-        return skills.search(db, query, tags=tags, limit=limit, format=response_format, mode=mode)
+                     response_format: str = "concise", mode: str = "hybrid",
+                     author: Optional[str] = None) -> dict:
+        return skills.search(db, query, tags=tags, limit=limit, format=response_format, mode=mode,
+                             author=author)
 
     @mcp.tool(annotations=RO,
               description="Browse the whole mini-skill library: topics with counts plus a one-line "
@@ -287,13 +292,14 @@ def build_mcp(registry, identities, *, instructions: str = INSTRUCTIONS) -> MCPS
     # ── traps: recorded dead-ends ─────────────────────────────────────────────────
     @mcp.tool(annotations=RO,
               description="Search recorded dead-ends (approaches that wasted time and why). "
-                          "Check this BEFORE starting a non-trivial approach.")
+                          "Check this BEFORE starting a non-trivial approach. "
+                          "author='<user>' restricts to what that identity wrote.")
     @_envelope
     def trap_search(query: str = "", node_id: Optional[str] = None,
                     include_retired: bool = False, limit: int = 20,
-                    response_format: str = "concise") -> dict:
+                    response_format: str = "concise", author: Optional[str] = None) -> dict:
         return traps.search(db, query, node_id=node_id, include_retired=include_retired,
-                            limit=limit, format=response_format)
+                            limit=limit, format=response_format, author=author)
 
     @mcp.tool(annotations=RO, description="Fetch one trap in full.")
     @_envelope

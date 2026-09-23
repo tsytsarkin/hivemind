@@ -133,15 +133,24 @@ def get(db: Database, id: str, constraint: str = "") -> dict:
 
 
 def search(db: Database, query: str = "", *, tags: Optional[list] = None,
-           limit: int = 20, format: str = "concise", mode: str = "hybrid") -> dict:
+           limit: int = 20, format: str = "concise", mode: str = "hybrid",
+           author: Optional[str] = None) -> dict:
     limit = max(1, min(limit, 100))
-    from .search import _fts_query
+    from .search import _fts_query, author_filter
+    # A skill's author is on its LATEST version row. The filter goes into the candidate SQL so a
+    # prolific author cannot squeeze a rare one out of the pool, and is checked again on the row in
+    # the loop below because the semantic candidates come from the vector index, not from this SQL.
+    a_pred, a_args = author_filter("sv.author_user", author)
+    a_join = (" JOIN skill_version sv ON sv.id = s.id AND sv.version = s.latest_version"
+              if a_pred else "")
+    a_and, a_where = (f" AND {a_pred}", f" WHERE {a_pred}") if a_pred else ("", "")
     with db.read() as cur:
         if query:
             m = _fts_query(query)
             lexical = [r["id"] for r in cur.execute(
-                "SELECT id FROM skill_fts WHERE skill_fts MATCH ? ORDER BY rank LIMIT ?",
-                (m, limit * 3))] if m else []
+                f"SELECT f.id AS id FROM skill_fts f JOIN skill s ON s.id = f.id{a_join} "
+                f"WHERE skill_fts MATCH ?{a_and} ORDER BY f.rank LIMIT ?",
+                (m, *a_args, limit * 3))] if m else []
             semantic = []
             if mode in ("hybrid", "semantic"):
                 from . import embeddings
@@ -155,7 +164,8 @@ def search(db: Database, query: str = "", *, tags: Optional[list] = None,
                 ids = sorted(fused, key=lambda k: fused[k], reverse=True)
         else:
             ids = [r["id"] for r in cur.execute(
-                "SELECT id FROM skill ORDER BY created_tx DESC LIMIT ?", (limit * 3,))]
+                f"SELECT s.id AS id FROM skill s{a_join}{a_where} "
+                f"ORDER BY s.created_tx DESC LIMIT ?", (*a_args, limit * 3))]
         out = []
         for sid in ids:
             s = cur.execute("SELECT latest_version FROM skill WHERE id=?", (sid,)).fetchone()
@@ -165,6 +175,8 @@ def search(db: Database, query: str = "", *, tags: Optional[list] = None,
                             (sid, s["latest_version"])).fetchone()
             if r is None:
                 continue
+            if author and (r["author_user"] or LEGACY_USER) != author:
+                continue            # a semantic candidate never passed through the SQL filter
             t = json.loads(r["tags"])
             if tags and not set(tags) & set(t):
                 continue

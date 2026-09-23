@@ -176,16 +176,25 @@ def _newer_incompatible(all_versions, chosen: str, constraint: str):
 
 
 def search(db: Database, query: str = "", *, os: Optional[str] = None,
-           arch: Optional[str] = None, limit: int = 25, mode: str = "hybrid") -> dict:
+           arch: Optional[str] = None, limit: int = 25, mode: str = "hybrid",
+           author: Optional[str] = None) -> dict:
     """FTS-backed tool search (was a full-table scan with Python-side filtering)."""
-    from .search import _fts_query
+    from .search import _fts_query, author_filter
     limit = max(1, min(limit, 200))
+    # A tool's author is on its LATEST version row. In the candidate SQL so a prolific author
+    # cannot squeeze a rare one out of the pool, and re-checked on the row in the loop below
+    # because the semantic candidates come from the vector index rather than from this SQL.
+    a_pred, a_args = author_filter("tv.author_user", author)
+    a_join = (" JOIN tool_version tv ON tv.id = t.id AND tv.version = t.latest_version"
+              if a_pred else "")
+    a_and, a_where = (f" AND {a_pred}", f" WHERE {a_pred}") if a_pred else ("", "")
     with db.read() as cur:
         if query:
             m = _fts_query(query)
             lexical = [r["id"] for r in cur.execute(
-                "SELECT id FROM tool_fts WHERE tool_fts MATCH ? ORDER BY rank LIMIT ?",
-                (m, limit * 3))] if m else []
+                f"SELECT f.id AS id FROM tool_fts f JOIN tool t ON t.id = f.id{a_join} "
+                f"WHERE tool_fts MATCH ?{a_and} ORDER BY f.rank LIMIT ?",
+                (m, *a_args, limit * 3))] if m else []
             semantic = []
             if mode in ("hybrid", "semantic"):
                 from . import embeddings
@@ -199,14 +208,18 @@ def search(db: Database, query: str = "", *, os: Optional[str] = None,
                 ids = sorted(fused, key=lambda k: fused[k], reverse=True)
         else:
             ids = [r["id"] for r in cur.execute(
-                "SELECT id FROM tool ORDER BY created_tx DESC LIMIT ?", (limit * 3,))]
+                f"SELECT t.id AS id FROM tool t{a_join}{a_where} "
+                f"ORDER BY t.created_tx DESC LIMIT ?", (*a_args, limit * 3))]
         out = []
         for tid in ids:
             r = cur.execute(
-                "SELECT t.latest_version, tv.manifest FROM tool t JOIN tool_version tv "
-                "ON tv.id=t.id AND tv.version=t.latest_version WHERE t.id=?", (tid,)).fetchone()
+                "SELECT t.latest_version, tv.manifest, tv.author_user FROM tool t "
+                "JOIN tool_version tv ON tv.id=t.id AND tv.version=t.latest_version "
+                "WHERE t.id=?", (tid,)).fetchone()
             if r is None:
                 continue
+            if author and (r["author_user"] or LEGACY_USER) != author:
+                continue            # a semantic candidate never passed through the SQL filter
             m2 = json.loads(r["manifest"])
             arts = m2.get("artifacts") or []
             if os and arts and not any(a.get("os") == os for a in arts):
@@ -291,11 +304,13 @@ def attach_tools(mcp, db, envelope, RO, WRITE) -> None:
 
     @mcp.tool(annotations=RO,
               description="List/search published tools (id, latest version, description, "
-                          "platforms). Use this to discover what tools other agents have shared.")
+                          "platforms). Use this to discover what tools other agents have shared. "
+                          "author='<user>' restricts to what that identity wrote.")
     @envelope
     def tool_search(query: str = "", os: Optional[str] = None, arch: Optional[str] = None,
-                    limit: int = 25, mode: str = "hybrid") -> dict:
-        return search(db, query, os=os, arch=arch, limit=limit, mode=mode)
+                    limit: int = 25, mode: str = "hybrid",
+                    author: Optional[str] = None) -> dict:
+        return search(db, query, os=os, arch=arch, limit=limit, mode=mode, author=author)
 
     @mcp.tool(annotations=WRITE,
               description="Yank a tool version (hide from resolution; still fetchable by exact pin). "

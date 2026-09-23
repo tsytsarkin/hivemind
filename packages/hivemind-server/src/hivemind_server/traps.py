@@ -97,18 +97,25 @@ def for_node(db: Database, node_id: str, *, subject_key: Optional[str] = None,
 
 def search(db: Database, query: str = "", *, node_id: Optional[str] = None,
            include_retired: bool = False, limit: int = 20,
-           format: str = "concise") -> dict:
+           format: str = "concise", author: Optional[str] = None) -> dict:
     limit = max(1, min(limit, 100))
-    from .search import _fts_query
+    from .search import _fts_query, author_filter
+    # In SQL, not in the loop below: applied after the candidate LIMIT it would report "no traps by
+    # this author" whenever busier authors filled the pool.
+    a_pred, a_args = author_filter("t.author_user", author)
+    a_join = " JOIN trap t ON t.trap_id = f.trap_id" if a_pred else ""
+    a_and, a_where = (f" AND {a_pred}", f" WHERE {a_pred}") if a_pred else ("", "")
     with db.read() as cur:
         if query:
             m = _fts_query(query)
             ids = [r["trap_id"] for r in cur.execute(
-                "SELECT trap_id FROM trap_fts WHERE trap_fts MATCH ? ORDER BY rank LIMIT ?",
-                (m, limit * 3))] if m else []
+                f"SELECT f.trap_id AS trap_id FROM trap_fts f{a_join} "
+                f"WHERE trap_fts MATCH ?{a_and} ORDER BY f.rank LIMIT ?",
+                (m, *a_args, limit * 3))] if m else []
         else:
             ids = [r["trap_id"] for r in cur.execute(
-                "SELECT trap_id FROM trap ORDER BY created_tx DESC LIMIT ?", (limit * 3,))]
+                f"SELECT t.trap_id AS trap_id FROM trap t{a_where} "
+                f"ORDER BY t.created_tx DESC LIMIT ?", (*a_args, limit * 3))]
         out = []
         for tid in ids:
             r = cur.execute("SELECT * FROM trap WHERE trap_id=?", (tid,)).fetchone()
