@@ -4,12 +4,43 @@ Run this once, in order, when deploying the `feat/identity-and-projects` work to
 It is the operational half of [DEPLOY.md](DEPLOY.md): that file says how to install, this one says
 what to check on a server that already holds real data.
 
-**Nothing in this file has been run.** Every step is written to be executable as-is once the two
-variables below are filled in.
+**Nothing in this file has been run.** Every step is written to be executable as-is once the four
+variables in *Fill these in first* below are set.
 
-> This file is **tracked**, so it carries no machine's hostname, IP or home path — those live in
-> the two exports below and nowhere else (`test_no_host_specifics_in_tracked_files` enforces that
-> for every tracked file). Fill them in for your deployment and the rest copy-pastes.
+## Before you start: the local checks
+
+Run these from the repo root. They need nothing filled in, which is why they come first.
+
+```sh
+export UV=~/.local/hivemind-tooling/bin/uv UV_PYTHON_INSTALL_DIR=~/.local/hivemind-tooling/python
+$UV run --group dev pytest packages/ -q
+```
+
+The suite must come back **green**. Do not match a count: it moves every time a test lands (533 when
+this line was written, and two agents were still adding to it that day), so the colour is the
+requirement and any number here is only an example. Two of those tests are what make this file safe
+to follow at all:
+
+- `test_no_host_specifics.py` — no home path, username, private IP or `user@ip` in a tracked file,
+  **this one included**. It has a positive control, so a pass means the patterns can still see one.
+- `test_invoked_commands.py` — nothing this repo runs or documents invokes a subcommand that does
+  not exist. A `bus-reap` cron step ran nightly for the life of the WebSocket bus before it existed.
+
+Then confirm the branch you are about to ship is the one you think it is, and read the counts off
+the repository rather than trusting a number written here — every count this plan has written down
+has gone stale within days:
+
+```sh
+git rev-parse --abbrev-ref HEAD                 # feat/identity-and-projects
+git rev-list --left-right --count main...HEAD   # "0  <N>": main holds nothing HEAD lacks
+git merge-base --is-ancestor main HEAD && echo "main is an ancestor of HEAD: --ff-only will work"
+```
+
+## Fill these in first
+
+> This file is **tracked**, so it carries no machine's hostname, IP or home path — those live in the
+> four exports below and nowhere else (`test_no_host_specifics_in_tracked_files` enforces that for
+> every tracked file). Fill in all four and the rest copy-pastes.
 
 ```sh
 export BOX=<user>@<server-host>            # the server, reachable by ssh
@@ -17,6 +48,27 @@ export ROOT=http://<server-host>:8787      # the same server over HTTP
 export REPO=<path to this repo>            # where you run the local git commands
 export LIVE=default                        # the project that already holds data
 ```
+
+Pasting that block unfilled is a loud shell syntax error, which is what you want. Filling in only
+the host-looking ones is the trap: **unset `REPO` is this file's one silent failure.** Measured in
+both bash and zsh, `cd "$REPO"` with `REPO` unset returns 0 and stays in the current directory — so
+step 1's `git checkout main && git merge --ff-only` would run against whatever repository you
+happened to be standing in. Two things stop that, and you want both: run this guard now, and note
+that every `cd` below is written `cd "${REPO:?…}"`, which cannot resolve to a valid command.
+
+```sh
+: "${BOX:?fill in the export block above}" \
+  "${ROOT:?fill in the export block above}" \
+  "${REPO:?fill in the export block above}" \
+  "${LIVE:?fill in the export block above}"
+[ -d "$REPO/.git" ] || echo "!!! REPO=$REPO is not a git checkout"
+[ -n "${BOX%%@*}" ] && [ "${BOX#*@}" != "$BOX" ] || echo "!!! BOX should be <user>@<host>"
+echo "preflight ok: $BOX $ROOT $REPO $LIVE"
+```
+
+Re-run that guard in every new shell. `${VAR:?msg}` aborts the command and a non-interactive shell
+before anything runs, in both bash and zsh (measured), so a missed export cannot become a command
+that does something else.
 
 The repo on the server is assumed at `~/hivemind`, with data at `~/hivemind-data` and the log at
 `~/hivemind-data/server.log` — `deploy/hivemind.env` is what decides that.
@@ -29,13 +81,13 @@ The committed plan (`docs/superpowers/plans/2026-09-22-hivemind-identity-and-pro
 four instructions that are wrong. This file supersedes them; they are listed so nobody follows the
 plan instead.
 
-1. **`git push origin main` pushes nothing.** Measured: local `main` and `origin/main` are both at
-   the merge base `1825ca8`, and `HEAD` is on `feat/identity-and-projects`, 60 commits ahead
-   (`git rev-list --left-right --count main...HEAD` → `0  60`). So that push *succeeds* and sends
-   nothing, while the next line pushes `HEAD` straight to the server — leaving the server running
-   60 commits GitHub does not have, and leaving DEPLOY.md's `git clone <repo>` recovery path
-   installing the **old** server. Step 1 below fast-forwards `main` first and then *verifies* the
-   remote actually moved.
+1. **`git push origin main` pushes nothing.** Local `main` and `origin/main` are both still at the
+   merge base `1825ca8` while every commit of this work sits on `feat/identity-and-projects` — the
+   `git rev-list --left-right --count main...HEAD` you ran above is what says how many, and the
+   left-hand `0` is the point. So that push *succeeds* and sends nothing, while the next line pushes
+   `HEAD` straight to the server — leaving the server running commits GitHub does not have, and
+   leaving DEPLOY.md's `git clone <repo>` recovery path installing the **old** server. Step 1 below
+   fast-forwards `main` first and then *verifies* the remote actually moved.
 2. **"A write with no `project` argument is refused" holds only on the neutral endpoint.** True for
    `POST $ROOT/mcp`. On `POST $ROOT/p/$LIVE/mcp` — which is what every deployed plugin uses, since
    `server_url` defaults to the per-project form — the URL *is* the project, so the write lands in
@@ -45,12 +97,13 @@ plan instead.
 3. **`backfill-authors` must be looped over every project.** It takes the global `--project`
    (default `default`) and acts on one project per invocation, exactly like `gc` and `reindex`. Any
    project you skip keeps its NULLs, silently and forever.
-4. **The expected test count is 517, not 199.** The plan's per-task figures are predictions made
-   before the work and were never revised. `517 passed` is what the finished branch runs.
+4. **Do not check the suite against the plan's `199`.** Those per-task figures are predictions made
+   before the work and were never revised, and every count written down since has gone stale within
+   days. Run the suite (see *Before you start*) and require it **green**, not equal to a number.
 
 ## Behaviour changes an operator has to know about
 
-Read these before step 1; three of them will surprise somebody otherwise.
+Read all of these before step 1. Each one changes something an operator or a script can observe.
 
 - **`hivemind-admin mint-token` changed shape on the legacy path.** With `--client-id` it now
   prints a **bare token** on stdout where it used to print a JSON object
@@ -91,8 +144,8 @@ Read these before step 1; three of them will surprise somebody otherwise.
   refused once, **exits**, and its agent must re-run `bus_connect`.
 - **`pytest-timeout` is now a dev dependency** with `timeout = 60` in `pyproject.toml`. A test that
   wedges presents as a red test rather than as a process to go and find. If the suite is run in CI
-  with `--no-cov`-style flag juggling, make sure the config is still picked up (`pytest packages/ -q`
-  from the repo root is what the numbers below were measured with).
+  with `--no-cov`-style flag juggling, make sure the config is still picked up — the invocation in
+  *Before you start* runs from the repo root, which is what makes `pyproject.toml` apply.
 
 ---
 
@@ -105,12 +158,19 @@ when that file is absent — i.e. **a restore would have published every private
 are now backed up.
 
 ```sh
-ssh "$BOX" 'cd ~/hivemind && bash deploy/backup.sh && tail -20 ~/hivemind-backup/backup.log'
+ssh "$BOX" 'cd ~/hivemind && bash deploy/backup.sh && tail -20 "${HIVEMIND_BACKUP_DIR:-$HOME/hivemind-backup}/backup.log"'
 ```
 
 Confirm the log shows, per project, no `!!! no project.json` line, and — once, at the end —
 `identities.json backed up (N tokens)`. `no identities.json at …` is correct *before* step 3.1 and
 must not still appear afterwards.
+
+> **`backup.sh` reads the environment; it does not source `deploy/hivemind.env`** (unlike
+> `maintenance.sh`, which does). Run by hand or from the cron line in DEPLOY.md it therefore uses
+> its own defaults — `$HOME/hivemind-data` and `$HOME/hivemind-backup`. If this deployment's
+> `hivemind.env` moved either path, export `HIVEMIND_DATA_DIR`/`HIVEMIND_BACKUP_DIR` for the run
+> (and in the crontab), or the backup reads the wrong directory. It fails loudly with
+> `!!! no projects dir at …` rather than backing up nothing quietly, so check the exit status.
 
 > The copy of `backup.sh` on the server is the OLD one until step 1 syncs the repo. Either run
 > step 1 first and then this, or accept that this first backup lacks the two files — in which case
@@ -122,7 +182,7 @@ The order matters: the remote first, so the `git clone` recovery path in DEPLOY.
 code the server is about to run.
 
 ```sh
-cd "$REPO"
+cd "${REPO:?fill in the export block first}"
 
 # 1a. Fast-forward main onto the finished branch, then push BOTH.
 git checkout main && git merge --ff-only feat/identity-and-projects
@@ -136,16 +196,26 @@ test "$(git rev-parse origin/main)" = "$(git rev-parse main)" \
 git rev-list --left-right --count origin/main...feat/identity-and-projects   # expect 0  0
 
 # 1c. The server cannot fetch from the private repo — push to it directly.
+#     HEAD is `main` here, so this guard is what stops a failed 1a from shipping the OLD code.
+git merge-base --is-ancestor feat/identity-and-projects HEAD \
+  || echo "!!! HEAD does not contain the branch — 1a did not complete. STOP."
 git push "$BOX":hivemind HEAD:refs/heads/_in
 
-# 1d. Adopt on the server and restart.
+# 1d. BEFORE adopting: 1e resets hard, which discards local edits to TRACKED files on the server.
+#     Anything listed here that is not `??` is about to be destroyed without a message.
+ssh "$BOX" 'cd ~/hivemind && git status --short'
+
+# 1e. Adopt on the server and restart.
 ssh "$BOX" 'cd ~/hivemind && git reset --hard _in && git branch -D _in && bash deploy/restart.sh'
 
-# 1e. Liveness.
+# 1f. Liveness.
 curl -s "$ROOT/healthz"              # -> {"ok":true}  and NOTHING else
-curl -s "$ROOT/p/$LIVE/healthz"      # -> {"ok":true,"project":"default"}
+curl -s "$ROOT/p/$LIVE/healthz"      # -> {"ok":true,"project":"<the value of $LIVE>"}
 curl -s "$ROOT/"                     # index; must NOT list project names
 ```
+
+> `deploy/hivemind.env` survives the reset — it is gitignored, so it is untracked and `--hard`
+> leaves it alone. Nothing else hand-edited in that checkout does, which is what 1d is for.
 
 > `restart.sh` launches with `uv run --package hivemind-server` via `setsid`, so it survives SSH
 > logout but **not a reboot**. The systemd unit is still not installed — see
@@ -241,7 +311,9 @@ diff <(curl -s -D- "$ROOT/p/alice.private/healthz" | grep -iv '^date:') \
 ```
 
 A **shared** project is different, and both halves of that rule are worth checking here because one
-more open tail on it would be an ACL bypass:
+more open tail on it would be an ACL bypass. Exactly two tails answer without a token — `""` and
+`healthz` — and `test_a_shared_projects_open_tails_are_exactly_two` in
+`packages/hivemind-server/tests/test_project_acl.py` is what pins that on both sides:
 
 ```sh
 curl -s -o /dev/null -w 'index    %{http_code}\n' "$ROOT/p/$LIVE/"          # 200 — open
@@ -312,9 +384,12 @@ ssh "$BOX" 'for p in $(ls ~/hivemind-data/projects); do \
     "SELECT author_user, COUNT(*) FROM node_version GROUP BY 1 ORDER BY 2 DESC LIMIT 15;"; done'
 ```
 
-Expect only `legacy:*` values plus whatever real identities wrote **since** step 3.1. A bare
-username on a row older than that mint is a bug — stop and report it. A pre-existing
-`legacy:unknown` is *not* the same as NULL: the backfill leaves every non-NULL value alone.
+Expect only `legacy:*` values, plus `cli:<shell-user>` on anything written by a `hivemind-admin`
+subcommand, plus whatever real identities wrote **since** step 3.1. A bare username on a row older
+than that mint is a bug — stop and report it; `legacy:<name>` and `cli:<name>` are not that, because
+`identity.USERNAME_RE` forbids `:` so neither can ever be minted or matched as the person. A
+pre-existing `legacy:unknown` is *not* the same as NULL: the backfill leaves every non-NULL value
+alone.
 
 > **This is the one genuinely irreversible step.** `--yes` rewrites NULL author columns in place and
 > there is no un-backfill. That is what step 0 is for.
@@ -358,8 +433,12 @@ call "$A" graph_types '{}'
 ```
 
 To give the fleet the refusing behaviour, change the plugin's `server_url` from the per-project form
-to the server root — and read the trade-off table in [../docs/clients.md](../docs/clients.md) first:
-the root URL cannot move blobs or reach the bus, so the CLI must keep a project base URL either way.
+to the server root — and read the trade-off table in [../docs/clients.md](../docs/clients.md) first.
+What the root form gives up is the **REST** surface: `/blobs/…`, `/guide` and the catalogs all need a
+project the URL has not named and `404` there, so the `hivemind` CLI must keep a project base URL
+either way (it has no `--project` flag). The MCP surface is not affected — measured against a
+neutral-endpoint call, `bus_connect(project=<name>)` succeeds and hands back a working
+`ws://<host>/p/<name>/bus/ws`, because the URL it returns is the per-project one.
 
 ## Step 4: record the work in Hivemind itself
 
@@ -419,21 +498,12 @@ ssh "$BOX" 'cd ~/hivemind && git reset --hard 1825ca8 && bash deploy/restart.sh'
 The additive parts are not undone by that and do not need to be: the authorship columns are nullable
 and ignored by the old code, and `project.json` files read as `shared` under it.
 
-What a rollback **does** undo is the ACL — a private project becomes reachable by any token for the
-server again. So if you roll back after creating private projects, move them out of the projects root
-rather than leaving them served.
+What a rollback **does** undo is the ACL: the old code has no `projects_meta` at all, so it ignores
+`project.json` entirely and gates each `/p/<name>/` request on that project's own `tokens.json`. For
+a project created through `project_create` there is no `tokens.json`, so at startup the old code
+**mints a bootstrap token for it and prints that token to the server log** — which is how a formerly
+private graph becomes reachable to anyone who can read the log or the file. So if you roll back after
+creating private projects, move their directories out of the projects root first rather than leaving
+them served.
 
 The one genuinely irreversible step is **3.5**. There is no un-backfill.
-
-## Before you start: the local checks
-
-```sh
-cd "$REPO"
-export UV=~/.local/hivemind-tooling/bin/uv UV_PYTHON_INSTALL_DIR=~/.local/hivemind-tooling/python
-$UV run --group dev pytest packages/ -q
-```
-
-Expect **`517 passed`**. `test_no_host_specifics.py` must be green (no home paths, usernames or IPs
-in tracked files) and so must `test_invoked_commands.py` (no script or doc invokes a subcommand that
-does not exist — a `bus-reap` step ran nightly from cron for the life of the WebSocket bus before
-that test existed).

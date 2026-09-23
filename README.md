@@ -22,9 +22,9 @@ live guide). Meaning is data — shipped as a swappable **domain pack** (`packs/
 | Path | What |
 |---|---|
 | `packages/hivemind-server/` | The server: MCP (streamable HTTP) + REST, SQLite-backed. Python ≥3.11. |
-| `packages/hivemind-client/` | The client library + `hivemind` CLI. Python ≥3.9, only dep is `httpx`. |
-| `plugin/` | The Claude Code plugin (MCP config + self-updating bootstrap skill). |
-| `packs/` | Optional, swappable, **layerable** domain packs (schema + guide). Ships `security-research` and `ios-macos-attack-surface`. See [docs/packs.md](docs/packs.md). |
+| `packages/hivemind-client/` | The client library + `hivemind` CLI. Python ≥3.9; deps are `httpx` and `websockets` (the bus listener). |
+| `plugin/` | The Claude Code plugin: MCP config, the self-updating bootstrap skill, a schema-authoring skill, the `/hivemind:project` command and a `SessionStart` hook. |
+| `packs/` | Optional, swappable, **layerable** domain packs (schema + guide). Ships `security-research`, `ios-macos-attack-surface` and `research-workflow`. See [docs/packs.md](docs/packs.md). |
 | `deploy/` | Deploy docs, systemd unit, daily backup + restore, bootstrap + relock scripts. |
 | `docs/` | Data model, API, the agent bus, guide authoring, security notes. |
 
@@ -108,7 +108,7 @@ so it would be a separate graph). The server listens on `127.0.0.1` by default; 
 server and install the plugin there — no server or checkout needed on the client:
 
 ```sh
-hivemind-admin --project default mint-token --client-id laptop   # on the server
+hivemind-admin mint-token --user <name> --device laptop          # on the server
 claude plugin marketplace add tsytsarkin/hivemind                # on the new machine
 claude plugin install hivemind@hivemind-marketplace --scope user \
   --config server_url=http://<server-ip>:8787/p/default --config api_token=hm_…

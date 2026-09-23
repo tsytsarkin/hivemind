@@ -48,8 +48,9 @@ Do this now, in order. **Do not choose a project for the user.**
 4. **Create it if it is new.** `project_create(name=…, visibility="private"|"shared", label=…,
    schema=…)`. Ask which `schema` they want rather than defaulting:
 
-   - `inherit` — copies the node/edge types of the project you are in. Right when the new project
-     tracks the same kind of work as the old one.
+   - `inherit` — copies the node/edge types of the project you are in, or of the server's default
+     project when the call arrives on the project-neutral endpoint, which names none. Right when the
+     new project tracks the same kind of work as the old one.
    - `interview` — leaves it empty and hands the vocabulary back to the user. Right when the work
      is different enough that the current types would not fit it.
    - `bare` — leaves it empty on purpose; you define types with `schema_propose` as the work
@@ -80,8 +81,10 @@ Do this now, in order. **Do not choose a project for the user.**
    `--show`, and the hook never injects it.
 
    The pin is local state keyed by the session id; the `SessionStart` hook re-injects the name on
-   startup, `/clear` and compaction, which is the whole point — a compaction drops the choice from
-   context, and a dropped choice plus a defaulted write is how private work reaches a shared graph.
+   startup, `/clear`, compaction, `--resume` and a fork (matcher:
+   `startup|clear|compact|resume|fork`), which is the whole point — a compaction drops the choice
+   from context, and a dropped choice plus a defaulted write is how private work reaches a shared
+   graph.
 
 6. **Confirm in one line**: the project, its visibility, and that every Hivemind call from now on
    passes `project=<name>`. The `project` echoed in each tool result is authoritative — if it ever

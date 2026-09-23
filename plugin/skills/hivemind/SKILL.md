@@ -22,13 +22,14 @@ small bootstrap; the **authoritative, live** guidance comes from the server.
 ## Every call names a project — pin it once, first
 
 A Hivemind server holds several **projects**: separate graphs, some shared with everyone, some
-private to one user. **Every tool takes a `project=<name>` argument, and write tools refuse when no
-project is resolvable** — deliberately, because a defaulted write is how private work would land in
-a graph everyone can read.
+private to one user. **Every tool takes a `project=<name>` argument, and no call proceeds when no
+project is resolvable** — a write refuses in those words, a read refuses more softly, and neither
+falls back to a configured default. That is deliberate: a defaulted write is how private work would
+land in a graph everyone can read.
 
 - **If a project is pinned for this session** you will have been told which on the way in (the
-  plugin's `SessionStart` hook re-injects it on startup, `/clear` and compaction). Pass that name
-  as `project=` on every call.
+  plugin's `SessionStart` hook re-injects it on startup, `/clear`, compaction, `--resume` and a
+  fork). Pass that name as `project=` on every call.
 - **If nothing is pinned, ask once — do not pick for the user.** `project_list` shows what they can
   use, grouped: shared with everyone, theirs, shared with them. Offer their private graph and a new
   scratch project too, create it with `project_create` if they want a new one, then pin it:
@@ -111,7 +112,11 @@ token. A `refused` line means the key expired or was revoked — call `bus_conne
 
 **Sending:** `bus_peers()` to see who is connected, then `bus_send(to="<label>", body="…")`, or
 `bus_broadcast(body="…")` for everyone. The reply tells you whether it was delivered live or
-queued for a peer that is momentarily disconnected.
+queued for a peer that is momentarily disconnected. Names are bounded: the label you register with,
+the `agent` you send as, and a broadcast's `room` are stripped and **cut to 64 characters**, so an
+over-long descriptive label is shortened rather than refused. `to` is not — it has to match a
+registered label exactly, so address the one `bus_peers()` shows or you get "no peer". A `body` over
+256 Ki **characters** is refused outright; put anything that big in the graph or a blob instead.
 
 **Long messages.** A notification is clipped at about 512 characters, so a long message arrives
 truncated — but the listener has the whole thing and keeps it: every message and broadcast it
@@ -123,8 +128,8 @@ grep <id> ~/.hivemind/bus-inbox.jsonl*    # this machine's copy; needs no tool a
 bus_message("<id>")                       # any host that exposes the tool; ~1 h retention
 ```
 
-The inbox has a horizon: it is capped at 4 MiB and rotates once to `bus-inbox.jsonl.1`, which the
-next rotation discards — thousands of messages, no time limit, but not an archive. Search both
+The inbox has a horizon: it rotates at 4 MiB into `bus-inbox.jsonl.1`, and the rotation after that
+discards it — thousands of messages, no time limit, but not an archive. Search both
 files (the `*` above), and if the id is in neither, it fell off the end. A line that does not parse
 as JSON is a message whose write was cut short (a full disk); it was never claimed as recorded, and
 only that one line is affected.
@@ -232,7 +237,7 @@ Complete surface. Read tools are safe to call freely; write tools record provena
 | Tool | Use |
 |---|---|
 | `graph_types()` | which node types actually hold data, with counts — pick one to browse |
-| `graph_search(query, types=[…], props_filter={…}, limit, cursor)` | text search, **by type**, and **by field value**. An EMPTY query with `types` browses every node of that type (`total_of_type`). `props_filter={"gated": true}` is the only way to match booleans/numbers — text search cannot tell `gated=true` from `gated=false`; `null` matches absent. Filters AND together. Paginate: pass the reply's `next_cursor` back as `cursor` until `has_more` is false |
+| `graph_search(query, types=[…], props_filter={…}, fields=[…], props, author, limit, cursor)` | text search, **by type**, and **by field value**. An EMPTY query with `types` browses every node of that type (`total_of_type`), and pages properly. `props_filter={"gated": true}` is the only way to match booleans/numbers — text search cannot tell `gated=true` from `gated=false`; `null` matches absent. Filters AND together. `fields=["title","status"]` replaces each hit's 200-character `snippet` with just those props keys plus that hit's `author`; `props=true` returns every key. `author="<user>"` restricts to rows whose current version that identity wrote. Paginate: pass the reply's `next_cursor` back as `cursor` until `has_more` is false |
 | `graph_get(node_id \| subject_key+subject_version, history, as_of)` | the node **plus its mini-skills (described), tools and traps** |
 | `graph_subjects(subject_key, as_of_subject)` | every version-cell of one thing |
 | `graph_neighbors(node_id, edge_types, depth≤4, direction)` | traversal |
@@ -288,7 +293,7 @@ DEPLOY.md). Point it at your project: `export HIVEMIND_SERVER_URL=… HIVEMIND_T
 - `hivemind artifact get <digest> <dest>` → downloads + verifies.
 - `hivemind tool publish <script.py> --id <rdns> --version <semver>` → share a self-contained
   (PEP 723) tool; another machine runs `hivemind tool get <id>` then the `uv run` command in the
-  generated `RUN.md` (bootstrap uv first: `scripts/bootstrap-uv.sh`).
+  generated `RUN.md` (bootstrap uv first: `deploy/bootstrap-uv.sh`).
 - `hivemind guide get [section]`, `hivemind schema get`.
 - `hivemind bus connect <label>` → mints a ticket and prints the Monitor command;
   `hivemind bus listen --label <label>` is the receiving end (the plugin's stdlib listener is the
@@ -322,11 +327,16 @@ than folding them in. Re-creating each edge against the canonical node is the on
 - **A refused write is not a transport error.** Validation and endpoint-type failures come back as
   `{"ok": false, "error_kind": "invalid", ...}` inside a normal 200 response. A client that only
   checks for a JSON-RPC `error` reports success while every write silently vanishes. Check `ok`.
-- **`graph_search` is for text search, not enumeration.** With an empty query it ignores `cursor`
-  (re-serving the first page indefinitely) and returns nothing when a `types` filter is set. To walk
-  the graph, traverse from a known node.
+- **A short `graph_search` page is not the last page.** In `fields=`/`props=true` mode the reply
+  stops early once 40000 characters of props have been shipped (and `props=true` caps the page at
+  10 hits), so a `limit=25` request can come back with fewer. The reply says `props_clamped` and
+  names which bound fired in `props_clamped_by`; keep paging while `has_more` is true. One hit's
+  props over 4000 characters arrives as a `_prefix` marker naming the real size — `graph_get` that
+  one node for the rest rather than parsing the fragment.
 - Edge endpoint types are enforced against each edge type's `src_types`/`dst_types`.
-- Pass `expected_head` when superseding; a 409 means re-read and retry, not failure.
+- Pass `expected_head` when superseding. A stale head comes back the same way — a 200 carrying
+  `{"ok": false, "error_kind": "conflict"}`, not an HTTP status — and means re-read and retry, not
+  failure.
 - Widening an enum, adding an optional property, or widening an edge's `dst_types` is additive and
   safe — re-applying a pack inserts a new type *version* and leaves existing data valid.
 

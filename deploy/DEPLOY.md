@@ -51,7 +51,7 @@ uv tool install --from ./packages/hivemind-client hivemind      # puts `hivemind
 ```sh
 python3 -m venv .venv-hm && . .venv-hm/bin/activate
 pip install -U pip
-pip install ./packages/hivemind-client                    # only real dep is httpx
+pip install ./packages/hivemind-client                    # deps: httpx + websockets (pure wheels)
 hivemind --help
 ```
 Then point it at your project:
@@ -80,8 +80,14 @@ run is *not* reachable from other machines. To serve a LAN/Tailscale network set
 `HIVEMIND_HOST=0.0.0.0` (this is what `deploy/hivemind.env` does) and confirm with
 `curl http://<server-ip>:8787/healthz` from another host.
 
-Bearer auth gates every `/p/<project>` request regardless — being on the LAN is not
-authorization (unauthenticated requests get `401`). Never bind a public interface.
+Being on the LAN is not authorization. Every `/p/<project>` request needs a bearer token with
+exactly two exceptions, both on a **shared** project and neither exposing project data: the endpoint
+index `/p/<name>/` and the health probe `/p/<name>/healthz` answer `200` without one, because clients
+hold only a project base URL and a healthy server must not look dead to them. Everything else there
+is `401`. A **private** project answers `404` to an unauthenticated caller on every path, its own
+health included — indistinguishable from a project that does not exist. The allowlist is exactly two
+entries and `test_a_shared_projects_open_tails_are_exactly_two` pins both halves of that; widening it
+is an ACL bypass. Never bind a public interface.
 
 To add client machines (token minting, secure transfer, installing just the plugin), see
 [../docs/clients.md](../docs/clients.md).
@@ -108,6 +114,11 @@ failure, not just an accidental delete). Installed on the lab box as:
 ```
 30 3 * * * /bin/bash $HOME/hivemind/deploy/backup.sh
 ```
+
+Unlike `maintenance.sh`, `backup.sh` does **not** source `deploy/hivemind.env` — it reads the
+environment and otherwise uses its own defaults. If this deployment moved `HIVEMIND_DATA_DIR` or
+`HIVEMIND_BACKUP_DIR` in that file, set them in the crontab too, or the nightly run reads the
+default paths instead (loudly: `!!! no projects dir at …`, then a non-zero exit).
 
 What it does, per project:
 
@@ -141,8 +152,9 @@ that project must re-run `bus_connect` once, and none of them recovers on its ow
 caller does. No data is lost: bus traffic is ephemeral by definition and anything durable is in the
 graph. See [restore.md](restore.md).
 
-Tunables: `HIVEMIND_BACKUP_DIR` (default `$HIVEMIND_BACKUP_DIR`), `HIVEMIND_BACKUP_KEEP`,
-`HIVEMIND_DATA_DIR`. Log: `<backup dir>/backup.log`.
+Tunables, with the defaults the script itself applies: `HIVEMIND_BACKUP_DIR`
+(`$HOME/hivemind-backup`), `HIVEMIND_BACKUP_KEEP` (`7`), `HIVEMIND_DATA_DIR`
+(`$HOME/hivemind-data`). Log: `<backup dir>/backup.log`.
 
 Measured on the live project (1.7 GB database, 9,475 blobs / 9.7 GB): **23 s** for the first run,
 **17 s** incrementally with zero blobs transferred. Restore procedure: [restore.md](restore.md).
@@ -153,7 +165,8 @@ Measured on the live project (1.7 GB database, 9,475 blobs / 9.7 GB): **23 s** f
 here: **push to the remote before pushing to the server.** Measured on this branch, `main` and
 `origin/main` were both at the merge base while the work sat on a feature branch, so
 `git push origin main` succeeded and sent nothing — and the server, which is pushed to directly
-because it cannot fetch from the private repo, would then have run 60 commits GitHub did not have.
+because it cannot fetch from the private repo, would then have run every commit of that branch while
+GitHub held none of them (`git rev-list --left-right --count main...HEAD` is what says how many).
 The `git clone <repo>` recovery path at the top of this file would have reinstalled the **old**
 server. The checklist fast-forwards `main` first and then verifies that the remote actually moved.
 

@@ -77,12 +77,13 @@ permission to design the whole vocabulary yourself.
 is not permission to design the vocabulary alone. Start bare and add one type at a time as the work
 forces each one into existence. A bare project stays correctable; an invented one does not.
 
-Inheriting is a creation-time option (`project_create(..., schema="inherit")`), so for a project
-that already exists and is empty it means one of two things: re-create it with `schema="inherit"`,
-or copy the types across yourself — `schema_get` on the source, `schema_apply` here. If you copy by
-hand, carry each edge type's **traits** over explicitly. `schema_get` reports them as plain fields
-sitting next to the schema, and a pack that copies only the schema comes out `versioned`, cyclic
-and unconstrained, because every trait you omit falls back to its default.
+Inheriting is a creation-time option (`project_create(..., schema="inherit")`) and it fires only
+when the project is really created: called on a name that already exists, `project_create` returns
+`existing: true` and copies nothing, and no tool deletes a project so it cannot be re-created. So
+for a project that already exists and is empty, copy the types across yourself — `schema_get` on the
+source, `schema_apply` here. Carry each edge type's **traits** over explicitly: `schema_get` reports
+them as plain fields sitting next to the schema, and a pack that copies only the schema comes out
+`versioned`, cyclic and unconstrained, because every trait you omit falls back to its default.
 
 ## Keep it small
 

@@ -33,9 +33,10 @@ Defaults matter: an edge type you declare with no traits is `versioned`, `direct
   needs. Do not model inheritance you are relying on.
 - **Additive-only is a floor, not a lock.** Adding an optional property, dropping a `required`
   entry or widening an enum is accepted; adding a required field, removing a property, narrowing an
-  enum or tightening `additionalProperties` is refused as destructive — *unless the caller passes*
-  `force`, which `schema_apply` exposes and `schema_propose` does not, and which invalidates data
-  already in the graph. Nothing deletes a type at all, with or without `force` — which is why an
+  enum or tightening `additionalProperties` is refused as destructive. Exactly one thing overrides
+  that: `schema_apply(force=true)`, which invalidates data already in the graph. `schema_propose`
+  takes a `force` argument too, but it overrides something else — the near-duplicate *name* guard —
+  and its destructive refusal has no override at all. Neither call deletes a type, which is why an
   unnecessary type is forever.
 
 ## The two axes are not edges

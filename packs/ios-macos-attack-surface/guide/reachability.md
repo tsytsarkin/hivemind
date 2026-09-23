@@ -12,8 +12,8 @@ invent an unkeyed one.
                                          v                       v
                                        gate <--satisfies--   format
 
-`finding --affects--> component|function|entry_point|format` ties a defect to its surface.
-`finding|function|component --present_on--> build` carries per-build presence evidence.
+`finding --affects--> component|function|entry_point|format|gate` ties a defect to its surface.
+`finding|function|component|entry_point --present_on--> build` carries per-build presence evidence.
 `finding --documented_by--> lane` points at the workstream that produced it.
 
 ## The one rule that matters

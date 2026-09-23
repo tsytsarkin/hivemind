@@ -10,7 +10,7 @@ check), `format` (a parsed data format / UTI), `build` (an OS build), `lane` (a 
 
 **Edge types:** `attacker_reaches` and `attacker_blocked` (both carry mandatory provenance —
 see below), `exposes`, `gated_by`, `satisfies`, `parses`, `runs_as`, `affects`, `present_on`,
-`documented_by`, `same_as`.
+`documented_by`, and a widened `evidence_for` (its range gains `lane`).
 
 **The design point:** a reachability claim cannot be recorded without saying how it was
 established. `attacker_reaches` requires `verification`, and `attacker_blocked` additionally

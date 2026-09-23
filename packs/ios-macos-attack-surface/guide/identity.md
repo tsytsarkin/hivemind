@@ -28,6 +28,8 @@ When two nodes denote the same real thing:
 
 1. Bind them with `same_as` — symmetric, non-assertive, carrying `confidence`
    (`exact`|`semantic`|`partial`), a `reason`, and `canonical` set to the surviving `node_id`.
+   **This pack does not define `same_as`**; it ships in the `research-workflow` pack, so check
+   `schema_get` and apply that pack if the type is missing rather than inventing a second one.
    **Do not use `contradicts`.** A duplicate is not a dispute; `contradicts` is assertive and would
    wrongly flag both nodes `disputed`.
 2. Prefer the subject-keyed node as canonical. If neither is keyed, create a keyed one and make

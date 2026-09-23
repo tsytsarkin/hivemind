@@ -67,6 +67,10 @@ default, and the cost has to be written down because nobody would guess it:
 - Nothing is lost. Bus traffic is ephemeral by design; anything durable is already in the graph.
   Queued offline messages are in memory and were gone with the process anyway.
 
-If you would rather keep the keys valid across a restore, copy the file yourself *before* starting
-the server (`cp $B/bus_secret $P/bus_secret && chmod 600 $P/bus_secret`) — and understand that you
-are also reinstating any key you revoked by rotating it.
+There is no copy of it in `$B` to put back — `backup.sh` never writes one, so do not go looking. The
+usual restore leaves the live `$P/bus_secret` untouched (only the database, blobs and the two ACL
+files above are replaced), and in that case the keys stay valid and there is nothing to do. The
+listeners die once only when the secret itself is gone: a lost or rebuilt data directory, or a
+deliberate rotation. If you want to survive that with keys intact, you have to have taken your own
+copy of `$P/bus_secret` beforehand and restore it *before* starting the server (`chmod 600` it) —
+and understand that this also reinstates any key a rotation revoked.
