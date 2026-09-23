@@ -1,5 +1,6 @@
 """`hivemind-admin` — operator CLI, run ON the server host (direct DB/file access, no network).
-Mint tokens, create projects, apply packs, promote schema, merge guide, GC, reindex.
+Mint tokens, create projects, apply packs, promote schema, merge guide, GC, reindex,
+backfill authorship.
 """
 from __future__ import annotations
 
@@ -58,6 +59,104 @@ def _cli_identity():
     return Identity(user=f"cli:{user}", device="admin-cli")
 
 
+# ── backfilling the rows that predate authorship ────────────────────────────────
+
+# Every authorship column the identity migration added, as (table, column, the tx column naming
+# the write that created the row). `tx.user_id`/`tx.device` are deliberately not here: a tx row
+# already carries `agent_id` beside `user_id`, so writing 'legacy:' || agent_id into it would
+# restate a column the reader can see in the same row, and nothing can derive a device at all.
+_AUTHOR_COLUMNS = (
+    ("node_version", "author_user", "tx_from"),
+    ("edge_version", "author_user", "tx_from"),
+    ("node", "created_by", "created_tx"),
+    ("skill_version", "author_user", "created_tx"),
+    ("trap", "author_user", "created_tx"),
+    ("tool_version", "author_user", "created_tx"),
+    ("guide_proposal", "author_user", "created_tx"),
+)
+
+# Rows per committed batch. SQLite rebuilds a row's whole payload on UPDATE, overflow pages
+# included, so this is really "how many megabytes of props to rewrite while holding the single
+# writer lock": measured on a 7.95 GB proxy carrying the live row counts, 5,000 node_version rows
+# took 1.04 s on average (2.50 s worst) per batch.
+_BATCH = 5000
+
+
+def _legacy_author_sql(row_tx: str) -> str:
+    """SQL for one row's legacy author: `legacy:` + the agent label on the tx that wrote it.
+
+    Never a bare username, whatever the label was: identity.USERNAME_RE forbids `:`, so
+    `legacy:nik` can neither be minted nor matched as the person `nik` — which matters, because
+    those labels are self-declared strings and some of them are usernames. Never `legacy:None`
+    either: a tx row that is missing, or whose label is NULL or blank, collapses to the same
+    `legacy:unknown` that every read path already shows for a NULL column.
+    """
+    return ("'legacy:' || COALESCE((SELECT CASE WHEN TRIM(COALESCE(agent_id,'')) = '' THEN NULL "
+            f"ELSE agent_id END FROM tx WHERE tx.tx_id = {row_tx}), 'unknown')")
+
+
+def _count_null(db, table: str, column: str) -> int:
+    with db.read() as cur:
+        return cur.execute(f"SELECT COUNT(*) FROM {table} WHERE {column} IS NULL").fetchone()[0]
+
+
+def _fill_null(db, table: str, column: str, tx_column: str, batch: int) -> int:
+    """Fill one column in committed batches, returning the rows actually changed.
+
+    Batched because a single statement over `node_version` holds the one writer lock for its whole
+    duration, which on a shared database is an outage: measured on a 7.95 GB proxy with the live
+    row counts, one statement took 83.0 s and another process attempting a small write every 200 ms
+    was refused 147 times out of 152 across that window, while the same work in 5,000-row batches
+    took 81.1 s in total and let that writer in on half its attempts. Each batch commits on its
+    own, so an interrupted sweep leaves a consistent, re-runnable state: the rows it already
+    filled stay filled, and the WHERE clause only ever sees the ones it did not reach.
+    """
+    sql = (f"UPDATE {table} SET {column} = {_legacy_author_sql(f'{table}.{tx_column}')} "
+           f"WHERE rowid IN (SELECT rowid FROM {table} WHERE {column} IS NULL LIMIT ?)")
+    # Bounded, not `while True`: the exit depends on the UPDATE actually clearing the rows its
+    # subquery selected, and one that silently did not would spin against a live database forever
+    # instead of failing. ceil(rows/batch) passes fill it and one more reads zero, and that bound
+    # held exactly on the proxy — 380,729 rows at 5,000 drained in 78.
+    remaining = _count_null(db, table, column)
+    done = 0
+    for _ in range(remaining // batch + 2):
+        with db.write_light() as cur:
+            cur.execute(sql, (batch,))
+            changed = cur.rowcount
+        if changed <= 0:
+            break
+        done += changed
+    return done
+
+
+def backfill_authors(db, *, dry_run: bool = True, batch: int = _BATCH) -> dict:
+    """Fill the author columns on rows written before identity existed, from their tx agent label.
+
+    An explicit command with a dry run, never a startup step: it rewrites provenance on every
+    version row that predates the authorship columns — 380,729 node_version rows and 124,353 nodes
+    in a 7.8 GB file, on the live server — and doing that silently at boot is not recoverable by
+    someone who did not expect it. So the dry run reports hundreds of thousands, not hundreds.
+
+    Only a NULL column is in scope. NULL means "written before the column existed", while the
+    literal `legacy:unknown` means a write that DID happen since, by no principal the server could
+    resolve; those two have to stay distinguishable, so every non-NULL value is left exactly as it
+    was — real usernames included. That is also what makes a second run a no-op instead of
+    `legacy:legacy:cli`.
+    """
+    counts = {}
+    for table, column, tx_column in _AUTHOR_COLUMNS:
+        counts[table + "s"] = (_count_null(db, table, column) if dry_run
+                               else _fill_null(db, table, column, tx_column, batch))
+    report = {("would_update" if dry_run else "updated"): sum(counts.values()), **counts,
+              "dry_run": dry_run,
+              "note": "pre-identity writes become legacy:<agent_id>, never a real username"}
+    if dry_run:
+        # Said out loud because the safe default is the one that does nothing: an operator who
+        # meant to run it for real should not read a full-looking report and walk away.
+        report["hint"] = "nothing was written; re-run with --yes to apply"
+    return report
+
+
 def main(argv=None) -> int:
     """Run a subcommand, then clear the identity it set.
 
@@ -99,6 +198,10 @@ def _run(argv=None) -> int:
     rg = sub.add_parser("retire-guide"); rg.add_argument("section")
     rg.add_argument("--reason", default="")
     gc = sub.add_parser("gc"); gc.add_argument("--yes", action="store_true")
+    bf = sub.add_parser("backfill-authors",
+                        help="fill author columns on rows that predate authorship")
+    bf.add_argument("--dry-run", action="store_true", help="report only, without writing (default)")
+    bf.add_argument("--yes", action="store_true", help="actually write; reports only without it")
     orp = sub.add_parser("orphans"); orp.add_argument("--older-than-hours", type=int, default=0)
     sub.add_parser("reindex")
     sub.add_parser("embed")
@@ -177,6 +280,11 @@ def _run(argv=None) -> int:
         _out(p.blobs.orphans(older_than_hours=args.older_than_hours))
     elif args.cmd == "gc":
         _out(p.blobs.gc(dry_run=not args.yes))
+    elif args.cmd == "backfill-authors":
+        # Reports unless --yes, the same way `gc` does: this rewrites the author column on every
+        # row that predates it, and an operator who ran it to see what it would do cannot undo
+        # that. --dry-run is accepted so the safe form can also be asked for explicitly.
+        _out(backfill_authors(p.db, dry_run=args.dry_run or not args.yes))
     elif args.cmd == "embed":
         import json as _json
         from . import embeddings, registry as _reg

@@ -531,3 +531,183 @@ def test_a_hit_in_the_new_modes_names_its_author(db):
     assert graph.search_nodes(db, "", props=True)["results"][0]["author"] == "ana"
     # the default reply shape stays exactly as it was: no props, no author, just the snippet
     assert "author" not in graph.search_nodes(db, "")["results"][0]
+
+
+# ── backfilling the rows that predate authorship ────────────────────────────────
+
+# Every authorship column the identity migration added, as (table, column). A row is in scope for
+# the backfill only while its column is NULL — see _blank_every_author_column.
+_AUTHOR_COLUMNS = (("node_version", "author_user"), ("edge_version", "author_user"),
+                   ("node", "created_by"), ("skill_version", "author_user"),
+                   ("trap", "author_user"), ("tool_version", "author_user"),
+                   ("guide_proposal", "author_user"))
+
+
+def _blank_every_author_column(db):
+    """Make every authorship column look the way it does on a row written before the column was."""
+    with db.write_light() as cur:
+        for table, col in _AUTHOR_COLUMNS:
+            cur.execute(f"UPDATE {table} SET {col}=NULL")
+
+
+def _authors(db, table, col):
+    with db.read() as cur:
+        return sorted({r[0] for r in cur.execute(f"SELECT {col} FROM {table}")},
+                      key=lambda v: (v is not None, v))
+
+
+def test_backfill_attributes_pre_identity_writes_to_legacy_never_to_a_person(db):
+    """Attributing old self-declared strings to `nik` would be inventing provenance."""
+    from hivemind_server.admin import backfill_authors
+    set_identity(None)
+    out = graph.upsert_node(db, "cli", "component", {"title": "old"}, reason="pre-identity")
+    with db.write_light() as cur:          # simulate a row written before the column existed
+        cur.execute("UPDATE node_version SET author_user=NULL WHERE node_id=?", (out["node_id"],))
+
+    report = backfill_authors(db, dry_run=True)
+    assert report["would_update"] >= 1
+    assert graph.get_node(db, node_id=out["node_id"])["author"] == "legacy:unknown"
+
+    backfill_authors(db, dry_run=False)
+    assert graph.get_node(db, node_id=out["node_id"])["author"] == "legacy:cli"
+    assert "nik" not in str(report)
+
+
+def test_a_dry_run_reports_per_table_and_writes_nothing(db):
+    """At this scale the report is the only thing an operator can check before committing to it."""
+    from hivemind_server.admin import backfill_authors
+    graph.upsert_node(db, "atlas-migration", "component", {"title": "old"}, reason="x")
+    _blank_every_author_column(db)
+    report = backfill_authors(db, dry_run=True)
+    assert report["dry_run"] is True and "updated" not in report
+    assert report["node_versions"] == 1 and report["nodes"] == 1
+    assert report["would_update"] == sum(report[t + "s"] for t, _ in _AUTHOR_COLUMNS)
+    assert _authors(db, "node_version", "author_user") == [None]
+    assert _authors(db, "node", "created_by") == [None]
+    # ...and it says so in words too, because the form that does nothing is the default one
+    assert "nothing was written" in report["hint"]
+    assert "hint" not in backfill_authors(db, dry_run=False)
+
+
+def test_running_the_backfill_twice_does_not_double_prefix(db):
+    """`legacy:legacy:cli` is what a second run produces if it does not filter on NULL."""
+    from hivemind_server.admin import backfill_authors
+    out = graph.upsert_node(db, "cli", "component", {"title": "old"}, reason="x")
+    _blank_every_author_column(db)
+    first = backfill_authors(db, dry_run=False)
+    again = backfill_authors(db, dry_run=False)
+    assert first["updated"] >= 2 and again["updated"] == 0
+    assert again["dry_run"] is False
+    assert _authors(db, "node_version", "author_user") == ["legacy:cli"]
+    assert graph.get_node(db, node_id=out["node_id"])["author"] == "legacy:cli"
+
+
+def test_rows_written_since_authorship_landed_are_left_alone(db):
+    """NULL and the literal legacy:unknown must stay distinguishable: NULL predates the column,
+    while the literal is a write that DID happen since, by no resolvable principal. Only NULL is
+    the backfill's business — rewriting the rest would relabel writes whose author is already
+    recorded."""
+    from hivemind_server.admin import backfill_authors
+    mine = graph.upsert_node(db, "cli", "component", {"title": "nik wrote this"}, reason="x")
+    set_identity(None)
+    nobody = graph.upsert_node(db, "cli", "component", {"title": "no principal"}, reason="x")
+
+    assert backfill_authors(db, dry_run=True)["would_update"] == 0
+    assert backfill_authors(db, dry_run=False)["updated"] == 0
+    assert graph.get_node(db, node_id=mine["node_id"])["author"] == "nik"
+    assert graph.get_node(db, node_id=nobody["node_id"])["author"] == "legacy:unknown"
+    assert graph.get_node(db, node_id=mine["node_id"])["created_by"] == "nik"
+
+
+def test_a_missing_tx_or_a_blank_agent_label_still_gets_an_honest_author(db):
+    """`legacy:None` is a lie dressed as a name, and a crash mid-sweep would leave the fleet's
+    provenance half-written."""
+    from hivemind_server.admin import backfill_authors
+    orphan = graph.upsert_node(db, "cli", "component", {"title": "its tx is gone"}, reason="x")
+    blank = graph.upsert_node(db, "   ", "component", {"title": "blank label"}, reason="x")
+    _blank_every_author_column(db)
+    # FK enforcement is per-connection and a PRAGMA inside a transaction is a no-op, so this goes
+    # on the connection first. It simulates the one row shape the SQL has to survive: a version
+    # whose tx row is not there any more.
+    db.conn().execute("PRAGMA foreign_keys=OFF")
+    try:
+        with db.write_light() as cur:
+            cur.execute("DELETE FROM tx WHERE tx_id=(SELECT tx_from FROM node_version "
+                        "WHERE node_id=?)", (orphan["node_id"],))
+    finally:
+        db.conn().execute("PRAGMA foreign_keys=ON")
+
+    backfill_authors(db, dry_run=False)
+    assert graph.get_node(db, node_id=orphan["node_id"])["author"] == "legacy:unknown"
+    assert graph.get_node(db, node_id=blank["node_id"])["author"] == "legacy:unknown"
+    assert "None" not in str(_authors(db, "node_version", "author_user"))
+    assert None not in _authors(db, "node_version", "author_user")
+
+
+def test_nothing_the_backfill_writes_could_be_mistaken_for_a_real_identity(db):
+    """The live graph's agent labels are self-declared strings and some of them ARE usernames, so
+    a row whose label was "nik" must not come out attributable to the person nik."""
+    from hivemind_server.admin import backfill_authors
+    from hivemind_server.identity import USERNAME_RE
+    labels = ("nik", "root", "cli", "atlas-migration", "B6-FENCECENSUS", "verify-1.0.0", "   ")
+    made = [graph.upsert_node(db, label, "component", {"title": label}, reason="x")
+            for label in labels]
+    _blank_every_author_column(db)
+    backfill_authors(db, dry_run=False)
+
+    wrote = _authors(db, "node_version", "author_user") + _authors(db, "node", "created_by")
+    assert len(wrote) == 2 * len(set(labels))
+    assert all(v is not None and not USERNAME_RE.fullmatch(v) for v in wrote), wrote
+    assert graph.get_node(db, node_id=made[0]["node_id"])["author"] == "legacy:nik"
+
+
+def test_the_backfill_reaches_every_authorship_column(db, tmp_path):
+    """Each table gets the label from ITS OWN tx, so a copied-and-not-edited statement fails."""
+    from hivemind_server import blobs, guide, registry, skills, traps
+    from hivemind_server.admin import backfill_authors
+    a = graph.upsert_node(db, "graph-job", "component", {"title": "a"}, reason="x")["node_id"]
+    b = graph.upsert_node(db, "graph-job", "component", {"title": "b"}, reason="x")["node_id"]
+    graph.upsert_edge(db, "edge-job", "refines", a, b, {})
+    skills.publish(db, "skill-job", id="re/x", version="1.0.0", title="X",
+                   description="a procedure for x", body="step 1")
+    traps.record(db, "trap-job", title="dead end", what_failed="tried x", symptom="hung")
+    store = blobs.BlobStore(tmp_path / "blobs", db, max_bytes=1 << 20, grace_seconds=0)
+    dig = store.put_stream([b"#!/bin/sh\n"], agent_id="tool-job")["digest"]
+    registry.publish(db, "tool-job", {"id": "org.x/t", "version": "1.0.0", "runtime": "shell",
+                                      "entrypoint": "t.sh"}, dig)
+    guide.propose_section(db, "guide-job", "core", "body text", why="because")
+    _blank_every_author_column(db)
+
+    report = backfill_authors(db, dry_run=False)
+    assert report["updated"] == sum(report[t + "s"] for t, _ in _AUTHOR_COLUMNS) > 6
+    assert {table: _authors(db, table, col) for table, col in _AUTHOR_COLUMNS} == {
+        "node_version": ["legacy:graph-job"], "edge_version": ["legacy:edge-job"],
+        "node": ["legacy:graph-job"], "skill_version": ["legacy:skill-job"],
+        "trap": ["legacy:trap-job"], "tool_version": ["legacy:tool-job"],
+        "guide_proposal": ["legacy:guide-job"]}
+
+
+def test_the_cli_backfill_is_a_dry_run_unless_it_is_told_otherwise(projects_dir, monkeypatch,
+                                                                  capsys):
+    """An operator who ran it to see what it would do cannot undo 380k rewritten author columns,
+    so the writing form is the one you have to ask for — as with `gc --yes`."""
+    from hivemind_server import admin, skills
+    from hivemind_server.db import Database
+    monkeypatch.setattr(admin.getpass, "getuser", lambda: "opsperson")
+    assert admin.main(["reindex"]) in (0, None)          # lays the project down on disk
+    d = Database(projects_dir / "default" / "hivemind.db")
+    skills.publish(d, "old-job", id="re/x", version="1.0.0", title="X",
+                   description="a procedure for x", body="step 1")
+    with d.write_light() as cur:
+        cur.execute("UPDATE skill_version SET author_user=NULL")
+    capsys.readouterr()
+
+    assert admin.main(["backfill-authors"]) in (0, None)
+    dry = json.loads(capsys.readouterr().out)
+    assert dry["dry_run"] is True and dry["skill_versions"] == 1
+    assert skills.get(d, "re/x")["author_user"] == "legacy:unknown"
+
+    assert admin.main(["backfill-authors", "--yes"]) in (0, None)
+    done = json.loads(capsys.readouterr().out)
+    assert done["dry_run"] is False and done["updated"] == 1
+    assert skills.get(d, "re/x")["author_user"] == "legacy:old-job"
