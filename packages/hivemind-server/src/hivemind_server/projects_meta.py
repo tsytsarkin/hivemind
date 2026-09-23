@@ -75,11 +75,11 @@ class ProjectMeta:
         return out
 
 
-# (project.json path, name) -> (stamp, meta). The ACL is consulted on every request, so re-reading
-# the file each time is not acceptable; same stamp trick as auth.TokenStore. The PATH is the key,
-# not the project name: two deployments can hold a same-named project, and on a filesystem with
-# coarse mtime granularity two same-sized files would then collide on one cache entry and answer
-# with each other's owner.
+# (project.json path, name) -> (stamp, meta, problem). The ACL is consulted on every request, so
+# re-reading the file each time is not acceptable; same stamp trick as auth.TokenStore. The PATH is
+# the key, not the project name: two deployments can hold a same-named project, and on a filesystem
+# with coarse mtime granularity two same-sized files would then collide on one cache entry and
+# answer with each other's owner.
 _CACHE: dict = {}
 
 
@@ -94,10 +94,13 @@ def _closed(name: str) -> ProjectMeta:
     return ProjectMeta(name=name, visibility="private", owner=None, members=[])
 
 
-def _read(path: Path, name: str) -> ProjectMeta:
+def _read(path: Path, name: str) -> tuple[ProjectMeta, Optional[str]]:
     """Parse project.json, or fail closed. A metadata file we cannot read is an unreadable ACL, and
     an unreadable ACL denies — a truncated write must make a project unreachable for a moment, never
-    make a private one world-readable."""
+    make a private one world-readable.
+
+    The second element is why it failed closed, for an operator-facing log; None when it parsed.
+    """
     try:
         raw = json.loads(path.read_text())
         if not isinstance(raw, dict):
@@ -105,40 +108,54 @@ def _read(path: Path, name: str) -> ProjectMeta:
         vis = raw.get("visibility")
         if vis not in VISIBILITIES:
             # Unknown or missing visibility is not a shared project; it is an unreadable ACL.
-            return _closed(name)
+            return _closed(name), f"project.json has visibility {vis!r}, want one of {VISIBILITIES}"
         members = raw.get("members")
         if members is not None and not isinstance(members, list):
             # NEVER coerce an ill-typed member list: list("ab") is ['a', 'b'] and
             # list({"ana": 1}) is ['ana'], so a hand-corrupted file would GRANT access to the users
             # a, b and ana — single-character usernames are legal. Every other corruption mode here
             # denies; this is the only one that could invert that, so it fails closed too.
-            return _closed(name)
+            return _closed(name), (f"project.json has a {type(members).__name__} members field, "
+                                   f"want a list")
         return ProjectMeta(name=name, visibility=vis, owner=raw.get("owner"),
                            members=list(members or []), label=raw.get("label", ""),
                            created=raw.get("created", ""), session=raw.get("session"),
-                           last_touched=raw.get("last_touched", ""))
-    except (OSError, ValueError, TypeError):
-        return _closed(name)
+                           last_touched=raw.get("last_touched", "")), None
+    except (OSError, ValueError, TypeError) as e:
+        return _closed(name), f"project.json is unreadable: {type(e).__name__}: {e}"
 
 
 def load(project_dir: Path, name: str) -> ProjectMeta:
+    return load_with_problem(project_dir, name)[0]
+
+
+def load_with_problem(project_dir: Path, name: str) -> tuple[ProjectMeta, Optional[str]]:
+    """load(), plus WHY it failed closed. One code path, so the two cannot drift.
+
+    The reason is for an operator-facing log and must never reach a response body: a caller told
+    "this project's metadata is corrupt" has learned the project exists, which is the oracle the
+    single denial in app.PROJECT_DENIED exists to remove. But an operator who typos project.json
+    would otherwise see nothing but a generic 404 with no way to find out why.
+    """
     path = project_dir / "project.json"
     try:
         st = path.stat()
         stamp = (st.st_mtime_ns, st.st_size)
     except OSError:
-        return _closed(name)         # no metadata file at all: nothing to cache, nobody gets in
+        # No metadata file at all: nothing to cache, nobody gets in. Project.__init__ writes one, so
+        # by the time a request arrives this means someone deleted it.
+        return _closed(name), "project.json is missing"
     key = _key(project_dir, name)
     cached = _CACHE.get(key)
     if cached and cached[0] == stamp:
         # A copy, because callers mutate what they get (project_tools.share appends to `members`
         # before saving) and a mutation that is never saved must not linger as granted access.
-        return cached[1].copy()
-    meta = _read(path, name)
+        return cached[1].copy(), cached[2]
+    meta, problem = _read(path, name)
     # A fail-closed result is cached like any other: a corrupt file must not cost a parse on every
     # request, and the stamp still notices the moment someone fixes it.
-    _CACHE[key] = (stamp, meta)
-    return meta.copy()
+    _CACHE[key] = (stamp, meta, problem)
+    return meta.copy(), problem
 
 
 def save(project_dir: Path, meta: ProjectMeta) -> None:

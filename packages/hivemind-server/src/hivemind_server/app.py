@@ -1,12 +1,16 @@
 """ASGI entrypoint. One Starlette app hosts every project under /p/<name>/… (MCP at
-/p/<name>/mcp, REST blob routes under the same prefix). A single auth middleware gates all
-project traffic and resolves the caller's identity once per request; /healthz stays open.
+/p/<name>/mcp, REST blob routes under the same prefix). A single middleware gates all project
+traffic: it resolves the caller's identity once per request and enforces the project ACL, so the
+REST routes — which never reach a tool — are covered by the same check as an MCP call. The server
+root /healthz stays open, and so do a SHARED project's health probe and endpoint index; a private
+project answers nothing it has not authorised.
 """
 from __future__ import annotations
 
 import contextlib
 import json
-from typing import Optional
+import logging
+from typing import Optional, Union
 
 import uvicorn
 from mcp.server.transport_security import TransportSecuritySettings
@@ -18,9 +22,34 @@ from starlette.routing import Mount, Route, WebSocketRoute
 from . import bus_ws as _bus_ws_mod
 from .auth import bearer_from_headers
 from .config import Config, config
-from .identity import IdentityStore, resolve, set_identity
+from .identity import Identity, IdentityStore, resolve, set_identity
 from .mcp_tools import build_mcp
 from .project import ProjectRegistry, projects_root_from_env
+from .projects_meta import can_access, load_with_problem
+
+log = logging.getLogger(__name__)
+
+# ONE body for "no such project" AND "not yours". Two different answers would let a stranger confirm
+# that nik.private exists simply by observing which error came back, and that confirmation is the
+# whole of what the private tier is meant to withhold.
+PROJECT_DENIED = {"error": "unknown project or not accessible with this token"}
+NO_TOKEN = {"error": "invalid or missing bearer token"}
+# project dir -> the reason already warned about, so a file that is broken for a week does not
+# write one warning per request (the ACL is consulted on every one of them, and /p/<name>/ answers
+# before auth, so an outsider could otherwise flood the log on purpose). Keyed by PATH, not name,
+# because one process can host two deployments holding a same-named project.
+_METADATA_WARNED: dict = {}
+
+
+class Denied:
+    """A refusal, carried back out of _authorize so __call__ stays a sequence of guard clauses."""
+
+    __slots__ = ("status", "body", "headers")
+
+    def __init__(self, status: int, body: dict, headers=None):
+        self.status = status
+        self.body = body
+        self.headers = headers
 
 
 def _transport_security(cfg: Config) -> TransportSecuritySettings:
@@ -33,11 +62,18 @@ def _transport_security(cfg: Config) -> TransportSecuritySettings:
 
 
 class ProjectAuthMiddleware:
-    """Bearer-token gate for every /p/<name>/… request.
+    """Bearer-token gate AND project ACL for every /p/<name>/… request.
 
     This is the one place a token becomes a person: the caller is resolved once, here, and
-    published on the identity contextvar that every tool body reads. Server-level identities are
-    tried first, then the project's own legacy tokens (see identity.resolve).
+    published on the identity contextvar, which is where a tool body reads the caller from
+    (identity.current_identity; today only tests do, the write path lands in a later task).
+    Server-level identities are tried first, then the project's own legacy tokens (see
+    identity.resolve).
+
+    The ACL lives here rather than in the tool decorator because the REST surface — blob GET/PUT,
+    guide, skills, the project index — never reaches a tool at all: an ACL in the tool layer would
+    leave `GET /p/nik.private/blobs/<digest>` open to any authenticated user. Everything under the
+    prefix passes through this one gate.
     """
 
     def __init__(self, app, registry: ProjectRegistry, cfg: Config, identities: IdentityStore):
@@ -53,6 +89,11 @@ class ProjectAuthMiddleware:
         # request a fresh context copy, but the invariant must not depend on that.
         set_identity(None)
         if scope["type"] != "http":
+            # The only non-http route under /p/ is the bus WebSocket, which carries its own
+            # credential in the query string (a single-use ticket or a listen key, both minted by
+            # bus_connect inside the project and redeemable only against that project's hub) —
+            # see bus_ws.websocket_endpoint. It cannot use the bearer header: the listener is
+            # launched by Monitor, which cannot set one.
             return await self.app(scope, receive, send)
         path = scope.get("path", "")
         if not path.startswith("/p/"):
@@ -67,27 +108,65 @@ class ProjectAuthMiddleware:
         parts = path.split("/", 3)  # ['', 'p', '<name>', 'rest...']
         name = parts[2] if len(parts) > 2 else ""
         tail = parts[3] if len(parts) > 3 else ""
-        # A health probe and the endpoint index must work without a token, or a healthy server
-        # looks dead to anyone holding only the project base URL. They expose no project data.
-        open_path = tail in ("", "healthz")
+        verdict = self._authorize(hdrs, name, tail)
+        if isinstance(verdict, Denied):
+            return await self._json(send, verdict.status, verdict.body, extra=verdict.headers)
+        if verdict is not None:
+            scope.setdefault("state", {})["identity"] = verdict
+            scope["state"]["client_id"] = verdict.user
+        # Tool bodies read this caller off the contextvar, and they run on the MCP transport's own
+        # tasks — safe only because mcp 2.x carries contextvars PER MESSAGE (the transport snapshots
+        # the sender's context on every send and the dispatcher runs each handler inside that
+        # snapshot), so the identity travels with the call even on the session-based stateful path.
+        # We depend on that; an SDK upgrade could remove it.
+        # test_a_handshake_era_request_resolves_identity_per_request is what pins it.
+        set_identity(verdict)
+        return await self.app(scope, receive, send)
+
+    def _authorize(self, hdrs, name: str, tail: str) -> Union[Identity, None, Denied]:
+        """Resolve the caller and decide whether this project is theirs to reach.
+
+        Returns the caller (or None when auth is off), or a Denied to send back instead. Lifted out
+        of __call__ so the request path stays readable as guard clauses; every refusal here answers
+        with PROJECT_DENIED, so an outsider cannot tell a private project from a typo.
+        """
         project = self.registry.get(name)
         if project is None:
-            return await self._json(send, 404, {"error": f"unknown project {name!r}"})
-        if self.cfg.require_auth and not open_path:
-            who = resolve(bearer_from_headers(hdrs), self.identities, project)
-            if who is None:
-                return await self._json(send, 401, {"error": "invalid or missing bearer token"},
-                                        extra=[(b"www-authenticate", b"Bearer")])
-            scope.setdefault("state", {})["identity"] = who
-            scope["state"]["client_id"] = who.user
-            # Tool bodies read this caller off the contextvar, and they run on the MCP transport's
-            # own tasks — safe only because mcp 2.x carries contextvars PER MESSAGE (the transport
-            # snapshots the sender's context on every send and the dispatcher runs each handler
-            # inside that snapshot), so the identity travels with the call even on the
-            # session-based stateful path. We depend on that; an SDK upgrade could remove it.
-            # test_a_handshake_era_request_resolves_identity_per_request is what pins it.
-            set_identity(who)
-        return await self.app(scope, receive, send)
+            return Denied(404, PROJECT_DENIED)
+        if not self.cfg.require_auth:
+            # HIVEMIND_REQUIRE_AUTH=0 is the supported no-auth local mode: with no credential there
+            # is nobody to authorize, so there is no ACL either — by construction, not by omission.
+            return None
+        meta, problem = load_with_problem(project.dir, project.name)
+        self._note_metadata(project, problem)
+        who = resolve(bearer_from_headers(hdrs), self.identities, project)
+        if who is None:
+            if meta.visibility != "shared":
+                # A private project owes an unauthenticated caller nothing — not its data, not its
+                # index, not even its liveness. Answering healthz here would confirm it exists to
+                # someone holding no credential at all, which is a cheaper oracle than any of the
+                # ones above.
+                return Denied(404, PROJECT_DENIED)
+            # A shared project is knowable to everyone by definition, so its health probe and
+            # endpoint index answer without a token: clients hold only the project base URL, and a
+            # healthy server must not look dead to them. Neither exposes project data.
+            if tail not in ("", "healthz"):
+                return Denied(401, NO_TOKEN, [(b"www-authenticate", b"Bearer")])
+            return None
+        if not can_access(who, meta):
+            return Denied(404, PROJECT_DENIED)
+        return who
+
+    def _note_metadata(self, project, problem: Optional[str]) -> None:
+        """Log unreadable metadata. The response cannot say so — that would be the oracle — but an
+        operator who typos project.json must be able to find out from somewhere."""
+        key = str(project.dir)
+        if problem is None:
+            _METADATA_WARNED.pop(key, None)      # fixed: warn again if it breaks a second time
+        elif _METADATA_WARNED.get(key) != problem:
+            _METADATA_WARNED[key] = problem
+            log.warning("project %r at %s: %s — failing closed, every caller sees the generic 404",
+                        project.name, project.dir, problem)
 
     async def _json(self, send, status, body, extra=None):
         payload = json.dumps(body).encode()
@@ -134,22 +213,36 @@ def build_app(cfg: Optional[Config] = None) -> Starlette:
         mounts.append(WebSocketRoute(f"/p/{project.name}/bus/ws", _ws_route()))
         mounts.append(Mount(f"/p/{project.name}", app=asgi))
 
+    # The three routes below are the server root, outside any project prefix and so outside the
+    # middleware's gate. All three used to hand every project name to anyone who asked, which is
+    # the same existence oracle the /p/ ACL removes — fixing only one of them would be theatre.
     async def healthz(_req: Request) -> Response:
-        return JSONResponse({"ok": True, "projects": [p.name for p in registry.all()]})
+        return JSONResponse({"ok": True})
 
-    async def list_projects(_req: Request) -> Response:
-        return JSONResponse({"projects": [p.name for p in registry.all()]})
+    async def list_projects(req: Request) -> Response:
+        who = resolve(bearer_from_headers(req.headers), identities, None)
+        if cfg.require_auth:
+            if who is None:
+                # `resolve(..., None)` only accepts a server-level identity: a legacy project token
+                # is pinned to one project and cannot be recognised without knowing which, so it
+                # uses its own project base URL instead.
+                return JSONResponse(NO_TOKEN, status_code=401,
+                                    headers={"www-authenticate": "Bearer"})
+            names = [p.name for p in registry.all() if can_access(who, p.meta)]
+        else:
+            names = [p.name for p in registry.all()]
+        return JSONResponse({"projects": names})
 
     async def index(req: Request) -> Response:
         root = str(req.base_url).rstrip("/")
         return JSONResponse({
             "service": "hivemind",
             "health": f"{root}/healthz",
-            "projects": [{"name": p.name, "base": f"{root}/p/{p.name}",
-                          "mcp": f"{root}/p/{p.name}/mcp",
-                          "health": f"{root}/p/{p.name}/healthz"}
-                         for p in registry.all()],
-            "note": "point clients at a PROJECT base URL, not this root",
+            # A shape, not a live URL: there is no project-neutral /mcp endpoint yet.
+            "mcp": f"{root}/p/<project>/mcp",
+            "your_projects": f"{root}/projects",
+            "note": ("project names are not listed here — GET /projects with your token, or point "
+                     "clients at a project base URL"),
         })
 
     @contextlib.asynccontextmanager

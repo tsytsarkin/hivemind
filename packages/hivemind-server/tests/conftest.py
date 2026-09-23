@@ -73,11 +73,23 @@ class Lifespan:
 
 
 @pytest.fixture()
-def env(tmp_path, monkeypatch):
-    from hivemind_server import app as appmod
+def projects_dir(tmp_path, monkeypatch):
+    """Point the server at a fresh data dir and hand back its projects root, UNBUILT.
+
+    Split out of `env` because build_app mounts one ASGI app per project it discovers: a test that
+    needs an extra project has to lay it down on disk before the app is built, or the project has
+    no route at all.
+    """
+    root = tmp_path / "data" / "projects"
     monkeypatch.setenv("HIVEMIND_DATA_DIR", str(tmp_path / "data"))
-    monkeypatch.setenv("HIVEMIND_PROJECTS_DIR", str(tmp_path / "data" / "projects"))
+    monkeypatch.setenv("HIVEMIND_PROJECTS_DIR", str(root))
     monkeypatch.setenv("HIVEMIND_ALLOWED_HOSTS", "*")
+    return root
+
+
+@pytest.fixture()
+def env(projects_dir):
+    from hivemind_server import app as appmod
     cfg = Config()
     application = appmod.build_app(cfg)
     reg = application.state.registry

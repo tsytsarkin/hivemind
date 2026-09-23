@@ -17,7 +17,9 @@ async def test_health_open_and_auth_required(env):
     async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
         r = await c.get("/healthz")
         assert r.status_code == 200 and r.json()["ok"] is True
-        assert "default" in r.json()["projects"]
+        # It used to answer with every project name, to anyone, with no token: liveness is all a
+        # health probe is for, and a name list is an existence oracle.
+        assert "projects" not in r.json()
         # MCP without a token -> 401
         r = await c.post(f"/p/{proj.name}/mcp", json=_rpc("tools/list"),
                          headers={"Accept": "application/json, text/event-stream",
@@ -319,6 +321,28 @@ async def test_with_auth_off_a_tool_runs_and_sees_no_caller(tmp_path, monkeypatc
     assert seen == [None], seen
 
 
+@pytest.mark.anyio
+async def test_an_early_return_leaves_no_stale_identity_readable(env):
+    """`set_identity(None)` is hoisted above every early return on purpose, and nothing pinned it
+    there: no test failed if it slid back down to sit beside the resolve call.
+
+    Two exits depend on the hoist — an unknown project, and any path outside /p/ — and both are
+    reached before a caller is resolved. An in-process caller (httpx.ASGITransport, or an embedding)
+    invokes the app in its OWN context, so an identity left from the request before it stays
+    readable to whatever runs next unless the middleware clears it first.
+    """
+    application, proj, tok = env
+    from hivemind_server.identity import Identity, current_identity, set_identity
+
+    transport = httpx.ASGITransport(app=application)
+    async with Lifespan(application), httpx.AsyncClient(transport=transport,
+                                                        base_url="http://t", timeout=30) as c:
+        for path in ("/p/does.not.exist/skills", "/healthz", "/"):
+            set_identity(Identity(user="stale", device="earlier-request"))
+            r = await c.get(path, headers={"Authorization": f"Bearer {tok}"})
+            assert current_identity() is None, f"{path} -> {r.status_code} left a caller readable"
+
+
 HANDSHAKE_PROTO = "2025-11-25"      # a handshake-era version the SDK still routes the old way
 
 
@@ -335,6 +359,15 @@ async def test_a_handshake_era_request_resolves_identity_per_request(env, monkey
     (mcp.shared._context_streams) and the dispatcher runs each handler in that snapshot — so the
     identity this middleware sets travels with the message, not with the session. This test is what
     holds that: alice opens the session, bob calls through it, and the tool must see bob.
+
+    NOTE for whoever breaks this: reusing one session across two credentials is only possible
+    because we never populate `scope["user"]`. The SDK's own session manager refuses a request whose
+    `scope["user"]` differs from the AuthenticatedUser that created the session, answering 404
+    "Session not found" (streamable_http_manager._handle_stateful_request). Wiring `scope["user"]`
+    — e.g. by adopting the SDK's BearerAuthMiddleware — therefore breaks this test at its status
+    assertion for a reason that has nothing to do with the contextvar claim above. If that happens,
+    give alice and bob a session each and assert the tool saw the right caller in each, rather than
+    concluding the per-message snapshot is gone.
     """
     application, proj, tok = env
     from hivemind_server.identity import IdentityStore
@@ -360,10 +393,17 @@ async def test_a_handshake_era_request_resolves_identity_per_request(env, monkey
             "params": {"protocolVersion": HANDSHAKE_PROTO, "capabilities": {},
                        "clientInfo": {"name": "handshake-era", "version": "0"}}})
         assert init.status_code == 200, init.text
-        # alice opened the conversation; bob makes the call, carrying whatever the server handed back
-        r = await c.post(base, headers=hdrs(tok_b, init.headers.get("mcp-session-id")), json={
+        # The whole test turns on the mount being STATEFUL — a session that outlives the request.
+        # On a stateless mount there is no session id, bob's call would open its own conversation,
+        # and the test would pass while proving nothing.
+        session_id = init.headers.get("mcp-session-id")
+        assert session_id, "no mcp-session-id: the mount is stateless, so nothing is being reused"
+        # alice opened the conversation; bob makes the call, carrying the id she was handed
+        r = await c.post(base, headers=hdrs(tok_b, session_id), json={
             "jsonrpc": "2.0", "id": 2, "method": "tools/call",
             "params": {"name": "graph_types", "arguments": {}}})
         assert r.status_code == 200, r.text
+        assert r.headers.get("mcp-session-id") == session_id, \
+            "bob's call was answered on a different session, so it did not reuse alice's"
         assert "error" not in _parse(r), r.text
     assert [w.user for w in seen] == ["bob"], seen

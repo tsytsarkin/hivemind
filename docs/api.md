@@ -24,21 +24,28 @@ Two reads carry extra, unrequested context so recorded dead-ends can't be missed
 
 Clients are configured with a **project base URL** — `http://<host>:8787/p/<project>` — and every
 path below is relative to it. `GET /` on either the server root or a project base returns an index
-of these endpoints, so a wrong base URL tells you so instead of 404ing.
+of these endpoints, so a wrong base URL tells you so instead of 404ing — except for a private
+project, which tells an unauthorised caller nothing at all (see below).
 
-**Open (no token)** — so a probe works with only the base URL:
+**Open (no token)** — so a probe works with only the base URL. None of these names a project the
+caller did not already name:
 
 | Path | Returns |
 |---|---|
-| `GET /healthz` (server root) | `{"ok":true,"projects":[…]}` |
-| `GET /p/<project>/healthz` | `{"ok":true,"project":"<name>"}` |
-| `GET /` and `GET /p/<project>/` | endpoint index |
-| `GET /projects` (server root) | project list |
+| `GET /healthz` (server root) | `{"ok":true}` — liveness only; it used to list every project |
+| `GET /p/<project>/healthz` | `{"ok":true,"project":"<name>"}` — **shared projects only** |
+| `GET /` and `GET /p/<project>/` | endpoint index — the project one for **shared projects only** |
+
+A **private** project answers nothing without authorisation, not even its health, because a 200
+there would confirm it exists to a caller with no credential: every path under `/p/<name>/` returns
+the same `404 {"error":"unknown project or not accessible with this token"}` as a name that does not
+exist. Unknown and forbidden are byte-identical by design — see `app.PROJECT_DENIED`.
 
 **Authenticated** (`Authorization: Bearer <token>`; anything else returns `401`):
 
 | Path | Notes |
 |---|---|
+| `GET /projects` (server root) | only the projects **you** can reach; needs a server-level identity token (a legacy per-project token gets `401` here and uses its own project base URL instead) |
 | `POST /p/<project>/mcp` | the MCP endpoint (streamable HTTP, `2026-07-28`) |
 | `GET /guide` · `GET /guide/{section}` | ETag = `guide_version` |
 | `GET /skills[?topic=&limit=&offset=]` · `GET /skills/{id}[?constraint=]` | skill catalog |
