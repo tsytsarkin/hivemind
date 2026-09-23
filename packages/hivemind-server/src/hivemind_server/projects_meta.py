@@ -34,16 +34,34 @@ def validate_project_name(name: str) -> str:
     return name
 
 
+def check_name_prefix(user: str, name: str) -> None:
+    """A DOTTED project name belongs to the user it names, whatever visibility is asked for.
+
+    The private tier's `<user>.<suffix>` rule is only unsquattable if the shared tier obeys it too:
+    otherwise anybody can pre-create a *shared* `nik.scratch`, and nik's own `project_create(...,
+    visibility="private")` then resolves to a world-readable project someone else owns. An UNDOTTED
+    name (`team`, `default`) claims nobody's namespace and stays freely creatable.
+    """
+    validate_project_name(name)
+    if "." not in name:
+        return
+    owner, _, suffix = name.partition(".")
+    if owner != user:
+        raise Invalid(f"a dotted project name belongs to the user it names: {name!r} is in "
+                      f"{owner}'s namespace. Use {user}.<suffix>, or an undotted name for a "
+                      f"project shared with everyone.")
+    if not suffix or any(not part for part in suffix.split(".")):
+        raise Invalid(f"project {name!r} has an empty name segment; "
+                      f"use {user}.<suffix> with a non-empty suffix")
+
+
 def check_private_name(user: str, name: str) -> None:
     """A private project must be `<user>.<suffix>`, so ownership is legible and unsquattable."""
-    validate_project_name(name)
-    prefix = f"{user}."
-    if not name.startswith(prefix):
+    check_name_prefix(user, name)
+    if not name.startswith(f"{user}."):
+        # An undotted name passes check_name_prefix (it claims nobody's namespace) but cannot be
+        # private: a private project has to say whose it is in the one place every surface reads.
         raise Invalid(f"a private project must be named {user}.<suffix> (got {name!r})")
-    suffix = name[len(prefix):]
-    if not suffix or any(not part for part in suffix.split(".")):
-        raise Invalid(f"private project {name!r} has an empty name segment; "
-                      f"use {user}.<suffix> with a non-empty suffix")
 
 
 @dataclass

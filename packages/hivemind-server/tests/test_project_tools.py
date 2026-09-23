@@ -52,8 +52,17 @@ def test_pathological_names_never_touch_the_disk(reg, name):
     assert sorted(p.name for p in reg.root.iterdir()) == before
 
 
-def test_concurrent_creation_of_the_same_name_yields_one_project(reg):
-    """Review Focus 3: dir+db creation is not transactional."""
+def test_racing_sessions_get_one_project_and_all_agree_on_it(reg):
+    """Review Focus 3: dir+db creation is not transactional.
+
+    Careful about what this pins. `_CREATE_LOCK` is held across the whole of create, so these eight
+    threads run strictly sequentially and threads 2-8 return at the `existing is not None` branch
+    without ever reaching mkdir — this test would pass with `exist_ok=True`. What it holds is the
+    lock plus the idempotent return: no racer loses a create for a reason it cannot see, and no two
+    projects appear under one name. The ATOMIC CLAIM itself is pinned by the three tests that
+    pre-create the directory on disk (test_a_project_another_process_created_is_not_confirmed_either
+    and the two after it), which fail with `exist_ok=True`.
+    """
     with cf.ThreadPoolExecutor(max_workers=8) as ex:
         results = [f for f in cf.as_completed(
             [ex.submit(pt.create, reg, NIK, "nik.race", "private") for _ in range(8)])]
@@ -101,10 +110,10 @@ def test_the_cap_counts_shared_projects_too(reg, monkeypatch):
     """Otherwise visibility='shared' is an unbounded-creation bypass: the cap exists to stop an
     agent loop from creating databases without end, and a shared one is just as much a database."""
     monkeypatch.setattr(pt, "MAX_PER_USER", 2)
-    pt.create(reg, NIK, "team.a", visibility="shared")
-    pt.create(reg, NIK, "team.b", visibility="shared")
+    pt.create(reg, NIK, "team-a", visibility="shared")
+    pt.create(reg, NIK, "team-b", visibility="shared")
     with pytest.raises(Invalid) as e:
-        pt.create(reg, NIK, "team.c", visibility="shared")
+        pt.create(reg, NIK, "team-c", visibility="shared")
     assert "cap" in str(e.value).lower()
 
 
@@ -161,6 +170,19 @@ def test_a_member_cannot_revoke_another_member(reg):
     assert "nik.redteam" in pt.listing(reg, EVE)["shared_with_me"]
 
 
+def test_unsharing_a_non_member_is_refused_rather_than_a_silent_no_op(reg):
+    """validate_username only catches a MALFORMED name. A well-formed one that is simply not a
+    member used to succeed, bump last_touched and revoke nothing — so the owner believes access is
+    gone while the real member keeps reading."""
+    pt.create(reg, NIK, "nik.redteam", visibility="private")
+    pt.share(reg, NIK, "nik.redteam", "ana")
+    with pytest.raises(Invalid) as e:
+        pt.unshare(reg, NIK, "nik.redteam", "ana2")
+    assert "ana" in str(e.value), "the refusal names who IS a member, so the typo is obvious"
+    assert reg.get("nik.redteam").meta.members == ["ana"]
+    assert pt.unshare(reg, NIK, "nik.redteam", "ana")["members"] == []
+
+
 def test_sharing_an_already_shared_project_is_an_error(reg):
     pt.create(reg, NIK, "team", visibility="shared")
     with pytest.raises(Invalid):
@@ -200,27 +222,73 @@ def test_creating_a_name_you_already_own_returns_it(reg):
     assert a["project"] == b["project"] and b["existing"] is True
 
 
-def test_creating_a_name_someone_else_owns_does_not_confirm_it(reg):
+def test_creating_a_name_in_someone_elses_namespace_tells_you_nothing_about_it(reg):
+    """The prefix rule refuses this before the ACL is ever consulted, so the message can echo the
+    name the caller typed — but it must be the SAME message whether that project exists or not."""
     pt.create(reg, ANA, "ana.private", visibility="private")
-    with pytest.raises(Invalid) as e:
+    with pytest.raises(Invalid) as real:
         pt.create(reg, NIK, "ana.private", visibility="shared")
-    assert "ana.private" not in str(e.value)
+    with pytest.raises(Invalid) as fake:
+        pt.create(reg, NIK, "ana.nothing", visibility="shared")
+    assert str(real.value).replace("ana.private", "X") == str(fake.value).replace("ana.nothing", "X")
     assert reg.get("ana.private").meta.visibility == "private", "and it is left alone"
+
+
+def test_another_user_cannot_squat_your_namespace(reg):
+    """The `<user>.` prefix is only unsquattable if the SHARED tier obeys it too: a shared
+    `nik.scratch` created by ana is a world-readable project sitting on the name nik's private
+    create would resolve to."""
+    with pytest.raises(Invalid) as e:
+        pt.create(reg, ANA, "nik.scratch", visibility="shared")
+    assert "nik" in str(e.value)
+    assert reg.get("nik.scratch") is None
+    assert not (reg.root / "nik.scratch").exists()
+
+
+@pytest.mark.parametrize("discovered", [True, False], ids=["in the registry", "on disk only"])
+def test_a_private_create_never_hands_back_a_shared_project(reg, discovered):
+    """Both existing-project branches. Silently returning the shared project it found is how an
+    agent that asked for private writes private work into a graph every user can read."""
+    d = reg.root / "nik.scratch"
+    d.mkdir()
+    pm.save(d, pm.ProjectMeta(name="nik.scratch", visibility="shared", owner="ana"))
+    if discovered:
+        reg.discover()
+    with pytest.raises(Invalid) as e:
+        pt.create(reg, NIK, "nik.scratch", visibility="private")
+    assert "shared" in str(e.value) and "private" in str(e.value)
+    # ...and the same guard the other way round, so neither direction is the silent one.
+    pt.create(reg, NIK, "nik.own", visibility="private")
+    with pytest.raises(Invalid):
+        pt.create(reg, NIK, "nik.own", visibility="shared")
+    assert reg.get("nik.own").meta.visibility == "private"
+
+
+def test_the_refusal_is_the_exact_sentence_the_middleware_uses():
+    """Two literals in two files. The moment they drift, "no such project" and "not yours" become
+    distinguishable again and the existence oracle this plan spent a task removing is back."""
+    from hivemind_server.app import PROJECT_DENIED
+    assert pt.DENIED == PROJECT_DENIED["error"]
 
 
 def test_a_project_another_process_created_is_not_confirmed_either(reg):
     """A name claimed on disk since discover() lands in the mkdir(exist_ok=False) branch, where
     there is no registry entry to check the ACL against. It must deny like any other — and must not
     construct a Project, whose __init__ would stamp `shared` over the owner's private metadata.
+
+    This and the two tests after it are what pin the atomic claim: relax it to `exist_ok=True` and
+    create walks straight into the build, overwriting ana's project.json with nik's.
     """
-    d = reg.root / "ana.secret"
+    # A name in nik's OWN namespace that ana owns: created before the prefix rule existed, or by
+    # hand. Nothing syntactic stops nik here, so this is the branch the ACL has to hold.
+    d = reg.root / "nik.squatted"
     d.mkdir()
-    pm.save(d, pm.ProjectMeta(name="ana.secret", visibility="private", owner="ana"))
+    pm.save(d, pm.ProjectMeta(name="nik.squatted", visibility="private", owner="ana"))
     with pytest.raises(Invalid) as e:
-        pt.create(reg, NIK, "ana.secret", visibility="shared")
-    assert "ana.secret" not in str(e.value)
-    assert pm.load(d, "ana.secret").visibility == "private", "the owner's metadata is untouched"
-    assert reg.get("ana.secret") is None, "and no Project was constructed for it"
+        pt.create(reg, NIK, "nik.squatted", visibility="private")
+    assert str(e.value) == pt.DENIED, "no name, no visibility, nothing about why"
+    assert pm.load(d, "nik.squatted").owner == "ana", "the owner's metadata is untouched"
+    assert reg.get("nik.squatted") is None, "and no Project was constructed for it"
 
 
 def test_a_name_you_own_on_disk_is_adopted_rather_than_restamped(reg):
@@ -268,11 +336,20 @@ def _seed_widget(reg):
                             traits={"acyclic": True, "versioned": False, "src_types": ["widget"]})
         schemas.define_type(tx.cur, tx, "node", "draft",
                             {"type": "object"}, status="proposed")
+        schemas.define_type(tx.cur, tx, "node", "gadget", {"type": "object"}, status="active",
+                            traits={"parent": "widget"})
     return src
 
 
 def _types(db, kind="node"):
     return {t["name"]: t for t in schemas.get_schema(db)[f"{kind}_types"]}
+
+
+def _parent(db, name):
+    """Read the row, because the get_schema view does not carry `parent` — which is the whole
+    reason copy_types reads rows too."""
+    with db.read() as cur:
+        return schemas.usable_type(cur, "node", name)["parent"]
 
 
 def test_inherit_copies_the_source_vocabulary(reg):
@@ -284,6 +361,9 @@ def test_inherit_copies_the_source_vocabulary(reg):
     # silently change what the new project accepts.
     wires = _types(child, "edge")["wires"]
     assert (wires["acyclic"], wires["versioned"], wires["src_types"]) == (1, 0, ["widget"])
+    # A node type's parent is the other field the get_schema view drops: inherited as None, `gadget`
+    # would quietly stop being a widget in the new project.
+    assert _parent(child, "gadget") == "widget"
     assert "draft" not in _types(child), "a proposed type is not part of the vocabulary yet"
 
 

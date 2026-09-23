@@ -61,6 +61,9 @@ def create(reg, who: Identity, name: str, visibility: str = "private", *, label:
         raise Invalid(f"schema must be one of {SCHEMA_MODES}")
     # Before anything touches the disk: a pathological name must never reach mkdir.
     pm.validate_project_name(name)
+    # At BOTH tiers, so a dotted namespace is genuinely unsquattable: without this anybody could
+    # pre-create a SHARED nik.scratch and nik's own private create would resolve onto it.
+    pm.check_name_prefix(who.user, name)
     if visibility == "private":
         pm.check_private_name(who.user, name)
 
@@ -69,13 +72,27 @@ def create(reg, who: Identity, name: str, visibility: str = "private", *, label:
         if existing is not None:
             if not pm.can_access(who, existing.meta):
                 raise Invalid(DENIED)
-            return {"project": name, "existing": True, "visibility": existing.meta.visibility}
+            return _existing(name, existing.meta, visibility)
         cap = _cap()
         if _owned_count(reg, who.user) >= cap:
             raise Invalid(f"per-user project cap reached ({cap}); "
                           f"reuse an existing project or raise HIVEMIND_MAX_PROJECTS_PER_USER")
         return _build(reg, who, name, visibility, label=label, session=session, schema=schema,
                       source=source)
+
+
+def _existing(name: str, meta, requested: str) -> dict:
+    """The answer for a name that exists already and the caller may use.
+
+    Refuses when the visibility asked for is not the visibility it HAS. Silently handing back a
+    shared project to a caller that asked for a private one is how private work lands in a graph
+    every user can read: the agent would have to re-read this field to notice, and the caller — not
+    the server — is the one who can decide which it wanted.
+    """
+    if meta.visibility != requested:
+        raise Invalid(f"{name} already exists and is {meta.visibility}, not {requested}. Use it as "
+                      f"it is (pass project={name}) or choose another name.")
+    return {"project": name, "existing": True, "visibility": meta.visibility}
 
 
 def _build(reg, who: Identity, name: str, visibility: str, *, label: str, session: Optional[str],
@@ -86,7 +103,7 @@ def _build(reg, who: Identity, name: str, visibility: str, *, label: str, sessio
     try:
         target.mkdir(parents=True, exist_ok=False)
     except FileExistsError:
-        return _adopt(reg, who, name)
+        return _adopt(reg, who, name, visibility)
     try:
         # The creator is recorded as owner whatever the visibility: can_access ignores `owner` for a
         # shared project, so this grants nothing extra, but it is what makes the per-user cap count
@@ -130,7 +147,7 @@ def _build(reg, who: Identity, name: str, visibility: str, *, label: str, sessio
                     "routes (blob upload, bus) appear after the next server restart"}
 
 
-def _adopt(reg, who: Identity, name: str) -> dict:
+def _adopt(reg, who: Identity, name: str, visibility: str) -> dict:
     """The mkdir claim lost: something already holds this name on disk.
 
     Either a concurrent creation in another process, or a project created since the registry last
@@ -143,8 +160,9 @@ def _adopt(reg, who: Identity, name: str) -> dict:
     meta = pm.load(reg.root / name, name)
     if not pm.can_access(who, meta):
         raise Invalid(DENIED)
-    project = reg.create(name)
-    return {"project": name, "existing": True, "visibility": project.meta.visibility}
+    out = _existing(name, meta, visibility)     # same mismatch guard as the registry branch
+    reg.create(name)
+    return out
 
 
 def listing(reg, who: Identity) -> dict:
@@ -205,6 +223,12 @@ def unshare(reg, who: Identity, name: str, user: str) -> dict:
     project, meta = _owner_only(reg, who, name)
     if user == meta.owner:
         raise Invalid("the owner cannot be removed from their own project")
+    if user not in meta.members:
+        # A no-op here tells the owner access was revoked when it was not, which they learn only
+        # when the ex-member is still reading. The caller is the owner, so naming the current
+        # members leaks nothing they cannot already read with project_info.
+        raise Invalid(f"{user} is not a member of {name}; its members are "
+                      f"{', '.join(meta.members) or '(nobody)'}")
     meta.members = [m for m in meta.members if m != user]
     pm.save(project.dir, meta)
     return {"project": name, "members": meta.members}
