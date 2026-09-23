@@ -224,8 +224,9 @@ def search(db: Database, query: str, *, types: Optional[List[str]] = None,
                 spent += chars
                 if cut and "node_truncated" not in clamped:
                     clamped.append("node_truncated")
-                # The author is on the version row, never in props, so `fields` cannot project it —
-                # and browsing BY author is the case that most needs to see whose each hit is.
+                # The AUTHORSHIP field lives on the version row, so `fields` cannot project it
+                # (props may well carry an author key, but that is a self-declared label — the
+                # thing this replaces). Browsing BY author is the case that most needs it.
                 shown = {"props": payload, "author": head["author_user"] or LEGACY_USER}
             else:
                 shown = {"snippet": json.dumps(pdict)[:200]}

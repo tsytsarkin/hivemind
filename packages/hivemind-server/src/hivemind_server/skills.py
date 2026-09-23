@@ -137,20 +137,15 @@ def search(db: Database, query: str = "", *, tags: Optional[list] = None,
            author: Optional[str] = None) -> dict:
     limit = max(1, min(limit, 100))
     from .search import _fts_query, author_filter
-    # A skill's author is on its LATEST version row. The filter goes into the candidate SQL so a
-    # prolific author cannot squeeze a rare one out of the pool, and is checked again on the row in
-    # the loop below because the semantic candidates come from the vector index, not from this SQL.
+    # A skill's author is on its LATEST version row. The filter goes into the candidate SQL of BOTH
+    # sources — the FTS query below, and the vector query via the id set it is handed — so a
+    # prolific author cannot squeeze a rare one out of either pool. The row check in the loop is
+    # therefore a backstop, not the filter: it catches a candidate source that skipped both.
     a_pred, a_args = author_filter("sv.author_user", author)
     a_join = (" JOIN skill_version sv ON sv.id = s.id AND sv.version = s.latest_version"
               if a_pred else "")
     a_and, a_where = (f" AND {a_pred}", f" WHERE {a_pred}") if a_pred else ("", "")
     with db.read() as cur:
-        # The vector index is not SQL, so the semantic candidates cannot carry the predicate: they
-        # are ranked WITHIN this id set instead. Filtering them afterwards made mode="semantic"
-        # exactly the bug this filter exists to avoid — a post-filter over a capped pool, which
-        # reported "this author wrote nothing" as soon as the library outgrew the pool.
-        a_ids = {r["id"] for r in cur.execute(
-            f"SELECT s.id AS id FROM skill s{a_join}{a_where}", tuple(a_args))} if a_pred else None
         if query:
             m = _fts_query(query)
             lexical = [r["id"] for r in cur.execute(
@@ -160,6 +155,15 @@ def search(db: Database, query: str = "", *, tags: Optional[list] = None,
             semantic = []
             if mode in ("hybrid", "semantic"):
                 from . import embeddings
+                # The vector index is not SQL, so the semantic candidates cannot carry the
+                # predicate as a WHERE clause: they are ranked WITHIN this id set instead. Built
+                # here, where it is used — every other path ignores it. Filtering the vectors
+                # afterwards made mode="semantic" exactly the bug this filter exists to avoid: a
+                # post-filter over a capped pool, reporting "this author wrote nothing" as soon as
+                # the library outgrew it.
+                a_ids = {r["id"] for r in cur.execute(
+                    f"SELECT s.id AS id FROM skill s{a_join}{a_where}",
+                    tuple(a_args))} if a_pred else None
                 semantic = [i for i, _ in embeddings.query(db, "skill", query, limit=limit * 3,
                                                            ids=a_ids)]
             if mode == "lexical":
