@@ -50,7 +50,7 @@ def _links_for(db, skill_id: str) -> list:
 def register_index_routes(mcp) -> None:
     """Health and an endpoint index UNDER the project prefix.
 
-    Clients are configured with the project base URL (…/p/<project>), so `<base>/healthz` is the
+    A client may be configured with a project base URL (…/p/<project>), so `<base>/healthz` is a
     natural probe — it used to 404 and make a healthy server look dead. Both this and the
     server-root /healthz now answer.
 

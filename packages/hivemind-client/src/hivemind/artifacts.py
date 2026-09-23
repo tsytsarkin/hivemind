@@ -39,7 +39,9 @@ class Artifacts:
         self._c = client
 
     def _url(self, digest: str) -> str:
-        return f"/blobs/{digest.replace(':', '/', 1)}"
+        """Absolute, because the blob store lives under /p/<project>/ — which on a server-root
+        base URL is not under the base URL at all."""
+        return self._c.project_url(f"/blobs/{digest.replace(':', '/', 1)}")
 
     def put(self, path: str, *, media_type: Optional[str] = None,
             attach_to: Optional[str] = None, role: str = "attachment") -> dict:
@@ -75,8 +77,7 @@ class Artifacts:
         h = hashlib.sha256()
         size = 0
         tmp = dest + ".part"
-        with self._c._http.stream("GET", self._c.base_url + url,
-                                  headers=self._c._auth()) as r:
+        with self._c._http.stream("GET", url, headers=self._c._auth()) as r:
             if r.status_code == 404:
                 from .client import HivemindError
                 raise HivemindError(f"artifact {digest} not found", kind="not_found")

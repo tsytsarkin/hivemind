@@ -35,11 +35,16 @@ against the live server before the rewrite:
 The WebSocket **server** is part of the Hivemind server; clients on any machine dial it over the
 network like any other client. What is unusual is only *which process* dials it:
 
-> Claude Code's Monitor tool has a built-in `ws` source, but it refuses private addresses —
-> measured: `Monitor cannot open a WebSocket to 192.168.x.x: the address is in a private,
-> link-local, or cloud-metadata range.` Hivemind lives on a LAN address, so Monitor cannot dial it
-> directly. Instead Monitor runs the listener script, and that process holds the WebSocket. A
-> subprocess carries no address policy, and the connection is an ordinary cross-machine WS.
+> Claude Code's Monitor tool has a built-in `ws` source, but it refuses private addresses.
+> Re-measured on **Claude Code 2.1.280, 2026-09-23**, by calling
+> `Monitor(ws={url: "ws://<server-ip>:8787/p/default/bus/ws"})` — it returns an error, not a
+> connection: `Monitor cannot open a WebSocket to <server-ip>: the address is in a private,
+> link-local, or cloud-metadata range.` (the real message interpolates the literal address).
+> Hivemind lives on a LAN address, so Monitor cannot dial it directly — this is the load-bearing
+> reason for the whole listener-subprocess design, so re-run that one call and re-stamp the version
+> before assuming it still holds. Instead Monitor runs the listener script, and that process holds
+> the WebSocket. A subprocess carries no address policy, and the connection is an ordinary
+> cross-machine WS.
 
 ## Using it
 
@@ -99,7 +104,10 @@ refusal and the control: the same call on a project that *was* mounted still ret
 A machine that installed the Claude Code plugin has the MCP tools and nothing else. `hivemind bus
 listen` lives in the separate `hivemind-client` package and needs a third-party `websockets`
 dependency on top, so for a plugin-only agent `bus_connect` used to return a command its shell
-could not find. It also had no `HIVEMIND_SERVER_URL`/`HIVEMIND_TOKEN` in its environment.
+could not find. (`hivemind bus listen` also reads `HIVEMIND_SERVER_URL`/`HIVEMIND_TOKEN`, which
+nothing on such a machine exported until the plugin's `SessionStart` hook began publishing its own
+config to the session's shell — plugin 1.1.1, which 1.2.0 extends with HIVEMIND_PROJECT. The listener below needs neither: its URL and its
+credential are in argv.)
 
 So the plugin carries `skills/hivemind/scripts/bus-listen.py`: a stdlib-only RFC 6455 client, no
 dependencies, any `python3`. Loading the skill copies it to `$HOME/.hivemind/bus-listen.py`, and

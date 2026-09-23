@@ -1,6 +1,10 @@
 """`hivemind` CLI — talk to a hivemind project from the shell or from an agent.
 
-Config from env (HIVEMIND_SERVER_URL, HIVEMIND_TOKEN, HIVEMIND_AGENT) or --url/--token/--agent.
+Config from env (HIVEMIND_SERVER_URL, HIVEMIND_TOKEN, HIVEMIND_PROJECT, HIVEMIND_AGENT) or
+--url/--token/--project/--agent. The URL may be the server root, in which case --project (or
+HIVEMIND_PROJECT, which the plugin's SessionStart hook exports from the session pin) is what names
+the project; a URL that already names one still works and needs no project.
+
 All output is JSON on stdout; errors go to stderr with a non-zero exit.
 """
 from __future__ import annotations
@@ -20,10 +24,16 @@ from .client import Client, HivemindError
 def _client(args) -> Client:
     url = args.url or os.environ.get("HIVEMIND_SERVER_URL")
     token = args.token or os.environ.get("HIVEMIND_TOKEN")
+    # Not required here, and deliberately not preflighted: `health` needs no project, and a URL that
+    # names one needs no flag. What a missing project costs is named where it bites — the server's
+    # own refusal for a tool call, and HivemindError(kind="no_project") for a REST path.
+    project = args.project or os.environ.get("HIVEMIND_PROJECT")
     if not url or not token:
         _die("set HIVEMIND_SERVER_URL and HIVEMIND_TOKEN (or pass --url/--token). "
-             "URL must include the project, e.g. http://host:8787/p/default")
-    return Client(url, token, agent=args.agent or os.environ.get("HIVEMIND_AGENT", "cli"))
+             "The URL is the server — http://host:8787 — and the project comes from --project or "
+             "HIVEMIND_PROJECT; a URL that names one (http://host:8787/p/default) also works")
+    return Client(url, token, project=project,
+                  agent=args.agent or os.environ.get("HIVEMIND_AGENT", "cli"))
 
 
 def _die(msg: str, code: int = 2):
@@ -120,7 +130,9 @@ def _bus(c, args) -> int:
             # server advertises: a server bound to 0.0.0.0 advertises 0.0.0.0, which no client can
             # dial. The address that reached the server is by definition one that works.
             ticket = c.call("bus_connect", {"label": label})["ticket"]
-            base = c.base_url
+            # project_url, not base_url: the socket is mounted at /p/<project>/bus/ws, which a
+            # server-root base URL does not carry.
+            base = c.project_url()
             ws_base = "ws" + base[4:] if base.startswith("http") else base
             return f"{ws_base}/bus/ws?ticket={ticket}"
 
@@ -148,6 +160,8 @@ def _bus(c, args) -> int:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="hivemind", description="Hivemind client CLI")
     p.add_argument("--url"); p.add_argument("--token"); p.add_argument("--agent")
+    p.add_argument("--project", help="project to act in; default $HIVEMIND_PROJECT. Needed when "
+                                     "--url is the server root, which names no project")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("health")

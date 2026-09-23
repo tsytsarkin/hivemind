@@ -9,7 +9,7 @@ description: >-
   Hivemind REPLACES local memory: read it before any work and persist all work into it. Domain-agnostic — call schema_get and guide_get first to learn this project's vocabulary.
 allowed-tools: Bash(${CLAUDE_SKILL_DIR}/scripts/guide.sh *) Read
 metadata:
-  version: "1.1.0"
+  version: "1.2.0"
 ---
 
 # Hivemind
@@ -48,9 +48,11 @@ land in a graph everyone can read.
 
 The pin is local state keyed by the session id: it survives a compaction, and a `--resume` lands
 back on the same project. It is a reminder for you, not an authority — the server takes the project
-from the argument you pass, and only if you pass none does it fall back to the project your server
-URL names. That fallback is why you pass the argument every time: omitting it writes into whatever
-the URL points at — usually the shared graph — with nothing to notice.
+from the argument you pass. What an omitted argument costs depends on the URL shape, and you do not
+get to see which one is configured: on the server root — the plugin's default since 1.2.0 — the
+call is refused outright, reads included, so a forgotten argument reads as a server fault; on the
+older `/p/<project>` URL it acts in whatever project that URL names, with nothing to notice. Pass
+the argument every time and neither case applies to you.
 
 
 ## Hivemind replaces your local memory
@@ -82,7 +84,9 @@ another machine. Treat the graph as the only durable store.
 note, or a CLAUDE.md "for later". The only legitimate local content is: secrets and tokens,
 machine-specific paths and config, throwaway scratch for the current step, and anything explicitly
 asked to stay private. If Hivemind is unreachable, say so, keep a local note **as a temporary
-buffer**, and write it into Hivemind as soon as the server is back (`hivemind health`).
+buffer**, and write it into Hivemind as soon as the server is back (`hivemind health` — liveness
+only: it reads `/healthz` off the server root, which takes no token and names no project, so it
+answers `{"ok": true}` with a bad token too. Liveness is the only question being asked here).
 
 ## The agent bus: talk to other running agents
 
@@ -219,8 +223,18 @@ Fetched now (may be newer than this file; if the fetch failed you'll see an offl
 
 !`${CLAUDE_SKILL_DIR}/scripts/guide.sh --section core`
 
-The line above is best-effort (it needs `HIVEMIND_SERVER_URL` + `HIVEMIND_TOKEN` in the env). The
-**reliable** way to read the live guide and this project's schema is the MCP tools themselves:
+The line above is best-effort. It reads `HIVEMIND_SERVER_URL` + `HIVEMIND_TOKEN` from the shell,
+and the plugin's `SessionStart` hook exports both from the plugin's own config for this session's
+Bash calls (a value you exported yourself always wins), so on a plugin-only machine it normally
+works. The configured URL is the **server root**, and `/guide` is mounted only under `/p/<project>/`, so
+the script composes the two: the server from `HIVEMIND_SERVER_URL`, the project from
+`HIVEMIND_PROJECT` — or, when that is unset, from the session pin, read at call time so a
+mid-session `/hivemind:project` switch is followed. It falls back to a cached or bundled copy when
+the plugin holds no URL or token, and when no project can be determined at all (then the line says
+so and names `/hivemind:project`, which is the fix). The fallback line names which happened; don't
+read it as the server being down. The
+**reliable** way to read the live guide and this project's schema is the MCP tools themselves, which
+use none of that environment:
 
 - `guide_get()` — index of guide sections; `guide_get(section="core")` — the framework guide;
   other sections carry this deployment's **domain** vocabulary.
@@ -287,7 +301,13 @@ Every other tool also takes `project=<name>`: see **Every call names a project**
 
 Big binaries and tool bytes go over REST, not through the model. Install once:
 `uv tool install --from <repo>/packages/hivemind-client hivemind` (or the pip/venv path in
-DEPLOY.md). Point it at your project: `export HIVEMIND_SERVER_URL=… HIVEMIND_TOKEN=…`.
+DEPLOY.md). It reads `HIVEMIND_SERVER_URL` + `HIVEMIND_TOKEN` from the environment, which the
+plugin's `SessionStart` hook has already set for your Bash calls from the plugin's own config,
+along with `HIVEMIND_PROJECT` from the session pin — so in a configured session the CLI just runs.
+Export them yourself in a plain terminal or on a machine without the plugin. The URL is the server;
+the project comes from `HIVEMIND_PROJECT` or `--project <name>`, and without one a call is refused
+rather than landing in a project nobody named. (A URL that names a project —
+`http://<host>:8787/p/<name>` — still works and needs no flag.)
 
 - `hivemind artifact put <file>` → prints a `sha256:…` digest to attach.
 - `hivemind artifact get <digest> <dest>` → downloads + verifies.

@@ -27,7 +27,12 @@ git clone <repo> hivemind && cd hivemind
 uv sync --package hivemind-server
 uv run hivemind-server                                    # or ./.venv/bin/hivemind-server
 ```
-`deploy/bootstrap-labbox.sh` does all of this + mints a token + installs the systemd service.
+`deploy/bootstrap-labbox.sh` does all of this + mints a token. It does **not** install the systemd
+service — it only *prints* the commands, so a box that has been bootstrapped and nothing more has no
+unit at all and the server does not survive a reboot. Run `deploy/install-service.sh` for that (it
+renders the template unit for this user and repo path, then `enable --now`s it), and check with
+`systemctl is-enabled hivemind` — `not-found` means there is no unit, whatever is currently
+listening on 8787.
 
 ### Option B — plain venv + pip
 ```sh
@@ -54,12 +59,23 @@ pip install -U pip
 pip install ./packages/hivemind-client                    # deps: httpx + websockets (pure wheels)
 hivemind --help
 ```
-Then point it at your project:
+Then point it at your server and name a project:
 ```sh
-export HIVEMIND_SERVER_URL=http://<lan-or-tailscale-ip>:8787/p/default
+export HIVEMIND_SERVER_URL=http://<lan-or-tailscale-ip>:8787       # the server
+export HIVEMIND_PROJECT=default                                    # or pass --project <name>
 export HIVEMIND_TOKEN=<token from `hivemind-admin mint-token`>
 hivemind health
 ```
+The URL is the **server**; the project comes from `--project` or `HIVEMIND_PROJECT`, and the CLI
+builds `/p/<project>/blobs/…` from the two. A command that reaches the graph or the blob store with
+no project is refused rather than defaulted — the tool call by the server, the REST path by the
+client. A URL that already names a project still works and needs no flag. `hivemind health` only
+proves the server is up: it reads `/healthz` off the server root, which takes no token, so it answers
+`{"ok": true}` even with no project and a bad token. In a Claude Code session with the plugin
+installed you usually need none of these exports — the plugin's `SessionStart` hook sets the URL and
+the token from its own config and the project from the session pin
+([clients.md](../docs/clients.md#where-the-url-and-the-token-come-from)); export them here for a
+plain terminal, or to override.
 
 > Note: `pip install -U pip` first — the pip bundled with an old system Python can fail to
 > resolve modern package metadata. The exact-pin `requirements-*.txt` files assume the same
@@ -82,8 +98,8 @@ run is *not* reachable from other machines. To serve a LAN/Tailscale network set
 
 Being on the LAN is not authorization. Every `/p/<project>` request needs a bearer token with
 exactly two exceptions, both on a **shared** project and neither exposing project data: the endpoint
-index `/p/<name>/` and the health probe `/p/<name>/healthz` answer `200` without one, because clients
-hold only a project base URL and a healthy server must not look dead to them. Everything else there
+index `/p/<name>/` and the health probe `/p/<name>/healthz` answer `200` without one, because a client
+may hold only a project base URL and a healthy server must not look dead to it. Everything else there
 is `401`. A **private** project answers `404` to an unauthenticated caller on every path, its own
 health included — indistinguishable from a project that does not exist. The allowlist is exactly two
 entries and `test_a_shared_projects_open_tails_are_exactly_two` pins both halves of that; widening it
@@ -156,8 +172,12 @@ Tunables, with the defaults the script itself applies: `HIVEMIND_BACKUP_DIR`
 (`$HOME/hivemind-backup`), `HIVEMIND_BACKUP_KEEP` (`7`), `HIVEMIND_DATA_DIR`
 (`$HOME/hivemind-data`). Log: `<backup dir>/backup.log`.
 
-Measured on the live project (1.7 GB database, 9,475 blobs / 9.7 GB): **23 s** for the first run,
-**17 s** incrementally with zero blobs transferred. Restore procedure: [restore.md](restore.md).
+Measured on the lab box on **2026-09-23** (7.7 GB database snapshot, `nodes=124460 tx=1619365`,
+95 GB in the backup destination): **76 s** for an incremental run with zero blobs transferred. That
+figure is only as current as the day it was taken, and the database grows daily — read the real one
+off the machine rather than trusting this line: `tail -5 "$HOME/hivemind-backup/backup.log"` prints
+the snapshot size, the transferred-file count and `backup done in <n>s` for the most recent run.
+Restore procedure: [restore.md](restore.md).
 
 ## Rolling out a change to a live server
 

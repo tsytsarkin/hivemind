@@ -22,8 +22,8 @@ class QueueExhausted(BaseException):
     """
 
 
-def _stub_client(handler, **kw) -> Client:
-    c = Client("http://stub.invalid/p/t", "tok", agent="test", **kw)
+def _stub_client(handler, base_url="http://stub.invalid/p/t", **kw) -> Client:
+    c = Client(base_url, "tok", agent="test", **kw)
     c._http.close()                       # drop the real one built in __init__
     c._http = httpx.Client(transport=httpx.MockTransport(handler))
     return c
@@ -41,17 +41,22 @@ def fake_transport():
     `error`. A queued **string** is sent as the response body verbatim with `text/html`, i.e. a
     reply that is not JSON at all (queue `{"structuredContent": "..."}` with `raw=True` if what
     you want is a string *payload*). The returned client carries `.sent`, the list of `params`
-    actually put on the wire, so a test can check what was and was not sent.
+    actually put on the wire, and `.urls`, where each of those went — so a test can check what was
+    and was not sent, and to which endpoint.
     """
     made = []
 
     def make(payloads, *, status=200, raw=False, **kw):
+        # `base_url=` and `project=` ride **kw through to the Client. The default base URL names a
+        # project, which is the shape every other test in this suite exercises.
         replies = list(payloads)
         sent = []
+        urls = []
 
         def handler(request: httpx.Request) -> httpx.Response:
             body = json.loads(request.content)
             sent.append(body["params"])
+            urls.append(str(request.url))
             if not replies:
                 raise QueueExhausted(f"call {len(sent)} to {body['params']['name']!r} has no "
                                      f"queued reply")
@@ -64,6 +69,7 @@ def fake_transport():
 
         c = _stub_client(handler, **kw)
         c.sent = sent
+        c.urls = urls
         made.append(c)
         return c
 

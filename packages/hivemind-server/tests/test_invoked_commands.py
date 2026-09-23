@@ -35,7 +35,7 @@ RUNNABLE_EXT = (".sh", ".service", ".yml", ".yaml", ".json", ".toml", ".env", ".
 # `_SUBCOMMAND` shape check below and is skipped.
 GLOBAL_OPTS = {
     "hivemind-admin": {"--project"},
-    "hivemind": {"--url", "--token", "--agent"},
+    "hivemind": {"--url", "--token", "--agent", "--project"},
     "hivemind-server": set(),
 }
 

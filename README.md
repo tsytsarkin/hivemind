@@ -23,7 +23,7 @@ live guide). Meaning is data — shipped as a swappable **domain pack** (`packs/
 |---|---|
 | `packages/hivemind-server/` | The server: MCP (streamable HTTP) + REST, SQLite-backed. Python ≥3.11. |
 | `packages/hivemind-client/` | The client library + `hivemind` CLI. Python ≥3.9; deps are `httpx` and `websockets` (the bus listener). |
-| `plugin/` | The Claude Code plugin: MCP config, the self-updating bootstrap skill, a schema-authoring skill, the `/hivemind:project` command and a `SessionStart` hook. |
+| `plugin/` | The Claude Code plugin: MCP config, the self-updating bootstrap skill, a schema-authoring skill, the `/hivemind:project` command and a `SessionStart` hook (re-injects the project pin, and publishes three values to the session's shell for the live guide and the CLI: `HIVEMIND_SERVER_URL` and `HIVEMIND_TOKEN` from the plugin config, and `HIVEMIND_PROJECT` from the pin — the third is what lets them build `/p/<project>/…` off a root URL, which is the default since 1.2.0). |
 | `packs/` | Optional, swappable, **layerable** domain packs (schema + guide). Ships `security-research`, `ios-macos-attack-surface` and `research-workflow`. See [docs/packs.md](docs/packs.md). |
 | `deploy/` | Deploy docs, systemd unit, daily backup + restore, bootstrap + relock scripts. |
 | `docs/` | [User guide](docs/user-guide.md), data model, API, the agent bus, guide authoring, security notes. |
@@ -119,7 +119,7 @@ server and install the plugin there — no server or checkout needed on the clie
 hivemind-admin mint-token --user <name> --device laptop          # on the server
 claude plugin marketplace add tsytsarkin/hivemind                # on the new machine
 claude plugin install hivemind@hivemind-marketplace --scope user \
-  --config server_url=http://<server-ip>:8787/p/default --config api_token=hm_…
+  --config server_url=http://<server-ip>:8787 --config api_token=hm_…
 ```
 Or skip installing altogether — `scripts/hivemind-claude` prompts for an address (default
 `localhost:8787`) and a token, loads the plugin for that session only via `--plugin-dir`, and
@@ -129,6 +129,10 @@ forwards any other arguments to `claude`:
 scripts/hivemind-claude                      # prompt, then launch
 scripts/hivemind-claude --url <host>:8787 --resume
 ```
+The address it passes on is the **server root**, as an install's is, so a launched session has no
+project until `/hivemind:project` pins one — the launcher says so at launch. `--project <name>` uses
+the older `http://host:8787/p/<name>` shape instead.
+
 Nothing is written to your permanent configuration, and the token lives in a `0600` file that is
 removed when the session ends. Good for a borrowed machine or a VM.
 

@@ -236,7 +236,7 @@ echo "State  Recv-Q Send-Q Local Address:Port  Peer Address:Port Process"
 if (exec 3<>/dev/tcp/127.0.0.1/@PORT@) 2>/dev/null; then
     echo "LISTEN 0      128            0.0.0.0:@PORT@        0.0.0.0:*"
 fi
-echo "LISTEN 0      128            0.0.0.0:22         10.0.0.5:@PORT@"
+echo "LISTEN 0      128            0.0.0.0:22    203.0.113.5:@PORT@"
 echo "LISTEN 0      128          127.0.0.1:1@PORT@       0.0.0.0:*"
 """
 

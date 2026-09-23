@@ -7,11 +7,13 @@ Pick the Hivemind project for this session and pin it. Every Hivemind call carri
 `project=<name>`, and this choice decides which graph the session's knowledge lands in. Private work
 written into a shared project cannot be un-shared.
 
-**Omitting the argument is not safe, and whether it fails depends on the endpoint.** A write with no
-`project=` is refused only on the project-neutral `POST /mcp`. On a project base URL —
-`POST /p/<name>/mcp`, which is what `${user_config.server_url}` resolves to by default and what the
-deployed plugin uses — the URL *is* the project, so the write silently lands in whatever project
-that URL names. That is by design (the caller's own URL named it), and it is exactly how an omitted
+**Omitting the argument is not safe, and whether it fails depends on the endpoint.** On the
+project-neutral `POST /mcp` every call with no `project=` is refused — **reads as well as writes**,
+since there is no project for the call to be about; the write refusal just explains the stakes,
+and both list the projects you may name — and that is what `${user_config.server_url}` resolves to
+by default, since the plugin is configured with the server root. On a project base URL —
+`POST /p/<name>/mcp`, the older shape, still supported — the URL *is* the project, so the write
+silently lands in whatever project that URL names. That is by design (the caller's own URL named it), and it is exactly how an omitted
 argument puts private work in the shared graph. Pass `project=<name>` on every call; never rely on
 the refusal.
 
@@ -66,9 +68,11 @@ Do this now, in order. **Do not choose a project for the user.**
 
    **Tell them one thing about a brand-new project**: it is usable from this session right away —
    every MCP call carrying `project=<name>` works — but it has no `/p/<name>/` URL of its own until
-   the server is restarted, because those mounts are built at startup. So the `hivemind` CLI cannot
-   reach it yet (large artifact uploads, `hivemind bus listen`), and neither can a second machine
-   configured with a project base URL. Say so rather than letting them discover it as a bare 404.
+   the server is restarted, because those mounts are built at startup. Everything that goes over
+   REST therefore 404s until then, however the project is named: large artifact uploads and
+   downloads (`hivemind artifact put/get`), `hivemind bus listen`, and the live guide in the
+   `hivemind` skill, which builds `/p/<name>/guide` from this pin. Say so rather than letting them
+   discover it as a bare 404.
 
 5. **Pin it.**
 

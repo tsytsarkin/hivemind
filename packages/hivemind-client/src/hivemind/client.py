@@ -1,7 +1,14 @@
-"""Sync client for a hivemind project endpoint. One dependency: httpx.
+"""Sync client for a hivemind server. One dependency: httpx.
 
-base_url points at a project: http://host:8787/p/<project> . MCP tools are invoked over the
-same /mcp endpoint the plugin uses (2026-07-28 streamable HTTP); artifacts stream over REST.
+Two shapes of `base_url`, and both work:
+
+  * the SERVER ROOT, http://host:8787, plus `project=` — MCP calls go to <root>/mcp carrying the
+    project as an argument, and REST paths are built as <root>/p/<project>/... ;
+  * a PROJECT base, http://host:8787/p/<project> — the URL names the project, so a call that
+    passes none acts in it (the server's own fallback) and REST paths sit under the base.
+
+MCP tools are invoked over the same /mcp endpoint the plugin uses (2026-07-28 streamable HTTP);
+artifacts stream over REST.
 """
 from __future__ import annotations
 
@@ -23,9 +30,18 @@ class HivemindError(Exception):
 
 
 class Client:
-    def __init__(self, base_url: str, token: str, *, agent: str = "client",
-                 timeout: float = 600.0, max_retries: int = 4):
+    def __init__(self, base_url: str, token: str, *, project: Optional[str] = None,
+                 agent: str = "client", timeout: float = 600.0, max_retries: int = 4):
+        """`project` names the project to act in when `base_url` does not — the server-root shape.
+
+        It is also honoured against a project base URL, where it WINS: a caller who passed one
+        explicitly asked for it, and silently acting in the URL's project instead is how a
+        `--project` flag becomes a lie. Passing nothing keeps the old behaviour exactly — no
+        `project` argument goes on the wire and REST paths stay under `base_url`.
+        """
         self.base_url = base_url.rstrip("/")
+        # "" from an unset environment variable means "no project", not a project named empty.
+        self.project = project or None
         self.token = token
         self.agent = agent
         self.max_retries = max_retries
@@ -40,7 +56,9 @@ class Client:
         return {"Authorization": f"Bearer {self.token}"}
 
     def _request(self, method: str, path: str, **kw) -> httpx.Response:
-        url = self.base_url + path
+        # An absolute URL is passed through: the project-scoped REST paths are built by
+        # `project_url`, and on a server-root base_url they do not sit under base_url at all.
+        url = path if path.startswith(("http://", "https://")) else self.base_url + path
         attempt = 0
         while True:
             attempt += 1
@@ -72,6 +90,11 @@ class Client:
         """
         arguments = dict(arguments or {})
         arguments.setdefault("agent", self.agent)
+        if self.project and arguments.get("project") is None:
+            # `is None`, not setdefault: the CLI passes whole argument dicts with explicit None for
+            # the flags nobody gave, and a None `project` on the wire is "not given" to the server.
+            # A per-call project still wins, which is what makes cross-project batches possible.
+            arguments["project"] = self.project
         params = {"name": tool, "arguments": arguments,
                   "_meta": {"io.modelcontextprotocol/protocolVersion": PROTO,
                             "io.modelcontextprotocol/clientInfo": {"name": "hivemind-client",
@@ -159,9 +182,34 @@ class Client:
         return self.call("guide_get", {"section": section} if section else {})
 
     def health(self) -> dict:
-        # /healthz lives at server root, above the project prefix
-        root = self.base_url.rsplit("/p/", 1)[0]
-        return self._http.get(root + "/healthz").json()
+        """Server liveness. NOT a check that anything else is configured correctly.
+
+        /healthz lives at the server root, above any project prefix, and takes no token — so it
+        answers `{"ok": true}` for a root URL, for a project URL, and for a token the server would
+        reject. Nothing may infer from it that a tool call or an upload will work.
+        """
+        return self._http.get(self.server_root + "/healthz").json()
+
+    # ── which project, and where its REST paths are ───────────────────────────────────────────
+    @property
+    def server_root(self) -> str:
+        """Everything above the project prefix: the server. Where /healthz and neutral /mcp live."""
+        return self.base_url.rsplit("/p/", 1)[0]
+
+    def project_url(self, path: str = "") -> str:
+        """Absolute URL for a project-scoped REST path — /blobs/…, /guide, the catalogs, /bus/ws.
+
+        Raises rather than building a URL the server will 404: off the server root these paths do
+        not exist at all, and a 404 there reads as "no such blob" instead of "no project named".
+        """
+        if self.project:
+            return "%s/p/%s%s" % (self.server_root, self.project, path)
+        if "/p/" in self.base_url:
+            return self.base_url + path
+        raise HivemindError(
+            "this needs a project and nothing named one: base_url is the server root (%s), so "
+            "pass project= to Client, --project to the CLI, or set HIVEMIND_PROJECT."
+            % self.base_url, kind="no_project")
 
 
     def tool_publish(self, path, *, id, version, **kw):

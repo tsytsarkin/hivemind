@@ -144,6 +144,14 @@ simultaneously the payload and the destination.
   filesystem access to the data directory reads every project's SQLite file and blobs directly, and
   `hivemind-admin project-share` deliberately acts *as* the project's owner so an owner who lost
   their token can recover. Host access is total access, by design.
+- **The plugin's token reaches disk in one more place.** `plugin/hooks/session-start` appends
+  `export HIVEMIND_TOKEN=…` to `$CLAUDE_ENV_FILE` so the shell-side consumers (the live guide, the
+  `hivemind` CLI) can authenticate — see
+  [clients.md](clients.md#where-the-url-and-the-token-come-from). Claude Code creates that file
+  `0644`, so the hook `chmod 600`s it **before** writing, and
+  `test_the_token_is_not_left_in_a_world_readable_file` pins the mode. It is still a bearer token in
+  a plaintext file under `~/.claude`, on the same footing as the keychain entry only in that both are
+  reachable by anything running as that user.
 - **No transport security.** Tokens are static bearers over plain HTTP. Bind private interfaces
   only (LAN/Tailscale), never a public NIC; put TLS in front if the path is not already trusted.
   **Being on the LAN is not authorization** — every `/p/<project>` request that could return project

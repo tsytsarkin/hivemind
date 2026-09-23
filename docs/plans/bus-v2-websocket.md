@@ -1,8 +1,14 @@
 # Plan: replace the polling bus with WebSocket push
 
-> **Historical.** This plan is delivered — the WebSocket bus is what ships. The *Why* below
-> describes the v1 polling bus it replaced, so read that section in the past tense; the
-> shipped design is documented in [../bus.md](../bus.md).
+> **Historical — read the whole file in the past tense, Design included.** This plan is delivered;
+> the WebSocket bus is what ships, and [../bus.md](../bus.md) is the only current description of it.
+> The *Why* describes the v1 polling bus this replaced. The *Design* sections describe what was
+> **proposed**, and shipped differently in at least five places: **six** MCP tools, not five
+> (`bus_message` was added — `bus_ws_tools.py`); `bus_disconnect(label)` takes its label; the body
+> cap is `BODY_CAP = 300`, not ~380; the ticket is not the only credential (`bus_connect` mints a
+> reusable 7-day **listen key** as well, and that is what the `monitor_command` it returns carries,
+> so a listener reconnects across a blip); and the plugin shipped at 1.2.0, not 0.10.0.
+> Do not take a number or a signature from this file.
 
 ## Why
 

@@ -22,11 +22,26 @@
 #
 # The token is written only to a 0600 file inside a 0700 private directory, removed on exit, and is
 # never passed on the `claude` command line, where `ps` would show it to every user on the host.
+#
+# This script exports nothing. The values it collects reach the plugin as `pluginConfigs`, exactly as
+# an installed plugin's do, and from there the plugin's own SessionStart hook is what publishes them
+# to the session's shell for `guide.sh` and the `hivemind` CLI. HIVEMIND_SERVER_URL/HIVEMIND_TOKEN
+# below are only defaults for the two prompts — but note that `claude` also INHERITS them from this
+# shell, where they outrank the plugin config, and inherits them un-normalised: exporting a bare
+# `box.local:8787` gives the plugin `http://box.local:8787` while the session's shell sees
+# `box.local:8787`, which has no scheme and so is not a usable base at all. Export a full URL if you
+# export at all — either shape works, and a bare host:port does not.
+#
+# The address handed to the plugin is the SERVER ROOT, matching the plugin's own default since 1.2.0.
+# That is the shape where a call naming no project is REFUSED rather than landing in whatever the URL
+# named — and a borrowed machine is the last place to want the looser mode by accident. The cost is
+# stated rather than discovered, in the usage text and on stderr at launch: until /hivemind:project
+# pins a project, every Hivemind call is refused and the live guide has no URL to build. `--project`
+# opts back into the older project-URL shape for someone who wants defaulting without pinning.
 set -euo pipefail
 
 PROG=${0##*/}
 DEFAULT_ADDR="localhost:8787"
-DEFAULT_PROJECT="default"
 
 usage() {
     cat <<EOF
@@ -35,12 +50,21 @@ $PROG — run Claude Code with the Hivemind plugin, no install
 usage: $PROG [options] [-- extra claude args...]
 
 options:
-  --url URL          Server address or full project URL. Bare host:port is fine;
-                     /p/<project> is appended when the URL has no project path.
-                     Default: prompted, $DEFAULT_ADDR
+  --url URL          Server address. Bare host:port is fine — it becomes
+                     http://host:port, the SERVER ROOT, which is what the plugin
+                     expects. A URL that already names a project (.../p/<name>)
+                     is used verbatim. Default: prompted, $DEFAULT_ADDR
   --token TOKEN      Bearer token. Prefer the prompt or HIVEMIND_TOKEN: an
                      argument is visible to anyone running ps.
-  --project NAME     Project to use when --url names no /p/<name>. Default: $DEFAULT_PROJECT
+  --project NAME     Use the older project-URL shape, http://host:port/p/NAME,
+                     instead of the server root. Not "which project to use" —
+                     it changes the SHAPE of the address, and with it what an
+                     omitted project= does: under /p/NAME such a call silently
+                     acts in NAME, where off the root it is refused.
+                     WITHOUT this flag the session starts with NO project: every
+                     Hivemind call is refused until /hivemind:project pins one,
+                     and the live guide has no URL to build until then. That is
+                     the intended, safer shape — pin first, then work.
   --plugin-dir DIR   Plugin to load. Default: the plugin/ beside this script's repo.
   --no-check         Skip the reachability and token preflight.
   --dry-run          Print what would run, then exit. The token is redacted.
@@ -52,19 +76,25 @@ So "$PROG --resume" and "$PROG -- --model sonnet" both work.
 environment:
   HIVEMIND_SERVER_URL   default for --url   (set both this and HIVEMIND_TOKEN to
   HIVEMIND_TOKEN        default for --token  skip both prompts entirely)
+                        Both are inherited by the session as you set them, where
+                        they outrank the plugin's own config — so export a full
+                        URL (http://host:port, or .../p/<project>), never a bare
+                        host:port, which has no scheme for the shell tools to use.
 
 examples:
   $PROG                                   # prompt for address and token, then launch
-  $PROG --url box.local:8787 --project scratch
+  $PROG --url box.local:8787              # the server root: pin with /hivemind:project
+  $PROG --url box.local:8787 --project scratch    # the older /p/scratch shape
   HIVEMIND_TOKEN=\$(cat ~/.hm-token) $PROG --url box.local:8787 --resume
 EOF
 }
 
 die() { printf '%s: %s\n' "$PROG" "$1" >&2; exit 1; }
+warn() { printf '%s: warning: %s\n' "$PROG" "$1" >&2; }
 
 URL=${HIVEMIND_SERVER_URL:-}
 TOKEN=${HIVEMIND_TOKEN:-}
-PROJECT=$DEFAULT_PROJECT
+PROJECT=
 PLUGIN_DIR=
 CHECK=1
 DRY=0
@@ -112,12 +142,26 @@ if [ -z "$URL" ]; then
     [ -n "$URL" ] || URL=$DEFAULT_ADDR
 fi
 
-# A bare host:port is what people have in hand; a full project URL is what the plugin wants.
+# A bare host:port is what people have in hand; a URL with a scheme is what the plugin can use.
 case $URL in *://*) ;; *) URL="http://$URL" ;; esac
 URL=${URL%/}
+# The SERVER ROOT unless asked otherwise, which is the plugin's own default since 1.2.0: on the root
+# a call that names no project is refused rather than landing in whatever the URL happened to name.
+# `--project` opts back into the older shape; a URL that already names a project is left exactly as
+# given, flag or no flag. `if`, not `&&`: under `set -e` a trailing false test would end the script.
 case $URL in
-    */p/*) ;;                                  # already names a project
-    *)     URL="$URL/p/$PROJECT" ;;
+    */p/*) ;;                                  # already names a project — verbatim
+    *)     if [ -n "$PROJECT" ]; then URL="$URL/p/$PROJECT"; fi ;;
+esac
+
+# Stated, not discovered. With no project in the address the session genuinely has none until it is
+# pinned, and a refusal on the first Hivemind call is a confusing way to learn that.
+case $URL in
+    */p/*) ;;
+    *) printf '%s: %s is the server root — this session has no project until you run /hivemind:project.\n' \
+           "$PROG" "$URL" >&2
+       printf '%s: until then every Hivemind call is refused for naming no project, and the live guide has no URL to build. --project <name> uses the older /p/<name> shape instead.\n' \
+           "$PROG" >&2 ;;
 esac
 
 if [ -z "$TOKEN" ]; then
@@ -159,20 +203,30 @@ settings_json "$TOKEN" > "$SETTINGS"
 if [ "$CHECK" = 1 ] && command -v curl >/dev/null 2>&1; then
     root=${URL%/p/*}
     if ! curl -fsS -m 5 -o /dev/null "$root/healthz" 2>/dev/null; then
-        printf '%s: warning: %s/healthz did not answer — the session will start, but the plugin will not connect.\n' \
-            "$PROG" "$root" >&2
+        warn "$root/healthz did not answer — the session will start, but the plugin will not connect."
     else
+        # What proves the TOKEN works depends on the shape, and probing the wrong one is a warning
+        # about nothing: under /p/<project> the guide is the cheapest authenticated read, but off the
+        # ROOT there is no /guide at all — it is mounted per project — so that probe would 404 for
+        # every correctly configured root URL. /projects is the root's authenticated read, and it
+        # also catches the one token a root URL cannot use: a legacy per-project one, which is 401
+        # there however valid it is, because it is pinned to a project this URL has not named.
+        HINT=""
+        case $URL in
+            */p/*) PROBE="$URL/guide" ;;
+            *)     PROBE="$root/projects"
+                   HINT=" — a legacy per-project token is 401 here however valid it is; mint a server-level one with 'hivemind-admin mint-token --user <you>'" ;;
+        esac
         code=$(curl -s -m 5 -o /dev/null -w '%{http_code}' \
-               -H "Authorization: Bearer $TOKEN" "$URL/guide" 2>/dev/null || echo 000)
+               -H "Authorization: Bearer $TOKEN" "$PROBE" 2>/dev/null || echo 000)
         case $code in
             200) ;;
-            401) printf '%s: warning: the server rejected that token (401).\n' "$PROG" >&2 ;;
+            401) warn "the server rejected that token (401)$HINT." ;;
             # By design this server answers identically for a project that does not exist and one
             # you may not see, so this message must not claim to know which.
-            404) printf '%s: warning: no project answered at %s — it does not exist, or it is not yours.\n' \
-                     "$PROG" "$URL" >&2 ;;
-            000) printf '%s: warning: %s/guide did not answer.\n' "$PROG" "$URL" >&2 ;;
-            *)   printf '%s: warning: %s/guide answered %s.\n' "$PROG" "$URL" "$code" >&2 ;;
+            404) warn "$PROBE answered 404 — under /p/<project> that means the project does not exist or is not yours; off the root it means a server too old to have /projects." ;;
+            000) warn "$PROBE did not answer." ;;
+            *)   warn "$PROBE answered $code." ;;
         esac
     fi
 fi
@@ -184,7 +238,7 @@ if [ "$DRY" = 1 ]; then
     # but "filesystem status" to GNU, which SUCCEEDS on Linux and prints the filesystem instead of
     # the mode. BSD has no `-c` at all, so it fails cleanly and falls through. Reversed, this
     # reported `File: "…" ID: … Type: btrfs` as the mode on every Linux host.
-    printf 'project_url=%s\nplugin_dir=%s\nsettings_mode=%s\n' \
+    printf 'server_url=%s\nplugin_dir=%s\nsettings_mode=%s\n' \
         "$URL" "$PLUGIN_DIR" \
         "$(stat -c '%a' "$SETTINGS" 2>/dev/null || stat -f '%OLp' "$SETTINGS")"
     printf 'argv=claude'; printf ' %s' "$@"; printf '\n'

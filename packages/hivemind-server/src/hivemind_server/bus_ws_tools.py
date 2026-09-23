@@ -1,6 +1,6 @@
 """MCP surface for the push bus.
 
-Five tools, where v1 had twenty-four. Everything v1 spent tools on for *receiving* — poll, peek,
+Six tools, where v1 had twenty-four. Everything v1 spent tools on for *receiving* — poll, peek,
 ack, wait, cursors, history, reap — is gone, because a pushed message needs none of it. What is
 left is: get connected, send, see who is there, leave.
 """

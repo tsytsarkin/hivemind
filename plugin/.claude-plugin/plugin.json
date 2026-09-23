@@ -2,7 +2,7 @@
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "hivemind",
   "displayName": "Hivemind",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Shared, versioned knowledge graph + artifact store + tool registry that REPLACES local agent memory: read it before any work, persist all work into it.",
   "author": {
     "name": "Nik Tsytsarkin"
@@ -16,18 +16,17 @@
     "mcp"
   ],
   "mcpServers": "./.mcp.json",
-  "hooks": "./hooks/hooks.json",
   "userConfig": {
     "server_url": {
       "type": "string",
-      "title": "Hivemind project URL",
-      "description": "Full project base URL, including the project path, e.g. http://<server-host>:8787/p/default (LAN/Tailscale address of your Hivemind server).",
-      "default": "http://127.0.0.1:8787/p/default"
+      "title": "Hivemind server URL",
+      "description": "Your Hivemind server, used as ${server_url}/mcp. Give the SERVER ROOT (http://<host>:8787). On the root every call must pass project= \u2014 reads as well as writes \u2014 so a forgotten argument is refused instead of landing in whatever the URL named; it needs a token minted with --user. The project comes from the session pin: the SessionStart hook exports it as HIVEMIND_PROJECT beside HIVEMIND_SERVER_URL, and the live guide and the hivemind CLI build /p/<project>/guide and /p/<project>/blobs from the two (each variable is only a fallback \u2014 one you exported yourself wins). A project path (http://<host>:8787/p/default) still works and keeps the old fallback behaviour: that URL names the project, so a call omitting project= acts in it, and the shell consumers use it verbatim.",
+      "default": "http://127.0.0.1:8787"
     },
     "api_token": {
       "type": "string",
       "title": "API token",
-      "description": "Bearer token for this project (from the server's tokens.json / `hivemind-admin mint-token`).",
+      "description": "Bearer token from `hivemind-admin mint-token --user <you> --device <machine>`, kept in the server's identities.json. It names a person, which is what puts an author on your writes, and it reaches every project that person may access. An older per-project token (the server's tokens.json) still works, but only with the project-path form of the URL above \u2014 on the server root it gets a 401, because it is pinned to a project that URL has not named. The SessionStart hook also exports it as HIVEMIND_TOKEN for the session's Bash calls, so the live guide and the hivemind CLI can authenticate; that file is narrowed to 0600 before the token is written to it.",
       "sensitive": true
     }
   }

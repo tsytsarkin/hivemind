@@ -11,11 +11,23 @@ measurement against Claude Code and would fail *silently* if they drifted:
   * the token must never reach the `claude` argv, where `ps` shows it to every user on the host.
   * the script must not `exec`, because the EXIT trap that removes the token file cannot fire
     afterwards.
+
+The address it hands the plugin is the SERVER ROOT, matching the plugin's own default since 1.2.0.
+That is not cosmetic: on the root a call naming no project is refused, and on a project URL it
+silently acts in whatever the URL named — so a launcher that kept appending `/p/default` would hand a
+borrowed machine the looser mode while an installed one failed closed. `--project` opts back into the
+older shape, and what it costs to omit it is stated in the usage text and on stderr at launch.
 """
+import json
 import os
 import re
+import socket
 import subprocess
+import threading
+import time
 from pathlib import Path
+
+import pytest
 
 REPO = Path(__file__).resolve().parents[3]
 LAUNCHER = REPO / "scripts" / "hivemind-claude"
@@ -96,19 +108,67 @@ def test_a_token_containing_regex_metacharacters_is_still_redacted():
     assert "p.*$" not in out["settings"], out["settings"]
 
 
-def test_a_bare_host_and_port_becomes_a_full_project_url():
+def test_a_bare_host_and_port_becomes_the_server_root():
+    """No `/p/...` appended: the plugin's own default is the root, and this is the entry point that
+    has no install to inherit it from."""
     out = dry("--url", "h.example:8787", "--token", "T")
-    assert out["project_url"] == "http://h.example:8787/p/default"
+    assert out["server_url"] == "http://h.example:8787"
 
 
 def test_a_url_that_already_names_a_project_is_left_alone():
     out = dry("--url", "https://h.example:9000/p/myproj", "--token", "T")
-    assert out["project_url"] == "https://h.example:9000/p/myproj"
+    assert out["server_url"] == "https://h.example:9000/p/myproj"
 
 
-def test_the_project_flag_applies_and_a_trailing_slash_does_not_double_up():
+def test_a_url_that_names_a_project_wins_over_the_flag():
+    """The flag selects a SHAPE; a URL that already has one is not reshaped by it."""
+    out = dry("--url", "https://h.example:9000/p/myproj", "--project", "other", "--token", "T")
+    assert out["server_url"] == "https://h.example:9000/p/myproj"
+
+
+def test_the_project_flag_selects_the_older_shape_and_a_trailing_slash_does_not_double_up():
     out = dry("--url", "http://h.example:8787/", "--project", "scratch", "--token", "T")
-    assert out["project_url"] == "http://h.example:8787/p/scratch"
+    assert out["server_url"] == "http://h.example:8787/p/scratch"
+
+
+def test_launching_on_the_root_says_what_having_no_project_costs():
+    """The intended shape, and a refusal on the first Hivemind call is a confusing way to learn it.
+
+    Stated on stderr where someone meets it, not only in the docs: no project until
+    /hivemind:project pins one, calls refused until then, and the flag that opts out.
+    """
+    r = run("--dry-run", "--no-check", "--url", "h.example:8787", "--token", "T")
+    assert r.returncode == 0, r.stderr
+    assert "server root" in r.stderr and "/hivemind:project" in r.stderr, r.stderr
+    assert "refused" in r.stderr and "--project" in r.stderr, r.stderr
+
+
+def test_the_older_shape_gets_no_such_notice_because_it_has_a_project():
+    r = run("--dry-run", "--no-check", "--url", "h.example:8787", "--project", "scratch",
+            "--token", "T")
+    assert r.returncode == 0, r.stderr
+    assert "/hivemind:project" not in r.stderr, r.stderr
+
+
+def test_the_usage_text_says_what_the_project_flag_does_and_what_omitting_it_costs():
+    """`--project NAME` used to read "project to use", which is no longer what it does: it changes
+    the SHAPE of the address, and with it whether an omitted project= is refused or defaulted.
+
+    Scoped to the flag's OWN entry, not to the whole help text: the mutation that deletes the
+    consequence paragraph left "/hivemind:project" and "refused" elsewhere on the page — in the
+    examples and in the other half of this entry — so a whole-page assertion passed with the thing
+    it was meant to pin already gone.
+    """
+    r = run("--help")
+    assert r.returncode == 0, r.stderr
+    body = r.stdout
+    assert "server root" in body.lower(), body
+    # the block belonging to --project: up to the next option at the same indent
+    entry = body.split("  --project NAME", 1)
+    assert len(entry) == 2, body
+    entry = re.split(r"\n  --\w", entry[1], maxsplit=1)[0]
+    assert "/hivemind:project" in entry, entry
+    assert "refused" in entry and "no project" in entry.lower(), entry
 
 
 def test_unrecognised_arguments_are_forwarded_to_claude():
@@ -124,7 +184,7 @@ def test_arguments_after_a_double_dash_are_forwarded_verbatim():
 
 def test_the_environment_supplies_both_values_so_it_can_run_unattended():
     out = dry(env={"HIVEMIND_SERVER_URL": "env.example:7777", "HIVEMIND_TOKEN": "E"})
-    assert out["project_url"] == "http://env.example:7777/p/default"
+    assert out["server_url"] == "http://env.example:7777"
     assert '"api_token":"***"' in out["settings"]
 
 
@@ -148,3 +208,75 @@ def test_an_unknown_plugin_directory_is_refused_with_the_path_it_looked_at():
             "--plugin-dir", "/nonexistent/hivemind-plugin")
     assert r.returncode != 0
     assert "/nonexistent/hivemind-plugin" in r.stderr, r.stderr
+
+
+# ── the preflight probes the surface the URL actually has ────────────────────────────────────────
+def _free_port():
+    s = socket.socket(); s.bind(("127.0.0.1", 0)); p = s.getsockname()[1]; s.close(); return p
+
+
+@pytest.fixture()
+def live(tmp_path, monkeypatch):
+    """A real server, because the preflight is HTTP and the bug it can have is choosing the wrong
+    path. `/guide` exists only under `/p/<project>/` and `/projects` only off the root, so a probe
+    aimed at the wrong one warns about a correctly configured launch — which no dry-run test can
+    see."""
+    import uvicorn
+    monkeypatch.setenv("HIVEMIND_DATA_DIR", str(tmp_path / "d"))
+    monkeypatch.setenv("HIVEMIND_PROJECTS_DIR", str(tmp_path / "d" / "projects"))
+    monkeypatch.setenv("HIVEMIND_ALLOWED_HOSTS", "*")
+    from hivemind_server import app as appmod
+    from hivemind_server.config import Config
+    from hivemind_server.identity import IdentityStore
+    application = appmod.build_app(Config())
+    proj = application.state.registry.all()[0]
+    legacy = next(iter(json.loads((proj.dir / "tokens.json").read_text())))
+    identity = IdentityStore(application.state.cfg.identities_path).mint("launcher", "test")
+    port = _free_port()
+    srv = uvicorn.Server(uvicorn.Config(application, host="127.0.0.1", port=port,
+                                        log_level="warning"))
+    th = threading.Thread(target=srv.run, daemon=True); th.start()
+    for _ in range(100):
+        if srv.started: break
+        time.sleep(0.05)
+    yield {"root": f"http://127.0.0.1:{port}", "project": proj.name,
+           "identity": identity, "legacy": legacy}
+    srv.should_exit = True; th.join(timeout=5)
+
+
+def _warnings(r):
+    return [ln for ln in r.stderr.splitlines() if "warning:" in ln]
+
+
+def test_a_root_url_with_a_good_token_preflights_clean(live):
+    """Off the root the probe has to be /projects. Aimed at /guide it would 404 for every correctly
+    configured root URL — a warning about nothing, which is worse than no preflight."""
+    r = run("--dry-run", "--url", live["root"], "--token", live["identity"])
+    assert r.returncode == 0, r.stderr
+    assert _warnings(r) == [], r.stderr
+
+
+def test_a_project_url_with_its_own_token_preflights_clean(live):
+    """And the reverse: under /p/<project> the probe has to stay /guide. A legacy per-project token
+    is 401 on /projects however valid it is, so probing the root here would reject a working setup."""
+    r = run("--dry-run", "--url", live["root"] + "/p/" + live["project"],
+            "--token", live["legacy"])
+    assert r.returncode == 0, r.stderr
+    assert _warnings(r) == [], r.stderr
+
+
+def test_a_rejected_token_is_named_on_the_root_with_the_one_hint_that_explains_it(live):
+    """A legacy per-project token cannot be used with a root URL at all — 401 there however valid it
+    is, because it is pinned to a project the URL has not named. That is the misconfiguration this
+    change makes possible, so the warning names it rather than leaving "401" to be interpreted."""
+    r = run("--dry-run", "--url", live["root"], "--token", live["legacy"])
+    assert r.returncode == 0, r.stderr
+    warns = _warnings(r)
+    assert warns and "401" in warns[0], r.stderr
+    assert "per-project token" in warns[0], warns
+
+
+def test_a_dead_address_still_blames_the_address(live):
+    r = run("--dry-run", "--url", "127.0.0.1:%d" % _free_port(), "--token", "T")
+    assert r.returncode == 0, r.stderr
+    assert any("healthz did not answer" in w for w in _warnings(r)), r.stderr

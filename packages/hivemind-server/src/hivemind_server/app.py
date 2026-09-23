@@ -216,8 +216,8 @@ class ProjectAuthMiddleware:
                 # ones above.
                 return Denied(404, PROJECT_DENIED)
             # A shared project is knowable to everyone by definition, so its health probe and
-            # endpoint index answer without a token: clients hold only the project base URL, and a
-            # healthy server must not look dead to them. Neither exposes project data.
+            # endpoint index answer without a token: a client may hold only the project base URL,
+            # and a healthy server must not look dead to it. Neither exposes project data.
             #
             # This tuple is the entire reason a shared project's REST surface still needs a token,
             # and one more entry in it is an ACL bypass — envelope.set_registry names this line for
