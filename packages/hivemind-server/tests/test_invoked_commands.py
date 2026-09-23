@@ -115,23 +115,50 @@ def _invocations(line, binary, global_opts):
         yield toks[i], toks[i + 1:]
 
 
+# Floors on what a healthy scan of THIS repository must find. Measured while writing them: ~50
+# runnable files, ~170 candidate invocations, ~85 of those resolving to a real command across 19
+# distinct ones. The floors sit at roughly a THIRD of that — well clear of normal churn, and nowhere
+# near zero — because "found nothing" is the failure mode this whole file exists to exclude, and it
+# has four shapes rather than one: `_invocations` yielding nothing (the control below), then
+# `_runnable_files` yielding nothing, `_SUBCOMMAND` matching nothing and `_PROSE` swallowing
+# everything. Only the first announces itself; the other three read as "no phantoms" and pass.
+# `_runnable_files` shells out to `git ls-files`, which returns EMPTY outside a git checkout — not a
+# hypothetical: that is how this test produced a green tick inside a `git archive` copy.
+MIN_FILES = 20
+MIN_CANDIDATES = 40
+MIN_RESOLVED = 25          # resolutions, not distinct commands
+
+# Commands this repo demonstrably runs, in files that are not going anywhere. If a rename makes one
+# of these fail, point it at the new name — do not delete the anchor, it is what proves the scanner
+# resolved something rather than merely declining to flag anything.
+MUST_RESOLVE = {"hivemind bus", "hivemind-admin mint-token"}
+
+
 def test_every_command_this_repo_invokes_exists():
     """The regression guard for the `bus-reap` class: a deleted subcommand that a script still runs.
 
-    Fails loudly rather than at 03:45 behind an `|| echo`.
+    Fails loudly rather than at 03:45 behind an `|| echo`. And it fails loudly when the SCANNER is
+    what broke: the floors below make a green tick mean "I read the files and resolved real
+    commands", not the much weaker "I found nothing" that an empty `git ls-files` also produces.
     """
     inv = _inventories()
     phantoms = []
+    files = 0
+    candidates = 0
+    resolutions = 0
+    resolved = set()
     for rel, path in _runnable_files():
         try:
             text = path.read_text(errors="ignore")
         except OSError:
             continue
+        files += 1
         for lineno, line in enumerate(text.splitlines(), 1):
             for binary, subs in inv.items():
                 if binary not in line:
                     continue
                 for sub, tail in _invocations(line, binary, GLOBAL_OPTS[binary]):
+                    candidates += 1
                     if not _SUBCOMMAND.match(sub) or sub in _PROSE:
                         continue                      # prose, a shell variable, or a path
                     if not subs:
@@ -140,12 +167,35 @@ def test_every_command_this_repo_invokes_exists():
                         phantoms.append(f"{rel}:{lineno}: `{binary} {sub}` — no such subcommand "
                                         f"(have: {', '.join(sorted(subs))})")
                     elif subs[sub]:
+                        resolutions += 1
+                        resolved.add(f"{binary} {sub}")
                         nxt = next((t for t in tail if not t.startswith("-")), None)
                         if (nxt and _SUBCOMMAND.match(nxt) and nxt not in _PROSE
                                 and nxt not in subs[sub]):
                             phantoms.append(
                                 f"{rel}:{lineno}: `{binary} {sub} {nxt}` — no such subcommand "
                                 f"(have: {', '.join(sorted(subs[sub]))})")
+                    else:
+                        resolutions += 1
+                        resolved.add(f"{binary} {sub}")
+
+    # The floors come first: with the scanner blind, `phantoms` is empty for the wrong reason and
+    # "no phantoms" would be reported as a pass.
+    assert files >= MIN_FILES, (
+        f"the scan enumerated {files} files, under the floor of {MIN_FILES} — it scanned nothing "
+        f"and would report 'no phantoms' whatever this repo runs. `git ls-files` in {REPO} returns "
+        f"empty outside a git checkout; that is the usual cause.")
+    assert candidates >= MIN_CANDIDATES, (
+        f"the scan found {candidates} candidate invocations across {files} files, under the floor "
+        f"of {MIN_CANDIDATES} — `_invocations` is matching nothing, so nothing can be flagged.")
+    assert resolutions >= MIN_RESOLVED, (
+        f"the scan resolved {resolutions} of {candidates} candidates to a real command, under the "
+        f"floor of {MIN_RESOLVED} — nearly every candidate is being skipped, which is what a dead "
+        f"`_SUBCOMMAND` or an over-broad `_PROSE` looks like. Resolved: {sorted(resolved)}")
+    assert MUST_RESOLVE <= resolved, (
+        f"these commands are run by tracked files and must have been resolved: "
+        f"{sorted(MUST_RESOLVE - resolved)} — see MUST_RESOLVE")
+
     assert not phantoms, ("commands invoked that do not exist:\n  "
                           + "\n  ".join(sorted(set(phantoms))))
 
@@ -156,6 +206,9 @@ def test_the_sweep_can_actually_see_a_phantom():
     A test that only ever reports "no phantoms" is indistinguishable from one whose scanner matches
     nothing at all — and that is precisely how `bus-reap` survived a sweep. So: feed the scanner the
     real deleted subcommand in the real line that ran it, and require that it comes back.
+
+    This covers the TOKENISER only, on a line supplied here. It says nothing about whether the scan
+    above reached any file at all — the floors there are what cover that; see MIN_FILES.
     """
     inv = _inventories()
     line = ('  uv run --package hivemind-server hivemind-admin --project "$proj" bus-reap \\')

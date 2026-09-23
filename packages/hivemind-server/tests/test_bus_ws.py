@@ -929,19 +929,36 @@ async def test_an_evicted_live_peer_is_forgotten_not_parked(tmp_path, monkeypatc
     k = hub.mint_listen_key("ana-box", user="ana")["listen_key"]
 
     class SilentWS(HandshakeWS):
-        waits = 0
+        # Trigger and escape hatch both on send_text, for the reason spelled out in
+        # test_a_live_socket_is_dropped_when_its_user_loses_access: with the re-check disabled the
+        # wait collapses to timeout=0.0 and receive_text is cancelled before it is entered, so a
+        # counter there never advances and this test hangs instead of failing. send_text is on the
+        # other side of that timeout and the keepalive ping reaches it every iteration.
+        sends = 0
+        runaway = False
 
-        async def receive_text(self):
-            self.waits += 1
-            if self.waits == 1:
+        async def send_text(self, text):
+            await super().send_text(text)
+            self.sends += 1
+            if self.sends == 1:
+                # The hello frame: accepted, attached, socket up — so the mail below goes out on a
+                # LIVE socket and the revoke lands on one. hub.send re-enters this method with the
+                # message frame, which is why the trigger is keyed on the first send only.
                 await hub.send("nik", "ana-box", "mail that must not outlive the eviction")
                 _revoke(proj_dir)
-            if self.waits > 20:
-                raise ConnectionError("recheck never fired")
-            await _asyncio.sleep(3600)
+            if self.sends > 50:
+                # ~50 pings at HEARTBEAT=0.01; the unmutated path sends a handful of frames in
+                # total. Raising lands in the loop's `except Exception: break`, so the endpoint
+                # returns and the assertions below run instead of the suite wedging.
+                self.runaway = True
+                raise ConnectionError("the ACL re-check never fired; the heartbeat loop span")
+
+        async def receive_text(self):
+            await _asyncio.sleep(3600)     # a listener sends nothing; the heartbeat wakes the loop
 
     ws = SilentWS(key=k)
     await bus_ws.websocket_endpoint(ws, "nik.private", proj_dir)
+    assert ws.runaway is False, "the re-check never fired; the loop span until the hatch stopped it"
     assert ws.closed_with == 4401
     assert hub.peer("ana-box") is None, "an evicted peer must be forgotten, not parked"
     assert [p["peer"] for p in hub.peers()] == []
@@ -975,18 +992,34 @@ async def test_eviction_spares_a_peer_whose_connect_is_in_flight(tmp_path, monke
     ticket = hub.mint_ticket("nik-box3", user="nik")["ticket"]     # nik's connect in flight
 
     class SilentWS(HandshakeWS):
-        waits = 0
+        # Trigger and escape hatch both on send_text, for the reason spelled out in
+        # test_a_live_socket_is_dropped_when_its_user_loses_access: with the re-check disabled the
+        # wait collapses to timeout=0.0 and receive_text is cancelled before it is entered, so a
+        # counter there never advances and this test hangs instead of failing. send_text is on the
+        # other side of that timeout and the keepalive ping reaches it every iteration.
+        sends = 0
+        runaway = False
+
+        async def send_text(self, text):
+            await super().send_text(text)
+            self.sends += 1
+            if self.sends == 1:
+                # The hello frame: accepted, attached, socket up — revoked while it is open.
+                _revoke(proj_dir, keep=["nik"])
+            if self.sends > 50:
+                # ~50 pings at HEARTBEAT=0.01; the unmutated path sends a handful of frames in
+                # total. Raising lands in the loop's `except Exception: break`, so the endpoint
+                # returns and the assertions below run instead of the suite wedging.
+                self.runaway = True
+                raise ConnectionError("the ACL re-check never fired; the heartbeat loop span")
 
         async def receive_text(self):
-            self.waits += 1
-            if self.waits == 1:
-                _revoke(proj_dir, keep=["nik"])
-            if self.waits > 20:
-                raise ConnectionError("recheck never fired")
-            await _asyncio.sleep(3600)
+            await _asyncio.sleep(3600)     # a listener sends nothing; the heartbeat wakes the loop
 
     evicted = SilentWS(key=ana_key)
     await bus_ws.websocket_endpoint(evicted, "nik.private", proj_dir)
+    assert evicted.runaway is False, \
+        "the re-check never fired; the loop span until the hatch stopped it"
     assert evicted.closed_with == 4401, "ana's live socket must still be evicted"
 
     victim = HandshakeWS(ticket=ticket)
@@ -1012,26 +1045,40 @@ async def test_eviction_voids_the_revoked_peers_queued_mail(tmp_path, monkeypatc
         """A socket that has stopped accepting message frames but still takes keepalives — which is
         how _deliver reaches its queueing branch: the failed write marks the peer offline."""
 
-        waits = 0
+        # Trigger and escape hatch both on send_text, for the reason spelled out in
+        # test_a_live_socket_is_dropped_when_its_user_loses_access: with the re-check disabled the
+        # wait collapses to timeout=0.0 and receive_text is cancelled before it is entered, so a
+        # counter there never advances and this test hangs instead of failing. send_text is on the
+        # other side of that timeout and the keepalive ping reaches it every iteration.
+        sends = 0
+        runaway = False
 
         async def send_text(self, text: str) -> None:
             frame = json.loads(text)
             if frame.get("type") == "message":
                 raise ConnectionError("the write side is gone")
             self.sent.append(frame)
-
-        async def receive_text(self):
-            self.waits += 1
-            if self.waits == 1:
+            self.sends += 1
+            if self.sends == 1:
+                # The hello frame — the one frame this socket takes before the queue exists. The
+                # send below re-enters this method with a message frame and raises; _deliver
+                # catches that, marks the peer offline and queues, which is the state under test.
                 await hub.send("carol", "ana-box", "queued when the write failed")
                 assert hub.peer("ana-box").queue, "the failed write must have queued it"
                 _revoke(proj_dir)
-            if self.waits > 20:
-                raise ConnectionError("recheck never fired")
-            await _asyncio.sleep(3600)
+            if self.sends > 50:
+                # ~50 pings at HEARTBEAT=0.01; the unmutated path sends a handful of frames in
+                # total. Raising lands in the loop's `except Exception: break`, so the endpoint
+                # returns and the assertions below run instead of the suite wedging.
+                self.runaway = True
+                raise ConnectionError("the ACL re-check never fired; the heartbeat loop span")
+
+        async def receive_text(self):
+            await _asyncio.sleep(3600)     # a listener sends nothing; the heartbeat wakes the loop
 
     ws = HalfDeadWS(key=k)
     await bus_ws.websocket_endpoint(ws, "nik.private", proj_dir)
+    assert ws.runaway is False, "the re-check never fired; the loop span until the hatch stopped it"
     assert ws.closed_with == 4401
     assert hub.peer("ana-box") is None, \
         "a revoked peer holding queued mail must still be dropped, not parked"
