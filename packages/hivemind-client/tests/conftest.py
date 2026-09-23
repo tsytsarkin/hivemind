@@ -38,8 +38,10 @@ def fake_transport():
     every reply, for the HTTP-level failure cases. With `raw=True` each queued item is instead the
     whole JSON-RPC response body, verbatim — that is how a test reaches a reply that is not a
     `structuredContent` dict: a bare text content block, or a body carrying neither `result` nor
-    `error`. The returned client carries `.sent`, the list of `params` actually put on the wire,
-    so a test can check what was and was not sent.
+    `error`. A queued **string** is sent as the response body verbatim with `text/html`, i.e. a
+    reply that is not JSON at all (queue `{"structuredContent": "..."}` with `raw=True` if what
+    you want is a string *payload*). The returned client carries `.sent`, the list of `params`
+    actually put on the wire, so a test can check what was and was not sent.
     """
     made = []
 
@@ -54,6 +56,9 @@ def fake_transport():
                 raise QueueExhausted(f"call {len(sent)} to {body['params']['name']!r} has no "
                                      f"queued reply")
             item = replies.pop(0)
+            if isinstance(item, str):
+                return httpx.Response(status, text=item,
+                                      headers={"content-type": "text/html; charset=utf-8"})
             return httpx.Response(status, json=item if raw else {
                 "jsonrpc": "2.0", "id": body["id"], "result": {"structuredContent": item}})
 

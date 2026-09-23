@@ -155,3 +155,15 @@ def test_call_many_records_a_reply_that_is_neither_result_nor_error(fake_transpo
     results = c.call_many([("graph_upsert", {"i": 0})])
     assert results[0]["ok"] is False and results[0]["error_kind"] == "transport"
     assert "KeyError" in results[0]["error"]     # str(KeyError) alone is just 'result'
+
+
+def test_call_many_records_a_body_that_is_not_json_and_carries_on(fake_transport):
+    """The ordinary case for the decode branch: something between client and server answers with
+    an HTML page where the JSON-RPC reply should be. Without that branch the decode failure
+    propagates and takes the rest of the batch with it — the exact failure call_many exists for."""
+    c = fake_transport(["<html><body>502 Bad Gateway</body></html>",
+                        {"ok": True, "node_id": "b"}])
+    results = c.call_many([("graph_upsert", {"i": 0}), ("graph_upsert", {"i": 1})])
+    assert results[0]["ok"] is False and results[0]["error_kind"] == "transport"
+    assert "JSONDecodeError" in results[0]["error"]
+    assert results[1]["node_id"] == "b"          # and the batch carried on past it

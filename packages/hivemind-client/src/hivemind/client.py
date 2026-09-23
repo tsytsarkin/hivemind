@@ -110,9 +110,10 @@ class Client:
         (an HTTP-status failure carries no kind), and `"transport"` when no usable reply came back
         at all.
 
-        What still raises is the caller's own bug: an item that is not a `(tool, args)` pair, or
-        an argument that will not serialise. Recording those as failed calls would send whoever
-        reads the batch looking at the network for a mistake in their own arguments.
+        What still raises is the caller's own bug: an item that is not a `(tool, args)` pair,
+        `args` that is not a mapping, or an argument that will not serialise. Recording those as
+        failed calls would send whoever reads the batch looking at the network for a mistake in
+        their own arguments.
 
         With `stop_on_error=True` the batch stops after the first reply that is not `ok` — however
         it failed — and that reply is in the returned list: the record of where it stopped is the

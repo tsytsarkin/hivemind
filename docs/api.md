@@ -71,9 +71,10 @@ exist. Unknown and forbidden are byte-identical by design — see `app.PROJECT_D
   error}`, where `error_kind` is `HivemindError.kind` when it has one, `"error"` when it has none
   (an HTTP-status failure carries no kind), and `"transport"` when no usable reply came back at
   all. The caller's own bug is *not* recorded but raised — an item that is not a `(tool, args)`
-  pair, an argument that will not serialise — since a batch row blaming the network for it is
-  worse than a traceback. `stop_on_error=True` stops after the first non-ok reply, however it
-  failed, and still returns it, so the caller can see where the batch stopped.
+  pair, `args` that is not a mapping, an argument that will not serialise — since a batch row
+  blaming the network for it is worse than a traceback. `stop_on_error=True` stops after the first
+  non-ok reply, however it failed, and still returns it, so the caller can see where the batch
+  stopped.
 - `hivemind-admin` (operator, on the server host): `mint-token`, `create-project`, `apply-pack`,
   `promote`, `merge-guide`, `set-guide`, `gc`, `reindex`.
 
