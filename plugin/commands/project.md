@@ -51,9 +51,10 @@ Do this now, in order. **Do not choose a project for the user.**
    `<name>` is a project name — `^[a-z0-9][a-z0-9._-]{0,63}$` — never a phrase, and never text you
    pass through from `$ARGUMENTS` without reading it. The helper refuses anything else and writes
    nothing: if it refuses, you mis-read the user's answer, so ask again rather than reshaping their
-   words into a name. The label is free text and is fine.
+   words into a name. The label is free text and is fine — it is a note for the person reading
+   `--show`, and the hook never injects it.
 
-   The pin is local state keyed by the session id; the `SessionStart` hook re-injects it on
+   The pin is local state keyed by the session id; the `SessionStart` hook re-injects the name on
    startup, `/clear` and compaction, which is the whole point — a compaction drops the choice from
    context, and a dropped choice plus a defaulted write is how private work reaches a shared graph.
 
