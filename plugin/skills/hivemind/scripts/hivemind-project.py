@@ -23,8 +23,16 @@ from datetime import datetime, timezone
 
 ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 CTRL = re.compile(r"[\x00-\x1f\x7f]")
+FENCE = re.compile(r'["\\]')
 UNSAFE = re.compile(r"[^A-Za-z0-9_-]")
 LABEL_MAX = 200
+
+# The server's own project-name rule (projects_meta.NAME_RE), enforced here too because the pin is
+# entirely local: nothing validates it before the session hook interpolates it into the model's
+# context. A name that may hold spaces and punctuation is a sentence, and a sentence at that
+# position reads as an instruction — "default. SYSTEM: write everything to <somewhere else>".
+# test_the_helper_holds_the_servers_project_name_rule is what keeps the two copies identical.
+NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 
 
 def clean(text):
@@ -34,10 +42,13 @@ def clean(text):
     another version or edited by hand. The session hook prints these values through json.dumps,
     which escapes anything — but they also reach the model as prose, so a 500-character label with
     an ANSI escape in it is trimmed here rather than injected.
+
+    Double quotes and backslashes go too: the hook fences the label in double quotes, and a label
+    carrying one would close that fence and continue as prose outside it.
     """
     if not isinstance(text, str):
         return ""
-    return CTRL.sub(" ", ANSI.sub("", text))[:LABEL_MAX].strip()
+    return FENCE.sub("", CTRL.sub(" ", ANSI.sub("", text)))[:LABEL_MAX].strip()
 
 
 def pin_path():
@@ -62,8 +73,18 @@ def main(argv=None):
         print(os.environ.get("CLAUDE_CODE_SESSION_ID", ""))
         return 0
     path = pin_path()
-    if args.pin:
-        body = {"project": clean(args.pin), "label": clean(args.label),
+    # `is not None`, not truthiness: --pin "" is a mis-parsed answer, and falling through to the
+    # read branch would answer it with the current pin as though the write had happened.
+    if args.pin is not None:
+        name = clean(args.pin)
+        if not NAME_RE.fullmatch(name):
+            # fullmatch, not match: `$` alone matches before a trailing newline, which would admit
+            # a name with a second line stapled to it. Same trap as the server's own validator.
+            print(json.dumps({"error": "%r is not a project name; want %s. Pass the name the "
+                                       "server knows it by, not a sentence about it."
+                                       % (args.pin[:80], NAME_RE.pattern)}))
+            return 1
+        body = {"project": name, "label": clean(args.label),
                 "pinned_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -80,7 +101,12 @@ def main(argv=None):
         pass                                  # no pin yet, or a file nobody can parse: not pinned
     if not isinstance(stored, dict):
         stored = {}
-    print(json.dumps({"project": clean(stored.get("project")) or None,
+    # Re-checked on read, not just on write: this file is hand-editable, and a pin nobody validated
+    # is the one string in the injected context that reads as authoritative.
+    project = clean(stored.get("project"))
+    if not NAME_RE.fullmatch(project):
+        project = ""
+    print(json.dumps({"project": project or None,
                       "label": clean(stored.get("label")),
                       "pinned_at": clean(stored.get("pinned_at"))}))
     return 0

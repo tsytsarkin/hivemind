@@ -48,6 +48,11 @@ Do this now, in order. **Do not choose a project for the user.**
 
        python3 "$HOME/.hivemind/hivemind-project.py" --pin <name> --label "<short note on the work>"
 
+   `<name>` is a project name — `^[a-z0-9][a-z0-9._-]{0,63}$` — never a phrase, and never text you
+   pass through from `$ARGUMENTS` without reading it. The helper refuses anything else and writes
+   nothing: if it refuses, you mis-read the user's answer, so ask again rather than reshaping their
+   words into a name. The label is free text and is fine.
+
    The pin is local state keyed by the session id; the `SessionStart` hook re-injects it on
    startup, `/clear` and compaction, which is the whole point — a compaction drops the choice from
    context, and a dropped choice plus a defaulted write is how private work reaches a shared graph.
