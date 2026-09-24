@@ -35,6 +35,18 @@ SCHEMA_MODES = ("inherit", "interview", "bare")
 
 DENIED = "unknown project or not accessible with this token"
 
+
+def _serve(reg, project) -> None:
+    """Give a freshly-created project its own /p/<name>/ routes on the running app.
+
+    build_app installs the hook; without one (a bare registry in a test, or an embedding that never
+    built an app) this is a no-op and the project is still reachable on the neutral /mcp with
+    project=<name> — the behaviour everything had before the hook existed.
+    """
+    hook = getattr(reg, "on_project_created", None)
+    if hook is not None:
+        hook(project)
+
 # Creation is serialized in-process. The atomic mkdir below is what makes two *processes* safe; this
 # makes the ordinary case — one server, several agent sessions on one token — deterministic, so a
 # racing session adopts the winner's project instead of failing a create it cannot see the reason
@@ -127,6 +139,10 @@ def _build(reg, who: Identity, name: str, visibility: str, *, label: str, sessio
             src = source if source is not None else reg.get(reg.default_name)
             if src is not None and src.name != name:
                 copied = schemas.copy_types(src.db, project.db, agent=who.user)
+        # LAST, after everything that can raise: the unwind below forgets the project, and routes
+        # pointing at a directory that was just rmtree'd would outlive it. Publishing here means a
+        # caller never sees /p/<name>/ answer for a half-built project.
+        _serve(reg, project)
     except Exception:
         # The name was claimed before the build, so an unwind has to release both halves of the
         # claim or the name stays dead until the server restarts.
@@ -146,15 +162,14 @@ def _build(reg, who: Identity, name: str, visibility: str, *, label: str, sessio
     }[schema]
     return {"project": name, "existing": False, "visibility": visibility, "schema": schema,
             "next": nxt,
-            # Measured, not reasoned: NOTHING under /p/<name>/ exists yet — not the blob routes,
-            # not the guide, not healthz, and not its own /mcp either. build_app builds the mounts
-            # once from the projects the registry held at startup, so every path under the prefix
-            # 404s until a restart. The note used to say "REST routes", which left an agent that
-            # tried /p/<name>/mcp with a bare 404 and no explanation.
-            "note": f"the project-neutral /mcp endpoint serves it now — pass project={name} on "
-                    f"your calls. Nothing under /p/{name}/ exists until the server restarts (its "
-                    f"own /mcp, blob upload, guide and bus all 404 until then), so the hivemind "
-                    f"CLI cannot reach it yet."}
+            # build_app used to mount the prefixes once from the projects the registry held at
+            # startup, so everything under /p/<name>/ — blob upload, the guide, the catalogs, its
+            # own /mcp, the bus — 404'd until somebody restarted the server, and this note had to
+            # say so. _serve() above now installs the same two routes on the live app at creation,
+            # so the prefix works immediately and the note says what is true.
+            "note": f"reachable now on both surfaces: the project-neutral /mcp with "
+                    f"project={name}, and its own /p/{name}/ prefix (its /mcp, blob upload, guide "
+                    f"and bus), so the hivemind CLI can point straight at it."}
 
 
 def _adopt(reg, who: Identity, name: str, visibility: str) -> dict:
@@ -175,7 +190,7 @@ def _adopt(reg, who: Identity, name: str, visibility: str) -> dict:
     # denies a name it cannot find there, so raising first left an accessible project unusable until
     # the next restart. Publishing grants nothing — can_access already said this caller may reach it,
     # and startup discovery would have registered it anyway.
-    reg.create(name)
+    _serve(reg, reg.create(name))
     return _existing(name, meta, visibility)     # same mismatch guard as the registry branch
 
 
