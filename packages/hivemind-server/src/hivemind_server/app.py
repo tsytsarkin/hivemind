@@ -269,8 +269,12 @@ def build_app(cfg: Optional[Config] = None) -> Starlette:
     asgi = mcp.streamable_http_app(streamable_http_path="/mcp",
                                    transport_security=_transport_security(cfg),
                                    host=cfg.host)
-    mounts = []
-    for project in registry.all():
+    # Both halves of "serve this project under its own prefix" are factored out of the startup
+    # loop, because a project created later — through project_create, in this process — needs
+    # EXACTLY the same treatment. They used to be inline here, which is why such a project was
+    # answered by the neutral /mcp immediately but 404'd on every path under /p/<name>/ (blob
+    # upload, guide, catalogs, its own /mcp) until somebody restarted the server.
+    def _prepare_project(project) -> None:
         project.tokens.ensure_first_token(client_id=f"{project.name}-bootstrap")
         from . import guide as _guide
         _guide.ensure_core_guide(project.db)
@@ -279,10 +283,11 @@ def build_app(cfg: Optional[Config] = None) -> Starlette:
         # bus_ws._secret would mint a throwaway one and reject the key.
         _bus_ws_mod.register_secret(project.dir)
         # ...and record that this project HAS a /p/<name>/ prefix, which is the thing bus_connect
-        # cannot otherwise know: a project created through project_create is served by the neutral
-        # /mcp immediately but gets no mount until the next build_app, so a ws URL for it would
-        # 404. Recorded here, beside the mount it describes, so the two cannot disagree.
+        # cannot otherwise know. Recorded beside the routes it describes — and now added in the
+        # same breath as them, so "mounted" and "has routes" cannot drift apart.
         _bus_ws_mod.register_mount(project.dir)
+
+    def _project_routes(project) -> list:
         # The bus WebSocket is mounted at the Starlette level: MCPServer.custom_route registers
         # HTTP methods only, so a ws route cannot go through it. Auth is the connect ticket in the
         # query string (see bus_ws), not the bearer header, because the listener is launched by
@@ -298,11 +303,16 @@ def build_app(cfg: Optional[Config] = None) -> Starlette:
                 from . import bus_ws as _b
                 await _b.websocket_endpoint(ws, p.name, p.dir, require_auth=require_auth)
             return endpoint
-        # Registered BEFORE the Mount: Starlette takes the first matching route, and
+        # The ws route comes FIRST: Starlette takes the first matching route, and
         # Mount("/p/<name>") would otherwise swallow this path into the MCP app, which has no
         # websocket handler and so refuses the connection.
-        mounts.append(WebSocketRoute(f"/p/{project.name}/bus/ws", _ws_route()))
-        mounts.append(Mount(f"/p/{project.name}", app=asgi))
+        return [WebSocketRoute(f"/p/{project.name}/bus/ws", _ws_route()),
+                Mount(f"/p/{project.name}", app=asgi)]
+
+    mounts = []
+    for project in registry.all():
+        _prepare_project(project)
+        mounts.extend(_project_routes(project))
     # Last, so the project prefixes and the root routes below match first. This is the neutral
     # endpoint: /mcp works here, and ProjectAuthMiddleware._neutral 404s every other path it
     # exposes, since those need a project the URL does not carry.
@@ -353,6 +363,28 @@ def build_app(cfg: Optional[Config] = None) -> Starlette:
     routes = [Route("/", index), Route("/healthz", healthz),
               Route("/projects", list_projects), *mounts]
     app = Starlette(routes=routes, lifespan=lifespan)
+
+    def _serve_new_project(project) -> None:
+        """Give a just-created project its /p/<name>/ routes on the LIVE app.
+
+        Called by project_tools right after the project is fully built, so `project_create` returns
+        something usable immediately instead of a project whose own prefix 404s until the next
+        restart. It does exactly what the startup loop does — same prep, same two routes — so a
+        restart converges on the identical state rather than changing behaviour after the fact.
+
+        INSERTED, not appended: the trailing Mount("") matches every path, so a route added after
+        it could never match. It goes immediately before that catch-all, which also keeps it after
+        the three root routes — the same relative order build_app produces at startup.
+        """
+        _prepare_project(project)
+        for route in _project_routes(project):
+            app.router.routes.insert(len(app.router.routes) - 1, route)
+
+    # Hung on the registry because that is what project_tools already holds; it has no other handle
+    # on the running app. Absent (an app built without this, or a bare registry in a test) simply
+    # means no dynamic routes, which is the old behaviour rather than an error.
+    registry.on_project_created = _serve_new_project
+
     app.add_middleware(ProjectAuthMiddleware, registry=registry, cfg=cfg, identities=identities)
     app.state.registry = registry
     app.state.cfg = cfg

@@ -535,14 +535,20 @@ async def test_the_lifecycle_tools_work_over_mcp(served):
 
 
 @pytest.mark.anyio
-async def test_a_new_project_is_immediately_usable_on_the_neutral_endpoint(served):
-    """It has no /p/<name> mount until the next restart (build_app builds those), so the neutral
-    endpoint is the whole of what works — and it must work, or the tool created a dead project."""
+async def test_a_new_project_is_immediately_usable_on_both_surfaces(served):
+    """The neutral endpoint must work or the tool created a dead project — and so must the
+    project's own prefix.
+
+    build_app used to mount the prefixes once, from the projects the registry held at startup, so
+    everything under /p/<name>/ (blob upload, guide, catalogs, its own /mcp, the bus) 404'd until
+    somebody restarted the server. project_tools._serve now installs the same two routes on the
+    live app at creation, so both surfaces answer the moment the tool returns.
+    """
     application, nik = served
     transport = httpx.ASGITransport(app=application)
     async with Lifespan(application), httpx.AsyncClient(transport=transport,
                                                         base_url="http://t", timeout=30) as c:
-        _call(await _post(c, "", nik, "tools/call", {
+        made = _call(await _post(c, "", nik, "tools/call", {
             "name": "project_create",
             "arguments": {"name": "nik.live", "schema": "bare"}}, 2))
         got = _call(await _post(c, "", nik, "tools/call", {
@@ -550,25 +556,26 @@ async def test_a_new_project_is_immediately_usable_on_the_neutral_endpoint(serve
             "arguments": {"kind": "node", "name": "note", "json_schema": {"type": "object"},
                           "project": "nik.live"}}, 3))
         assert got["ok"] is True, got
-        # Its own prefix has no route at all — with the owner's token, so this is the router
-        # answering, not the ACL.
+        # Its own prefix answers — with the owner's token, so this is the router AND the ACL, not
+        # one masking the other. 404 here is the regression this test exists to catch.
         r = await c.get("/p/nik.live/healthz", headers={"Authorization": f"Bearer {nik}"})
-        assert r.status_code == 404
+        assert r.status_code == 200, r.text
+        assert r.json()["project"] == "nik.live", r.text
+        # The reply must not still tell the agent to go and restart something.
+        assert "restart" not in made["note"].lower(), made["note"]
 
 
 @pytest.mark.anyio
-async def test_bus_connect_refuses_a_project_that_has_no_routes_yet(served):
-    """Measured before this refusal existed: project_create("nik.fresh2") then
-    bus_connect(label="box", project="nik.fresh2") returned ok:true with a monitor_command, a
-    ws_url and a `next` telling the agent to run it — while the whole /p/nik.fresh2/ prefix 404s
-    until a restart.
+async def test_bus_connect_works_on_a_freshly_created_project(served):
+    """A project created in this process gets its bus route at creation, so bus_connect answers
+    with a URL that actually connects.
 
-    The listener then got a 403, classified it `refused`, printed "call bus_connect for a fresh
-    URL", and the agent looped. project_tools' create reply already said so, and so did project.md
-    and SKILL.md; bus_connect is the surface the agent acts on, so it has to say so itself.
-
-    The control at the end is the point: the same call on a project that IS mounted must still
-    hand back a working URL, or this "fix" would simply have broken the bus.
+    History, because both halves still matter. Originally bus_connect returned ok:true with a
+    ws_url for a prefix that 404'd until a restart; the listener got 403, classified it `refused`,
+    printed "call bus_connect for a fresh URL", and the agent looped. A refusal replaced that,
+    which was the honest answer while the prefix really was dead. project_tools._serve now installs
+    the route at creation, so the honest answer is a working URL again — and the refusal survives
+    for the case it was written for, exercised below by taking the mount registration away.
     """
     application, nik = served
     transport = httpx.ASGITransport(app=application)
@@ -581,28 +588,47 @@ async def test_bus_connect_refuses_a_project_that_has_no_routes_yet(served):
         out = _call(await _post(c, "", nik, "tools/call", {
             "name": "bus_connect",
             "arguments": {"label": "box", "project": "nik.fresh2"}}, 3))
-        assert out["ok"] is False and out["error_kind"] == "bus", out
-        assert "restart" in out["error"].lower(), out["error"]
-        assert "nik.fresh2" in out["error"], out["error"]
-        # No usable-looking credential or URL may come back with it: every one of these is a thing
-        # the agent would then act on, and none of them can work.
-        for leak in ("ws_url", "monitor_command", "listen_key", "ticket", "next"):
-            assert leak not in out, f"{leak} handed back for a project with no routes: {out}"
-        assert "ws://" not in out["error"] and "wss://" not in out["error"], out["error"]
+        assert out["ok"] is True, out
+        assert out["ws_url"].endswith("/p/nik.fresh2/bus/ws"), out
+        # Everything the agent needs to act on must be present, since it is now told to act.
+        for needed in ("ws_url", "monitor_command", "listen_key", "ticket", "next"):
+            assert needed in out, f"{needed} missing from a connectable project: {out}"
 
-        # bus_send must not promise a reconnect that cannot happen either.
-        hub = bus_ws.hub_for(application.state.registry.get("nik.fresh2").dir)
-        hub.mint_ticket("box")                      # a peer exists, offline, with no way to attach
-        sent = _call(await _post(c, "", nik, "tools/call", {
-            "name": "bus_send",
-            "arguments": {"to": "box", "body": "hi", "project": "nik.fresh2"}}, 4))
-        assert sent["queued"] is True and "restart" in sent["note"].lower(), sent
-        assert "queued for reconnect" not in sent["note"], sent["note"]
+        # And the route is really there, not merely advertised: the prefix answers over HTTP.
+        r = await c.get("/p/nik.fresh2/healthz", headers={"Authorization": f"Bearer {nik}"})
+        assert r.status_code == 200, r.text
+
+        # The guard still fires for a project the router genuinely does not serve — now reachable
+        # only by removing the registration, which is what "no routes" means to bus_connect.
+        pdir = application.state.registry.get("nik.fresh2").dir
+        bus_ws._MOUNTED.discard(bus_ws._scope(pdir))
+        try:
+            denied = _call(await _post(c, "", nik, "tools/call", {
+                "name": "bus_connect",
+                "arguments": {"label": "box", "project": "nik.fresh2"}}, 4))
+            assert denied["ok"] is False and denied["error_kind"] == "bus", denied
+            assert "nik.fresh2" in denied["error"], denied["error"]
+            # No usable-looking credential or URL may come back with a refusal: each is a thing the
+            # agent would act on, and none of them can work.
+            for leak in ("ws_url", "monitor_command", "listen_key", "ticket", "next"):
+                assert leak not in denied, f"{leak} handed back with a refusal: {denied}"
+            assert "ws://" not in denied["error"] and "wss://" not in denied["error"], denied
+
+            # bus_send must not promise a reconnect that cannot happen either.
+            hub = bus_ws.hub_for(pdir)
+            hub.mint_ticket("box")                  # a peer exists, offline, with no way to attach
+            sent = _call(await _post(c, "", nik, "tools/call", {
+                "name": "bus_send",
+                "arguments": {"to": "box", "body": "hi", "project": "nik.fresh2"}}, 5))
+            assert sent["queued"] is True, sent
+            assert "queued for reconnect" not in sent["note"], sent["note"]
+        finally:
+            bus_ws.register_mount(pdir)             # leave the app as we found it
 
         # Control: `default` WAS mounted at build time, so the bus still works there.
         ok = _call(await _post(c, "", nik, "tools/call", {
             "name": "bus_connect",
-            "arguments": {"label": "box", "project": "default"}}, 5))
+            "arguments": {"label": "box", "project": "default"}}, 6))
         assert ok["ok"] is True and ok["ws_url"].endswith("/p/default/bus/ws"), ok
 
 
