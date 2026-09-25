@@ -152,6 +152,9 @@ simultaneously the payload and the destination.
   `test_the_token_is_not_left_in_a_world_readable_file` pins the mode. It is still a bearer token in
   a plaintext file under `~/.claude`, on the same footing as the keychain entry only in that both are
   reachable by anything running as that user.
+- **Codex environment token.** The Codex plugin reads `HIVEMIND_TOKEN` from the host environment
+  for its MCP connection; its shell guide and optional CLI read it from their own environment.
+  Keep it out of the marketplace and plugin manifest. See the [Codex usage guide](codex-plugin.md).
 - **No transport security.** Tokens are static bearers over plain HTTP. Bind private interfaces
   only (LAN/Tailscale), never a public NIC; put TLS in front if the path is not already trusted.
   **Being on the LAN is not authorization** — every `/p/<project>` request that could return project

@@ -372,7 +372,10 @@ def test_the_hook_is_registered_for_every_event_that_rebuilds_the_context():
     assert set(entries[0]["matcher"].split("|")) == {"startup", "clear", "compact", "resume",
                                                     "fork"}, entries[0]["matcher"]
     cmds = [h["command"] for h in entries[0]["hooks"]]
-    assert cmds == ['bash "${CLAUDE_PLUGIN_ROOT}/hooks/session-start"'], cmds
+    assert cmds[0] == 'bash "${CLAUDE_PLUGIN_ROOT}/hooks/session-start"', cmds
+    assert len(cmds) == 2 and "bus-autojoin.py" in cmds[1] and "--mode ensure" in cmds[1]
+    assert "--mode after-pin" in cfg["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
+    assert "--mode ensure" in cfg["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
 
 
 def test_the_manifest_leaves_the_standard_hooks_file_to_be_auto_loaded():

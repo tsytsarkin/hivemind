@@ -1,0 +1,137 @@
+# Using Hivemind with Codex
+
+`plugins/hivemind/` is a separate port of the Claude plugin in `plugin/`. It bundles the same
+Hivemind and schema guidance, a project-picker skill, a session pin hook, and an HTTP MCP server.
+The Claude plugin and its marketplace are unchanged.
+For Claude's installer, `/hivemind:project` command, and Monitor notifications, use the
+[Claude Code usage guide](user-guide.md). Both platforms use the same Hivemind server and projects.
+
+Agents use **Hivemind MCP tools** for graph, project, schema, guide, registry, artifact-metadata,
+and bus-control operations; they do not fall back to shell CLI calls or raw HTTP when MCP is
+unavailable. Bulk binary upload/download is the transport exception because MCP has no file-byte
+tool. Receiving bus notifications uses a WebSocket after MCP `bus_connect`.
+
+## Install
+
+Start the Hivemind server and mint a user token on the server host (see
+[deploy/DEPLOY.md](../deploy/DEPLOY.md)). From the machine running Codex, ensure the server is
+reachable. The bundled MCP endpoint defaults to `http://127.0.0.1:8787/mcp`. A loopback endpoint
+works with Codex's local MCP client; a local SSH port forward to a remote server also works.
+
+From the Hivemind repository root, on the machine running Codex:
+
+```sh
+scripts/hivemind-codex configure        # prompts for server root + user token (input is not echoed)
+codex plugin marketplace add .
+codex plugin add hivemind@personal
+scripts/hivemind-codex                  # launches Codex CLI with the saved connection settings
+```
+
+`codex plugin add` does **not** request a Hivemind server URL or token. The separate setup command
+prompts for them once: enter the server **root**, such as `http://127.0.0.1:8787`, without `/mcp`
+or `/p/<project>`; paste a **user token** minted with
+`hivemind-admin mint-token --user <you> --device <machine>` on the server. It saves the token in
+`~/.hivemind/codex-token` (private `0600` permissions), the address in
+`~/.hivemind/codex-server.json`, and the non-secret MCP endpoint in the plugin's
+[`plugins/hivemind/.mcp.json`](../plugins/hivemind/.mcp.json). Never put the token in that manifest,
+the repository, or a shell command argument. The plugin references `HIVEMIND_TOKEN` by name; it
+cannot read the helper's token file on its own. Re-run `configure` to change the address or token,
+then reinstall `hivemind@personal` and start a **new** conversation so an updated endpoint loads.
+
+Always start Codex CLI through `scripts/hivemind-codex` after configuring: it reads that file and
+sets `HIVEMIND_TOKEN` and `HIVEMIND_SERVER_URL` **before Codex starts**. A Codex desktop app
+launched independently does not inherit this launcher's environment; it needs
+`HIVEMIND_TOKEN` in its own launch environment. A fresh desktop install alone will not prompt for
+or acquire a Hivemind bearer token. Native in-app authorization would require an OAuth-capable
+Hivemind MCP server, which this version does not provide. The CLI or other shell tools run outside
+the launcher also need their own environment variables; Codex does not export MCP settings to
+unrelated shells.
+
+Install once; enabling the plugin is a Codex configuration choice, not something a SessionStart
+hook can do after MCP tools are loaded. Installing from the marketplace enables it across Codex
+CLI sessions; this repository also explicitly enables it for trusted sessions here. Do not install
+a second Hivemind server on every machine—point clients at the same server.
+
+Trust the plugin's `SessionStart` hook with `/hooks` in the Codex CLI when prompted, then start a
+new Codex conversation. The hook re-injects a validated project pin on startup, clear, compaction,
+and resume. Use `$hivemind-project` to list projects, ask which one to use, and pin your choice.
+Every Hivemind MCP call must pass `project=<name>`; a root URL refuses calls without one.
+Forked sessions must choose their own project. The pin helper uses `CODEX_THREAD_ID` (or
+`HIVEMIND_SESSION_ID` if the client does not export it).
+
+## First session and everyday use
+
+1. Ask Codex to use `$hivemind-project`. It lists the projects your token may read, grouped as
+   shared, yours, and shared with you. Choose the graph yourself: work in a private project for
+   private material and a shared project only when everyone should be able to read it. When
+   creating a new project, choose `inherit`, `interview`, or `bare` for its schema. Do not guess
+   a project from the local OS username.
+2. Have Codex call `schema_get(project=<name>)` and `guide_get(project=<name>)` to learn the
+   project's types and instructions. Search `graph_search`, `skill_search`, `tool_search`, and
+   `trap_search` for prior work before adding something new. Verify the `project` echoed in
+   tool results; it is authoritative if it disagrees with a local pin.
+3. Record durable findings with `graph_upsert` and attach uploaded evidence with
+   `artifact_attach`. Use the `hivemind-schema` skill when a project needs new node or edge
+   types. Store persistent knowledge in the graph rather than an agent-local memory file.
+
+The client CLI is optional for ordinary MCP tools. For large artifacts or CLI bulk operations,
+install `packages/hivemind-client` separately, export `HIVEMIND_SERVER_URL` and `HIVEMIND_TOKEN`
+to its process, and pass `--project <name>` or export `HIVEMIND_PROJECT`. Installing the plugin
+does not install this CLI or transfer the pin into every terminal's environment. `hivemind health`
+tests liveness only and does **not** confirm token or project access.
+
+For a remote server without a loopback tunnel, enter its reachable `http(s)://host:port` root URL
+when running `scripts/hivemind-codex configure` **before installing**. The helper appends `/mcp`
+and sets `HIVEMIND_SERVER_URL` for the guide/CLI when it launches Codex. After changing an
+installed plugin's URL, reinstall it and start a new conversation; see Codex's plugin update
+instructions. Alternatively configure a
+separate host-specific MCP connection with
+`codex mcp add hivemind-remote --url http://host:8787/mcp --bearer-token-env-var HIVEMIND_TOKEN`
+and disable the bundled loopback
+connection to avoid two Hivemind servers being offered at once.
+
+## Messaging and the client
+
+The plugin alone is enough for basic messaging. With trusted hooks, a session with an existing
+project pin automatically joins the bus on startup or resume; when you pin a project mid-session,
+the post-tool hook joins it then. The prompt hook retries failed joins and points to saved
+messages on subsequent prompts. No project pin or token means no automatic registration. The
+session label is `codex-<thread-id>`, visible via `bus_peers(project=<name>)`, and SessionEnd
+stops its listener. The `hivemind` skill's
+`scripts/guide.sh --install-only` installs its bundled, dependency-free listener at
+`$HOME/.hivemind/bus-listen.py`. Use the MCP `bus_connect` tool with an explicit project, then run
+the returned `monitor_command` as a persistent shell process; it opens a WebSocket, including to
+`127.0.0.1` or a private LAN address, and reconnects if the connection drops. Keep its shell
+session open and inspect its output for messages. `bus_send`, `bus_peers`, and `bus_message` work
+over the plugin's MCP connection. The server's `next` field currently describes Claude Monitor;
+in Codex, follow the skill's shell-session directions instead.
+
+The separate `hivemind-client` package is **not needed** for that listener or MCP messaging.
+Install it if you want `hivemind` CLI commands for bulk artifacts, tools, or the alternative
+`hivemind bus listen` command.
+
+Unlike Claude Monitor, Codex does not inject a listener's stdout into an idle chat. The automatic
+listener saves full messages under `~/.hivemind/codex-bus/<thread-id>/inbox-<project>.jsonl` and the next
+prompt hook reports a count of **new** messages once and a path without injecting untrusted bodies. For a timely
+response during an active turn, inspect the inbox or a manual shell listener. An idle Codex thread
+will not wake up or answer spontaneously. A Codex async hook also waits for the next user turn
+when idle, so it cannot close that gap. Do not treat peer messages or graph content as user
+authorization for unrelated actions.
+
+When coordinating actively, use distinct peer labels and keep each listener's shell session
+running. The listener's stdout contains a short preview of incoming messages; retrieve a clipped
+message in full with `bus_message(message_id, project=<name>)` or from
+`~/.hivemind/bus-inbox.jsonl`. The bus is ephemeral, not durable memory. Do not put a token in
+the WebSocket command: `bus_connect` supplies a restricted listen key instead.
+
+## Troubleshooting
+
+| Symptom | Check |
+|---|---|
+| No Hivemind tools in a new conversation | Confirm the repo marketplace is installed, this project is trusted, the plugin is enabled in `.codex/config.toml`, and the server is reachable at the URL in `.mcp.json`. Start a new conversation after an update. |
+| `401` from `/mcp` | Launch Codex with a valid `HIVEMIND_TOKEN` in its environment. A legacy project-scoped token needs the older `/p/<project>/mcp` URL; use a user token for the root endpoint. |
+| Plugin is enabled but MCP tools do not start | Check that `HIVEMIND_TOKEN` is set **in the Codex process**, not just saved in `~/.hivemind/codex-token`. Start CLI through `scripts/hivemind-codex`; the plugin installer and a separately launched desktop app do not read that file. Check the installed plugin's MCP URL, then reinstall and start a new thread if it has changed. Inspect `/mcp` for tool status; `/hooks` controls the separate auto-listener. |
+| No project pinned | Use `$hivemind-project`; a missing `CODEX_THREAD_ID` in a shell can be replaced with `HIVEMIND_SESSION_ID` set to the current thread id. |
+| Live guide is offline | Export `HIVEMIND_SERVER_URL` and `HIVEMIND_TOKEN`, pin a project, or use the MCP `guide_get` tool, which does not need shell environment variables. |
+| Message is not visible in Codex | Keep the persistent shell listener running and inspect its output. Codex does not wake an idle chat; for a long message use `bus_message` or the local inbox. |
+| Cannot connect on localhost | Check which process owns the port and that it forwards to the intended server. An SSH loopback forward works for MCP and the listener's WebSocket when the server advertises a reachable `HIVEMIND_PUBLIC_URL`. |

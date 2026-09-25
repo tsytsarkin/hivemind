@@ -1,5 +1,12 @@
 # Adding a machine (plugin + token)
 
+The installation instructions in section 3 below are for **Claude Code**. Codex uses a separate
+repo plugin and environment-based token: follow the [Codex usage guide](codex-plugin.md) after
+minting a token in section 2. Its installer does not ask for credentials: run
+`scripts/hivemind-codex configure` in the repo first, then install and launch through that helper.
+For Claude's step-by-step session flow, see the
+[Claude Code usage guide](user-guide.md). The server and token format are shared.
+
 Hivemind is **one server, many clients**. Don't run a second server per machine — each server has
 its own SQLite database and blob store, so a second instance is a *separate graph*, not a shared
 one. Point every machine at the same server URL.
@@ -77,9 +84,11 @@ from `<data-dir>/projects/<project>/tokens.json`). **No restart is needed**: bot
 whenever their mtime/size changes, so the revocation takes effect on the very next request — and
 within one 30 s heartbeat for a bus socket that is already open.
 
-## 3. Install just the plugin on the new machine
+## 3. Install the Claude Code plugin on the new machine
 
-The plugin is self-contained — the machine needs **no server, no Python, no repo checkout**. It
+The plugin is self-contained — the machine needs **no server or repo checkout**. Python 3 is
+needed only if you run the bundled stdlib bus listener; the MCP graph tools need no client
+installation. It
 ships a manifest, an `.mcp.json`, two skills (`hivemind` and `hivemind-schema`), the
 `/hivemind:project` command and a `SessionStart` hook.
 
@@ -90,6 +99,12 @@ claude plugin install hivemind@hivemind-marketplace --scope user \
   --config server_url=http://<server-ip>:8787 \
   --config api_token=hm_…
 ```
+
+The installer accepts the Claude plugin's declared `server_url` and sensitive `api_token`
+configuration fields; it cannot mint a token for you. A token supplied as `--config api_token=…`
+may appear in shell history or process listings. If that is unsuitable, run the repository's
+`scripts/hivemind-claude` launcher instead; it prompts without echoing the token and does not pass
+it as a shell argument.
 
 If the repo is **private** and the machine has no GitHub credentials, use either:
 ```sh
@@ -277,12 +292,10 @@ it hands back is a **project-scoped** `ws://…/p/<name>/bus/ws` URL that the li
 directly. The socket never goes through the root. So an MCP-only client on the root URL can still
 join the bus — measured, not inferred.
 
-**A brand-new project has no `/p/<name>/` prefix yet.** Those mounts are built once at startup, so a
-project you just created with `project_create` answers `404` on every path under its own prefix —
-`/mcp`, `/blobs/…`, `/guide`, `/healthz` alike — until the server restarts. Until then it is reachable
-only on the neutral `/mcp` with `project=<name>`: its graph is live immediately, and it is the
-byte-moving surfaces that wait — `hivemind artifact put/get`, `hivemind bus listen`, and the live
-guide, which prints its cached copy naming that `404` as the reason.
+**A brand-new project is available immediately on current servers**, on the neutral `/mcp` with
+`project=<name>` and under its own `/p/<name>/` prefix for REST and WebSockets. Older deployments
+mounted those project routes only at startup and may answer `404` there until a server restart;
+their neutral MCP graph still works in the meantime.
 
 Naming a project is never a restriction either way: `project=<name>` on an individual call overrides
 both the URL and `--project`, so `/p/default/mcp` still reaches `nik.private` if the token may.

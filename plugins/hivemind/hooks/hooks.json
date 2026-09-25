@@ -1,0 +1,32 @@
+{
+  "description": "Restore the Hivemind project pin, auto-start its session bus listener, and report new messages on subsequent prompts.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${PLUGIN_ROOT}/hooks/session_start.py\"",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "python3 \"${PLUGIN_ROOT}/skills/hivemind/scripts/bus-autojoin.py\" --platform codex --mode ensure",
+            "timeout": 8
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [{
+      "matcher": "Bash",
+      "hooks": [{"type": "command", "command": "python3 \"${PLUGIN_ROOT}/skills/hivemind/scripts/bus-autojoin.py\" --platform codex --mode after-pin", "timeout": 8}]
+    }],
+    "UserPromptSubmit": [{
+      "hooks": [{"type": "command", "command": "python3 \"${PLUGIN_ROOT}/skills/hivemind/scripts/bus-autojoin.py\" --platform codex --mode ensure", "timeout": 8}]
+    }],
+    "SessionEnd": [{
+      "hooks": [{"type": "command", "command": "python3 \"${PLUGIN_ROOT}/skills/hivemind/scripts/bus-autojoin.py\" --platform codex --mode stop", "timeout": 3}]
+    }]
+  }
+}

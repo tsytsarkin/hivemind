@@ -26,12 +26,10 @@ projects rather than *in* one, so no per-call `project` is injected into them: `
 `project_share` and `project_unshare` take their own **required** `project`, `project_create` names
 the new one with `name`, and `project_list` takes no arguments at all.
 
-**A project created by `project_create` has no `/p/<name>/` prefix until the server restarts.** The
-mounts are built once, in `build_app`, from the projects the registry held at startup, so a new one
-is reachable **only** on the neutral `/mcp` with `project=<name>` — measured: `/p/<name>/mcp`,
-`/p/<name>/blobs/…`, `/p/<name>/guide` and `/p/<name>/healthz` all `404` until then, and all answer
-afterwards. It *is* in `GET /projects` immediately. Nothing is lost by waiting: the graph is live
-from the moment it is created, and only the byte-moving and bus surfaces need the restart.
+**A project created by `project_create` is usable immediately on current servers.** Its graph is
+available on the neutral `/mcp`, and `build_app` inserts the new `/p/<name>/` REST and WebSocket
+routes at creation time. Older deployments mounted only at startup and require a restart before
+the new project's `/p/<name>/` routes answer. It appears in `GET /projects` immediately.
 
 Graph: `graph_types`, `graph_search`, `graph_get`, `graph_subjects`, `graph_neighbors`, `graph_upsert`,
 `graph_link`, `graph_bulk_load`. Schema: `schema_get`, `schema_propose`, `schema_promote`,
@@ -134,7 +132,8 @@ carries its own credential and enforces the same ACL itself — see below.)
   `HIVEMIND_PROJECT` and `HIVEMIND_AGENT` (`cli._client`). In a Claude Code session the plugin's
   `SessionStart` hook exports the first three for in-session Bash calls: the URL and token from the
   plugin's own config, the project from the session pin, which is where it lives — the plugin config
-  holds no project. Export them yourself anywhere else.
+  holds no project. In Codex and in plain terminals, export them yourself for CLI calls; see the
+  [Codex usage guide](codex-plugin.md) and [Claude Code usage guide](user-guide.md).
   The URL may be the server root: `--project <name>` (default `$HIVEMIND_PROJECT`) then names the
   project, riding as a tool argument on `<root>/mcp` and as the `/p/<name>/` prefix on every REST
   path. With no project at all a tool call is refused by the server and a REST path by the client,

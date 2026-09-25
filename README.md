@@ -24,6 +24,7 @@ live guide). Meaning is data — shipped as a swappable **domain pack** (`packs/
 | `packages/hivemind-server/` | The server: MCP (streamable HTTP) + REST, SQLite-backed. Python ≥3.11. |
 | `packages/hivemind-client/` | The client library + `hivemind` CLI. Python ≥3.9; deps are `httpx` and `websockets` (the bus listener). |
 | `plugin/` | The Claude Code plugin: MCP config, the self-updating bootstrap skill, a schema-authoring skill, the `/hivemind:project` command and a `SessionStart` hook (re-injects the project pin, and publishes three values to the session's shell for the live guide and the CLI: `HIVEMIND_SERVER_URL` and `HIVEMIND_TOKEN` from the plugin config, and `HIVEMIND_PROJECT` from the pin — the third is what lets them build `/p/<project>/…` off a root URL, which is the default since 1.2.0). |
+| `plugins/hivemind/` | The separate [Codex plugin](docs/codex-plugin.md): MCP, project-picker and schema skills, session pin hook, and dependency-free bus listener. |
 | `packs/` | Optional, swappable, **layerable** domain packs (schema + guide). Ships `security-research`, `ios-macos-attack-surface` and `research-workflow`. See [docs/packs.md](docs/packs.md). |
 | `deploy/` | Deploy docs, systemd unit, daily backup + restore, bootstrap + relock scripts. |
 | `docs/` | [User guide](docs/user-guide.md), data model, API, the agent bus, guide authoring, security notes. |
@@ -63,21 +64,23 @@ before it builds anything. See **[docs/skills-and-traps.md](docs/skills-and-trap
 Alongside the graph (durable truth) there is a **bus** for the one thing that is only true right
 now: which agents are connected, so they can talk to each other while they work.
 
-Delivery is **push, not polling**. An agent calls `bus_connect(label)` once and runs the command it
-returns under its harness's background-process tool; that process holds a WebSocket to the server,
-and an incoming message arrives as a notification in the agent's conversation without it having
-asked. Presence *is* that socket — a peer is online exactly while its connection is open, so there
-is no TTL and no reaper to lose messages behind.
+Delivery to the listener is **push, not polling**. Claude Monitor can forward listener output as
+live agent notifications. Codex joins automatically after a project is pinned and a token is
+available, but its hook only points the agent at saved messages on the next prompt; it cannot wake
+an idle chat. Claude auto-launches the same local-inbox fallback for pinned sessions; Monitor can
+add live notifications. Prompt hooks report each new message once. Presence *is* the socket — a
+peer is online exactly while its connection is open.
 
-```sh
-hivemind bus connect mac-studio        # mint a ticket, print the command that receives
-hivemind bus peers                     # who is connected right now
-hivemind bus send lab-box "census done, 4712 gated entry points"
-hivemind bus broadcast "pausing writes for a migration"
+```text
+bus_connect(label="mac-studio", project="my-project")
+bus_peers(project="my-project")
+bus_send(to="lab-box", body="census done", project="my-project")
 ```
 
 Six MCP tools, and that is the whole surface: `bus_connect`, `bus_peers`, `bus_send`,
 `bus_broadcast`, `bus_message` (the full text of a notification that was clipped), `bus_disconnect`.
+Agents call Hivemind operations through their host's MCP tools, not a shell CLI or raw REST fallback.
+Bulk binary transfer is the exception (no MCP file-byte tool); the listener receives over WebSocket.
 The listener ships **with the plugin** as a stdlib-only script, so a machine that installed nothing
 but the plugin can still receive.
 
@@ -103,17 +106,23 @@ See [docs/packs.md](docs/packs.md) and the [full docs](docs/) (data model, API, 
 
 ## Using it
 
-**[docs/user-guide.md](docs/user-guide.md)** is the guide for the person at the keyboard: both ways
-to connect (installed, or not), what to do in the first five minutes, how to choose between a
-shared, private or scratch project, and the one rule worth internalising — always pass
-`project=<name>`, because whether omitting it fails depends on which endpoint you are on.
+Choose the guide for your agent platform: **[Claude Code](docs/user-guide.md)** (installed plugin
+or the one-session launcher) or **[Codex](docs/codex-plugin.md)** (repo marketplace and local MCP).
+Both explain project selection and the rule to pass `project=<name>` on every call.
+Before either install, start the server and mint a **user token** there with
+`hivemind-admin mint-token --user <you> --device <machine>`. Claude's plugin accepts `server_url`
+and sensitive `api_token` as installer config. Codex's plugin installer does **not** prompt for
+Hivemind credentials: run `scripts/hivemind-codex configure` from this checkout to enter the
+server root URL and token before installing, then launch CLI sessions with
+`scripts/hivemind-codex`. See the platform guides for storage and desktop-app caveats.
 
 ## Adding machines
 
 **One server, many clients** — don't run a second server per machine (each has its own database,
 so it would be a separate graph). The server listens on `127.0.0.1` by default; set
-`HIVEMIND_HOST=0.0.0.0` to serve your LAN/Tailscale. To put a machine on it, mint a token on the
-server and install the plugin there — no server or checkout needed on the client:
+`HIVEMIND_HOST=0.0.0.0` to serve your LAN/Tailscale. To connect another machine, mint a token on
+the server, then follow the [Claude Code guide](docs/user-guide.md) or
+[Codex guide](docs/codex-plugin.md). For Claude Code:
 
 ```sh
 hivemind-admin mint-token --user <name> --device laptop          # on the server
@@ -121,6 +130,8 @@ claude plugin marketplace add tsytsarkin/hivemind                # on the new ma
 claude plugin install hivemind@hivemind-marketplace --scope user \
   --config server_url=http://<server-ip>:8787 --config api_token=hm_…
 ```
+Passing `api_token` as a shell argument may expose it in shell history or process listings; the
+prompting launcher below avoids that command-line exposure. See the Claude guide for details.
 Or skip installing altogether — `scripts/hivemind-claude` prompts for an address (default
 `localhost:8787`) and a token, loads the plugin for that session only via `--plugin-dir`, and
 forwards any other arguments to `claude`:
@@ -136,7 +147,10 @@ the older `http://host:8787/p/<name>` shape instead.
 Nothing is written to your permanent configuration, and the token lives in a `0600` file that is
 removed when the session ends. Good for a borrowed machine or a VM.
 
-Both routes, step by step: **[docs/user-guide.md](docs/user-guide.md)**.
+Claude's two installation routes, step by step: **[docs/user-guide.md](docs/user-guide.md)**.
+For Codex installation, project pinning, and listener setup: **[docs/codex-plugin.md](docs/codex-plugin.md)**.
+Configure its address/token before installing with `scripts/hivemind-codex configure`, then launch
+CLI sessions with `scripts/hivemind-codex` so the token is available before MCP initialization.
 Minting and moving tokens, and revocation: **[docs/clients.md](docs/clients.md)**.
 
 ## Reproducible dependencies

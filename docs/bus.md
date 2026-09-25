@@ -4,6 +4,10 @@ Live messaging between running Hivemind agents, on the same machine or across th
 Ephemeral by design: it is for coordination, not for knowledge. Anything worth keeping goes in
 the graph.
 
+Platform-specific instructions: [Claude Code usage guide](user-guide.md#talking-to-other-agents)
+and [Codex usage guide](codex-plugin.md#messaging-and-the-client). The WebSocket transport is the
+same; how its listener output reaches the agent differs.
+
 ## Why v1 was replaced
 
 The first bus was poll-based, and that is why it was flaky. Four failure modes, all reproduced
@@ -25,11 +29,12 @@ against the live server before the rewrite:
   ────────────                 ───────────────                ──────────────
   bus_send(to,body) ─MCP────▶  hub fan-out
                                WS /p/<proj>/bus/ws ─frame──▶  bus-listen.py
-                                                              (run by Monitor)
+                                                              (Claude: Monitor;
+                                                               Codex: shell session)
                                                                     │ one line
                                                                     ▼
-                                                              notification in the
-                                                              agent's conversation
+                                                              Claude: notification;
+                                                              Codex: shell output
 ```
 
 The WebSocket **server** is part of the Hivemind server; clients on any machine dial it over the
@@ -46,18 +51,29 @@ network like any other client. What is unusual is only *which process* dials it:
 > the WebSocket. A subprocess carries no address policy, and the connection is an ordinary
 > cross-machine WS.
 
-## Using it
+## Using it with Claude Code
 
 ```python
-bus_connect(label="mac-studio")      # once per session -> returns monitor_command
+bus_connect(label="mac-studio", project="my-project")  # optional live Monitor listener
 Monitor(command=<monitor_command>, description="hivemind bus", persistent=True)
 
-bus_peers()                          # who is connected
-bus_send(to="lab-box", body="census done, 4712 gated entry points")
-bus_broadcast(body="pausing writes for a migration")
-bus_message("<id>")                  # full text of a clipped message, from the server
-bus_disconnect(label="mac-studio")
+bus_peers(project="my-project")       # who is connected
+bus_send(to="lab-box", body="census done", project="my-project")
+bus_broadcast(body="pausing writes", project="my-project")
+bus_message("<id>", project="my-project")
+bus_disconnect(label="mac-studio", project="my-project")
 ```
+
+With **Codex**, trusted hooks automatically register and start the stdlib listener after you pin
+a project and supply a token. The next prompt points to its per-session inbox; for active
+coordination you can inspect that inbox or run the returned `monitor_command` in a persistent
+shell session. With **Claude**, the plugin now auto-launches that same fallback on startup or
+after pinning, and the next-prompt hook reports each new message once. Monitor is optional for
+live notifications; give its extra connection a different label from the auto listener. Neither
+fallback wakes an idle
+conversation. No separate client installation is required; `hivemind-client` is optional for its
+CLI and the alternative `hivemind bus listen`. See the [Codex usage guide](codex-plugin.md) or
+[Claude Code usage guide](user-guide.md).
 
 ```bash
 grep '<id>' ~/.hivemind/bus-inbox.jsonl*   # this machine's own copy — the `*` picks up the
@@ -80,14 +96,13 @@ From a shell: `hivemind bus connect <label>` · `listen --url …` · `peers` ·
 | Caller-supplied names | truncated to `LABEL_CAP` (64) at the send path | The queue and the recent buffer account for the **body** of each frame and nothing else, so any *other* caller-controlled field is footprint those caps cannot see. `from` is the `agent` argument of `bus_send`; before it was normalised, an authenticated peer could park ~200 MB per offline peer and ~1 GB in the recent buffer with both caps reading it as zero. What the cap leaves uncounted afterwards is 3 fields x 64 code points x 4 bytes = 768 B per frame, i.e. at most 75 KiB on top of `QUEUE_BYTES` per peer and 375 KiB on top of `RECENT_BYTES` — under a thousandth of either. Truncated rather than refused, matching the ticket mints and the renderers' `_label()`. |
 | Auth | reusable signed listen key (7 d), or a single-use 60 s ticket | The listener connects by URL and cannot set an `Authorization` header, so an authenticated MCP call mints a ticket. The long-lived bearer token never lands in a URL, a shell history or an access log. The default is the **listen key**: HMAC-signed over (label, **minting user**, expiry) with a per-project secret in `<project>/bus_secret`, so verification needs no table and a key keeps working across a server restart — a listener reconnects on its own instead of dying until a human notices. The user is *inside* the signature, not beside it, because the handshake re-runs the project ACL against it: a user field its holder could edit would let any key holder nominate the owner of the project it is aimed at. It grants only "join the bus as this label", expires, and is revoked wholesale by deleting the secret. |
 
-## A project created after startup has no bus
+## A newly created project's bus route
 
-`build_app` registers `WebSocketRoute("/p/<name>/bus/ws")` once per project, from the projects the
-registry held **at startup**. A project created later through `project_create` is fully usable on
-the neutral `/mcp` endpoint immediately, but its whole `/p/<name>/` prefix 404s until a restart —
-including the bus.
+Current servers insert a new project's `/p/<name>/` routes into the running app at creation time,
+including its bus route. Older servers mounted projects only at startup and returned 404 until
+they restarted, although the project-neutral `/mcp` endpoint worked immediately.
 
-`bus_connect` therefore refuses on such a project and names the restart, instead of minting a key
+On an older unmounted project, `bus_connect` refuses and names the restart, instead of minting a key
 and handing back a `ws_url`. That is not tidiness: measured, the URL it used to return produced a
 403, which the listener classifies `refused` and answers with *"call `bus_connect` for a fresh
 URL"* — so the agent called it again, got another dead URL, and looped. `bus_send` says the same

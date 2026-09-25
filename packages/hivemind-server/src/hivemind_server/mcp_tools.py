@@ -52,7 +52,7 @@ def build_mcp(registry, identities, *, instructions: str = INSTRUCTIONS) -> MCPS
     # alternative was editing every one of them to take it as an argument. A body that needs the
     # project itself rather than its database adds `project = CurrentProject()` the same way.
     db = CurrentDb()
-    real = MCPServer(name="hivemind", instructions=instructions, version="1.1.0")
+    real = MCPServer(name="hivemind", instructions=instructions, version="1.3.0")
     # Registration goes through the proxy so a tool cannot be added without project resolution.
     mcp = ProjectAware(real)
 

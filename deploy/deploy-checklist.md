@@ -1,4 +1,4 @@
-# Rollout checklist — Hivemind 1.2.0 (server identities, projects, the ACL)
+# Rollout checklist — Hivemind 1.3.0 (server identities, projects, the ACL)
 
 Run this once, in order, when deploying the `feat/identity-and-projects` work to a live server.
 It is the operational half of [DEPLOY.md](DEPLOY.md): that file says how to install, this one says
@@ -440,10 +440,13 @@ alone.
 > **This is the one genuinely irreversible step.** `--yes` rewrites NULL author columns in place and
 > there is no un-backfill. That is what step 0 is for.
 
-### 3.6 Refresh the plugin and check the session pin
+### 3.6 Refresh the Claude Code plugin and check the session pin
+
+The commands in this section are Claude-specific. For a Codex installation and its different
+session-pin and messaging behavior, follow the [Codex usage guide](../docs/codex-plugin.md).
 
 ```sh
-claude plugin marketplace update hivemind-marketplace     # picks up 1.2.0 from origin/main
+claude plugin marketplace update hivemind-marketplace     # picks up 1.3.0 after it is published
 claude plugin install hivemind@hivemind-marketplace --scope user
 # restart Claude Code, then in a fresh session:
 claude mcp list          # plugin:hivemind:hivemind -> ✔ Connected

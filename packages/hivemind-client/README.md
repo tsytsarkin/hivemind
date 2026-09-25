@@ -26,6 +26,9 @@ hivemind tool publish <script.py> --id <rdns> --version <semver>
   session with the Hivemind plugin installed, the plugin's `SessionStart` hook already exports the
   URL and token from the plugin's own config and `HIVEMIND_PROJECT` from the session pin — anything
   you export yourself takes precedence.
+- In Codex, export the URL, token and project yourself for the CLI; its plugin does not transfer
+  MCP configuration or project pins into shell processes. See the platform guides:
+  [Codex](../../docs/codex-plugin.md) and [Claude Code](../../docs/user-guide.md).
 - `hivemind health` reads `/healthz` off the server root, which takes no token: it answers `{"ok":
   true}` even with no project and a rejected token, so it is liveness only, never a check that the
   rest is configured.

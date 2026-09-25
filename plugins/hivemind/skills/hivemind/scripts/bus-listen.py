@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
-"""Hivemind bus listener — the process Claude Code's Monitor runs. No dependencies.
+"""Hivemind bus listener for Codex or a terminal. No dependencies.
 
 Why this exists as a standalone script rather than the `hivemind bus listen` CLI: a machine that
-installed the Claude Code plugin has the MCP tools and nothing else. The CLI ships in the separate
+installed the Codex plugin has the MCP tools and nothing else. The CLI ships in the separate
 `hivemind-client` package and needs a third-party `websockets` dependency on top, so a plugin-only
 agent calling bus_connect got a command its shell could not find. This file is stdlib-only and
 runs on any python3 >= 3.7, so the plugin alone is enough to join the bus.
 
 Two other constraints shape it:
 
-* Monitor's own `ws` source refuses private addresses, and the server lives on a LAN address, so
-  the agent cannot point Monitor at the server directly. A subprocess carries no such policy:
-  this prints one line per frame and Monitor turns each line into a notification.
+* This connects directly to a WebSocket even at localhost or on a private LAN address. Codex
+  does not inject subprocess output into an idle conversation; poll the running shell session.
 * A notification is clipped at roughly 512 characters, so a long body must not push the header —
   who sent it, and its id — off the end. The body is capped, and because that truncation happens
   here — with the whole frame in hand — every message is first appended verbatim to
@@ -64,7 +63,7 @@ def _label(s):
 def default_inbox():
     """Where a listener keeps every message it received.
 
-    A fixed $HOME path, for the same reason the listener itself is one: a Monitor command runs in a
+    A fixed $HOME path, for the same reason the listener itself is one: the command runs in a
     plain shell where no plugin variable is set. The skill tells every agent this exact path.
     Resolved per call rather than at import so a changed HOME is honoured.
     """
