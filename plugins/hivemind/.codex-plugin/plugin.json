@@ -1,0 +1,36 @@
+{
+  "name": "hivemind",
+  "version": "1.3.0+codex.20260925220826",
+  "description": "Shared, versioned knowledge graph, artifact store, and tool registry for Codex.",
+  "author": {
+    "name": "Nik Tsytsarkin",
+    "url": "https://github.com/tsytsarkin"
+  },
+  "homepage": "https://github.com/tsytsarkin/hivemind",
+  "repository": "https://github.com/tsytsarkin/hivemind",
+  "license": "Apache-2.0",
+  "keywords": [
+    "knowledge-graph",
+    "memory",
+    "artifacts",
+    "tool-registry",
+    "mcp"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Hivemind",
+    "shortDescription": "Shared agent knowledge, artifacts, and tools.",
+    "longDescription": "Connect Codex to a self-hosted Hivemind server, choose a project, and share knowledge, artifacts, tools, and agent messages.",
+    "developerName": "Nik Tsytsarkin",
+    "category": "Productivity",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/tsytsarkin/hivemind",
+    "defaultPrompt": [
+      "Use Hivemind to check prior work on this project."
+    ]
+  },
+  "mcpServers": "./.mcp.json"
+}

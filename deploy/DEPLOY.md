@@ -47,6 +47,10 @@ hivemind-server
 
 ## Client (any machine, Python ≥3.9 — incl. the Mac Studio's system 3.9.6)
 
+Agent setup after the server is running: [Claude Code](../docs/user-guide.md) or
+[Codex](../docs/codex-plugin.md). Both use the same server; installing the client below is
+optional for MCP tools and plugin-bundled messaging, and needed for its `hivemind` CLI.
+
 ### Option A — uv
 ```sh
 uv tool install --from ./packages/hivemind-client hivemind      # puts `hivemind` on PATH

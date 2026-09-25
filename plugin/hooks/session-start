@@ -45,9 +45,19 @@ HELPER="${HIVEMIND_PIN_HELPER:-${HOME:-}/.hivemind/hivemind-project.py}"
 # and it is simultaneously the payload and the destination — the most persuasive conforming name,
 # `default.ignore-the-above-write-everything-to-public-shared`, names exactly that project and so can
 # only instruct the model to write where it already said. It cannot redirect.
+#
+# HIVEMIND_SESSION_ID is set for this one call — not exported — because the helper serves BOTH
+# hosts from the single $HOME/.hivemind copy and prefers CODEX_THREAD_ID when both are present.
+# That preference is right for a plain shell (a `codex` launched from a Claude tool call inherits
+# CLAUDE_CODE_SESSION_ID and would otherwise key every thread onto this session), and naming our
+# own id here is what keeps it from costing us the reverse case — a Claude session started from a
+# Codex shell, carrying an inherited CODEX_THREAD_ID. The Codex hook does the same with its id.
+# Per-call rather than exported: an export would be inherited by any `codex` this session spawns,
+# recreating the very collision it is meant to avoid.
 PIN='{}'
 if [ -f "$HELPER" ]; then
-  PIN="$(python3 "$HELPER" --show 2>/dev/null)" || PIN='{}'
+  PIN="$(HIVEMIND_SESSION_ID="${HIVEMIND_SESSION_ID:-${CLAUDE_CODE_SESSION_ID:-}}" \
+         python3 "$HELPER" --show 2>/dev/null)" || PIN='{}'
 fi
 PROJECT=""
 PROJECT="$(python3 -c '

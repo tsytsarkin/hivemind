@@ -261,12 +261,155 @@ def test_the_hook_survives_a_malformed_pin_file(tmp_path):
         assert "project_list" in ctx, junk
 
 
-def test_the_hook_and_the_helper_survive_no_session_id(tmp_path):
-    """CLAUDE_CODE_SESSION_ID is measured present, but its absence must not be a crash."""
-    assert _run(["--pin", "nik.private"], tmp_path, session=None).returncode == 0
+def test_no_session_id_is_refused_rather_than_shared(tmp_path):
+    """This test used to assert the opposite — that a pin with no id SUCCEEDS — and that is what put
+    a `session-no-session.json` on a real machine, holding a project no later session chose.
+
+    The pin is per-conversation. A fallback filename shared by every session that could not resolve
+    an id hands that project to the next unrelated conversation, which is the defaulted write the
+    pin exists to prevent. So: refuse, write nothing, and still never crash — the hook treats the
+    refusal as "not pinned" and asks for a choice.
+    """
+    r = _run(["--pin", "nik.private"], tmp_path, session=None)
+    assert r.returncode == 1, r.stdout
+    assert "error" in json.loads(r.stdout)
+    d = tmp_path / ".hivemind"
+    assert not d.exists() or not list(d.glob("*.json")), \
+        "a refused pin must leave no file for another session to read"
+    shown = _run(["--show"], tmp_path, session=None)
+    assert shown.returncode == 1 and "error" in json.loads(shown.stdout)
     r = _hook(tmp_path, session=None)
     assert r.returncode == 0
-    json.loads(r.stdout)
+    ctx = json.loads(r.stdout)["hookSpecificOutput"]["additionalContext"]
+    assert "project_list" in ctx, "an unreadable pin must ask for a choice, not guess one"
+
+
+def test_the_two_plugin_copies_are_byte_identical():
+    """Both plugins install this script to the same $HOME/.hivemind path, so the copy every session
+    actually runs is whichever skill loaded last. They diverged once — the Codex copy read only
+    CODEX_THREAD_ID — and the result was that a Claude session on that machine could not pin at all,
+    silently, because the hook's failure path is indistinguishable from "nothing pinned yet"."""
+    codex = ROOT / "plugins" / "hivemind" / "skills" / "hivemind" / "scripts" / "hivemind-project.py"
+    assert codex.read_bytes() == HELPER.read_bytes(), \
+        "the two copies overwrite each other at $HOME/.hivemind/hivemind-project.py"
+
+
+def test_the_documented_pin_command_round_trips_through_the_hook(tmp_path):
+    """Write and read must agree on the key, in the one environment where they can disagree.
+
+    The hook names this session's id when it READS the pin. Nothing made the WRITE name the same
+    id, so in a Claude session whose shell carries an inherited CODEX_THREAD_ID — which the helper's
+    plain-shell chain prefers — the agent pinned into `session-<codex>.json` and the next compaction
+    injected "no project is pinned". Fail-closed rather than a cross-conversation write, but the
+    choice was still silently lost. The fix is that the documented command names the id too; this
+    runs the command as written rather than trusting the prose, and the two assertions below are
+    what tie them together.
+    """
+    cmd = [line.strip() for line in COMMAND.read_text().splitlines()
+           if "hivemind-project.py" in line and "--pin <name>" in line]
+    assert len(cmd) == 1, cmd
+    pin_cmd = cmd[0].replace("<name>", "nik.private").replace(
+        '--label "<short note on the work>"', "")
+    assert 'HIVEMIND_SESSION_ID="$CLAUDE_CODE_SESSION_ID"' in pin_cmd, \
+        "the documented write does not name this session's id, so the hook cannot read it back"
+    env = {"HOME": str(tmp_path), "PATH": "/usr/bin:/bin",
+           "CLAUDE_CODE_SESSION_ID": "claude-me", "CODEX_THREAD_ID": "another-conversation",
+           "CLAUDE_PLUGIN_ROOT": str(ROOT / "plugin"),
+           "HIVEMIND_PIN_HELPER": str(HELPER)}
+    written = subprocess.run(["bash", "-c", pin_cmd.replace(
+        '"$HOME/.hivemind/hivemind-project.py"', str(HELPER))],
+        capture_output=True, text=True, env=env)
+    assert written.returncode == 0, written.stderr
+    r = subprocess.run(["bash", str(HOOK)], capture_output=True, text=True, env=env)
+    ctx = json.loads(r.stdout)["hookSpecificOutput"]["additionalContext"]
+    assert "project=nik.private" in ctx, \
+        "the hook lost a pin the documented command had just written: %s" % ctx
+
+
+def test_the_pin_key_is_resolved_the_same_way_as_the_helper(tmp_path):
+    """bus-autojoin reads the pin file the helper wrote, keyed by the session id — so the two must
+    resolve that id identically or a real pin looks like no pin and the session never joins.
+
+    They did not: autojoin picked its variable from --platform while the helper walks a chain, so a
+    manual `--pin` in a shell carrying both hosts' variables wrote `session-<codex>.json` while a
+    `--platform claude` join looked for `session-<claude>.json`. Asserted through the pin file
+    rather than by comparing the two functions, because agreeing on a rule is not the point —
+    finding the file is.
+    """
+    import importlib.util
+    import inspect
+    import os
+    autojoin = ROOT / "plugin" / "skills" / "hivemind" / "scripts" / "bus-autojoin.py"
+    spec = importlib.util.spec_from_file_location("bus_autojoin_key", autojoin)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    combos = [{"CLAUDE_CODE_SESSION_ID": "c-1"},
+              {"CODEX_THREAD_ID": "x-1"},
+              {"CLAUDE_CODE_SESSION_ID": "c-1", "CODEX_THREAD_ID": "x-1"},
+              {"CODEX_SESSION_ID": "s-1", "CLAUDE_CODE_SESSION_ID": "c-1"},
+              {"HIVEMIND_SESSION_ID": "h-1", "CLAUDE_CODE_SESSION_ID": "c-1",
+               "CODEX_THREAD_ID": "x-1"}]
+    for env_extra in combos:
+        env = {"HOME": str(tmp_path), "PATH": "/usr/bin:/bin", **env_extra}
+        written = subprocess.run([sys.executable, str(HELPER), "--pin", "nik.private"],
+                                 capture_output=True, text=True, env=env)
+        assert written.returncode == 0, (env_extra, written.stdout)
+        for platform in ("claude", "codex"):
+            saved = os.environ.copy()
+            os.environ.clear()
+            os.environ.update(env)
+            try:
+                # No event session_id: the hookless path, which is where the two rules diverged.
+                # Called through its signature rather than as _session({}) so that reintroducing
+                # the platform argument fails on the KEY it produces, not on a TypeError — the
+                # claim here is about behaviour, and a signature check would pass a rule that
+                # takes `platform` and still picks the wrong variable.
+                params = inspect.signature(mod._session).parameters
+                key = mod._session({}, platform) if len(params) > 1 else mod._session({})
+                pin_path, _ = mod._paths(key, platform)
+            finally:
+                os.environ.clear()
+                os.environ.update(saved)
+            assert mod._project(pin_path) == "nik.private", (env_extra, platform, pin_path.name)
+
+
+def test_either_host_can_pin_through_the_one_installed_copy(tmp_path):
+    """The collision above is only harmless while one file serves both hosts."""
+    def run(args, **env_extra):
+        env = {"HOME": str(tmp_path), "PATH": "/usr/bin:/bin", **env_extra}
+        return subprocess.run([sys.executable, str(HELPER)] + args, capture_output=True,
+                              text=True, env=env)
+
+    assert run(["--pin", "nik.private"], CLAUDE_CODE_SESSION_ID="c-1").returncode == 0
+    assert run(["--pin", "default"], CODEX_THREAD_ID="x-1").returncode == 0
+    assert json.loads(run(["--show"], CLAUDE_CODE_SESSION_ID="c-1").stdout)["project"] == "nik.private"
+    assert json.loads(run(["--show"], CODEX_THREAD_ID="x-1").stdout)["project"] == "default"
+    # Both set means one host is running inside the other's shell, so one id is inherited and
+    # stale. Codex wins that tie: Claude Code exports its session id into every tool shell, so a
+    # `codex` started from one carries it, and preferring Claude there would collapse every Codex
+    # thread onto the single outer id — the shared-pin bug again, just with a nicer filename.
+    both = run(["--show"], CLAUDE_CODE_SESSION_ID="c-1", CODEX_THREAD_ID="x-1")
+    assert json.loads(both.stdout)["project"] == "default"
+    # Neither hook depends on that tie: both name their own id, which outranks either host variable.
+    overridden = run(["--show"], CLAUDE_CODE_SESSION_ID="c-1", CODEX_THREAD_ID="x-1",
+                     HIVEMIND_SESSION_ID="c-1")
+    assert json.loads(overridden.stdout)["project"] == "nik.private"
+
+
+def test_the_hook_names_its_own_session_over_an_inherited_codex_id(tmp_path):
+    """The other side of that tie-break: a Claude session started from a Codex shell inherits
+    CODEX_THREAD_ID, which the shared helper prefers. The hook does not rely on the order — it
+    names its own id — so the inherited thread cannot redirect it to another conversation's pin."""
+    _run(["--pin", "nik.private"], tmp_path, session="sess-1")
+    r = subprocess.run(["bash", str(HOOK)], capture_output=True, text=True,
+                       env={"HOME": str(tmp_path), "PATH": "/usr/bin:/bin",
+                            "CLAUDE_PLUGIN_ROOT": str(ROOT / "plugin"),
+                            "CLAUDE_CODE_SESSION_ID": "sess-1",
+                            "CODEX_THREAD_ID": "another-conversation"})
+    assert r.returncode == 0, r.stderr
+    ctx = json.loads(r.stdout)["hookSpecificOutput"]["additionalContext"]
+    assert "project=nik.private" in ctx, ctx
 
 
 def test_the_hook_does_not_trust_what_the_helper_prints(tmp_path):
@@ -372,7 +515,10 @@ def test_the_hook_is_registered_for_every_event_that_rebuilds_the_context():
     assert set(entries[0]["matcher"].split("|")) == {"startup", "clear", "compact", "resume",
                                                     "fork"}, entries[0]["matcher"]
     cmds = [h["command"] for h in entries[0]["hooks"]]
-    assert cmds == ['bash "${CLAUDE_PLUGIN_ROOT}/hooks/session-start"'], cmds
+    assert cmds[0] == 'bash "${CLAUDE_PLUGIN_ROOT}/hooks/session-start"', cmds
+    assert len(cmds) == 2 and "bus-autojoin.py" in cmds[1] and "--mode ensure" in cmds[1]
+    assert "--mode ensure" in cfg["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
+    assert "--mode ensure" in cfg["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
 
 
 def test_the_manifest_leaves_the_standard_hooks_file_to_be_auto_loaded():

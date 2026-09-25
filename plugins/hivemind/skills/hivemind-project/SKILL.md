@@ -1,6 +1,6 @@
 ---
-description: Choose the Hivemind project this session writes to, and pin it so a compaction cannot lose it
-argument-hint: [project-name]
+name: hivemind-project
+description: Choose or create a Hivemind project for this Codex session and pin it across compaction and resume. Use before accessing Hivemind when no project is pinned, or when asked to switch projects.
 ---
 
 Pick the Hivemind project for this session and pin it. Every Hivemind call carries
@@ -10,8 +10,8 @@ written into a shared project cannot be un-shared.
 **Omitting the argument is not safe, and whether it fails depends on the endpoint.** On the
 project-neutral `POST /mcp` every call with no `project=` is refused — **reads as well as writes**,
 since there is no project for the call to be about; the write refusal just explains the stakes,
-and both list the projects you may name — and that is what `${user_config.server_url}` resolves to
-by default, since the plugin is configured with the server root. On a project base URL —
+and both list the projects you may name — and that is what the bundled localhost MCP URL uses.
+On a project base URL —
 `POST /p/<name>/mcp`, the older shape, still supported — the URL *is* the project, so the write
 silently lands in whatever project that URL names. That is by design (the caller's own URL named it), and it is exactly how an omitted
 argument puts private work in the shared graph. Pass `project=<name>` on every call; never rely on
@@ -21,18 +21,18 @@ Do this now, in order. **Do not choose a project for the user.**
 
 1. **Read the current state.** Run:
 
-       HIVEMIND_SESSION_ID="$CLAUDE_CODE_SESSION_ID" python3 "$HOME/.hivemind/hivemind-project.py" --show
+       HIVEMIND_SESSION_ID="$CODEX_THREAD_ID" python3 "$HOME/.hivemind/hivemind-project.py" --show
 
-   Keep that prefix on every call below. One helper serves both Claude and Codex — the two plugins
-   install it to the same path — so with no id named it walks a chain that prefers Codex's variable,
-   and a Claude session whose shell inherited a `CODEX_THREAD_ID` would write its pin under the
-   other conversation's id. The SessionStart hook names this session's id when it reads the pin
-   back, so a write that did not name the same id is a write the hook cannot find.
+   Keep that prefix on every call below. One helper serves both Codex and Claude — the two plugins
+   install it to the same path — so a thread whose shell inherited the other host's session variable
+   would otherwise write its pin under a different conversation's id, where this session's
+   SessionStart hook cannot find it again.
 
    If it prints `{"project": null, …}` nothing is pinned yet. If it prints a project, say which one
    and ask whether to keep it or switch. If the file is missing ("No such file or directory"), the
-   `hivemind` skill has not loaded on this machine yet — load it once (that installs this helper)
-   and retry.
+   `hivemind` skill has not loaded on this machine yet — run its `scripts/guide.sh --install-only` once (which
+   installs this helper) and retry. An unset Codex thread id also causes a refusal; in that case,
+   set `HIVEMIND_SESSION_ID` to this session's thread id before pinning.
 
 2. **Call `project_list`.** It returns three groups: `shared` (everyone can read), `mine` (yours),
    `shared_with_me`. Show them to the user as those three groups — not as one flat list. The
@@ -41,7 +41,7 @@ Do this now, in order. **Do not choose a project for the user.**
 3. **Offer the options and ASK.** Alongside the existing names, offer:
    - their **private graph** — `<user>.<suffix>`, readable only by them (`visibility="private"`);
    - a **new scratch project** for this session — `<user>.s-<first 8 characters of the session id>`
-     (`HIVEMIND_SESSION_ID="$CLAUDE_CODE_SESSION_ID" python3 "$HOME/.hivemind/hivemind-project.py" --session-id`), good for exploratory work that
+     (`HIVEMIND_SESSION_ID="$CODEX_THREAD_ID" python3 "$HOME/.hivemind/hivemind-project.py" --session-id`), good for exploratory work that
      should not pollute a real graph;
    - a **new shared project** — an undotted name (`team`), or `<user>.<suffix>` if they want it in
      their own namespace.
@@ -50,7 +50,7 @@ Do this now, in order. **Do not choose a project for the user.**
    `project_info` on one of their own projects, or ask them. Do not guess it from the local OS
    user: the Hivemind identity is the one the token names.
 
-   If `$ARGUMENTS` named a project, propose that one instead of asking from scratch — but still
+   If the user named a project, propose that one instead of asking from scratch — but still
    confirm it exists in `project_list` (or that they want it created) before pinning.
 
 4. **Create it if it is new.** `project_create(name=…, visibility="private"|"shared", label=…,
@@ -72,33 +72,34 @@ Do this now, in order. **Do not choose a project for the user.**
    it — an empty project cannot be written to at all until it has types, so stopping here leaves
    them with a graph that refuses every write.
 
-   Current servers make a new project's MCP, REST, and WebSocket bus routes available immediately.
-   Older deployments may require a restart before its `/p/<name>/bus/ws` route exists; if joining
-   actually fails with a 404 on one of those servers, explain that specific limitation.
+   On current servers, new project REST and WebSocket routes are available immediately. On older
+   servers, `/p/<name>/` may return 404 until a restart; if it does, explain that uploads,
+   bus listening, and the live guide depend on those routes. Do not retry a refused bus connection
+   in a loop.
 
 5. **Pin it.**
 
-       HIVEMIND_SESSION_ID="$CLAUDE_CODE_SESSION_ID" python3 "$HOME/.hivemind/hivemind-project.py" --pin <name> --label "<short note on the work>"
+       HIVEMIND_SESSION_ID="$CODEX_THREAD_ID" python3 "$HOME/.hivemind/hivemind-project.py" --pin <name> --label "<short note on the work>"
 
    `<name>` is a project name — `^[a-z0-9][a-z0-9._-]{0,63}$` — never a phrase, and never text you
-   pass through from `$ARGUMENTS` without reading it. The helper refuses anything else and writes
+   pass through from the user's request without reading it. The helper refuses anything else and writes
    nothing: if it refuses, you mis-read the user's answer, so ask again rather than reshaping their
    words into a name. The label is free text and is fine — it is a note for the person reading
    `--show`, and the hook never injects it.
 
-   The pin is local state keyed by the session id; the `SessionStart` hook re-injects the name on
-   startup, `/clear`, compaction, `--resume` and a fork (matcher:
-   `startup|clear|compact|resume|fork`), which is the whole point — a compaction drops the choice
+   The pin is local state keyed by the Codex thread id; the `SessionStart` hook re-injects the name on
+   startup, clear, compaction, and resume (matcher: `startup|clear|compact|resume`). A fork has
+   a different session id and must choose its own project. A compaction drops the choice
    from context, and a dropped choice plus a defaulted write is how private work reaches a shared
    graph.
 
-6. **Join the bus immediately.** The post-tool hook should join as `claude-<session-id>` after the
+6. **Join the bus immediately.** The post-tool hook should join as `codex-<thread-id>` after the
    pin is saved. Call the MCP `bus_peers(project=<name>)` tool and confirm that label is online.
-   If it is absent, run `python3 "$HOME/.hivemind/bus-autojoin.py" --platform claude --mode ensure`
-   (if the helper is absent, first load the plugin's knowledge-graph skill), then check
-   `bus_peers` again.
-   If registration fails, report its error; do not imply this agent is available for peer messages.
-   A restored pin on session start needs the same check.
+   If it is absent, run `python3 "$HOME/.hivemind/bus-autojoin.py" --platform codex --mode ensure`
+   (if the helper is absent, first use the knowledge-graph skill's
+   `scripts/guide.sh --install-only`),
+   then check `bus_peers` again. If registration fails, report its error; do not imply this agent
+   is available for peer messages. A restored pin on session start needs the same check.
 
 7. **Confirm in one line**: the project, its visibility, whether this agent is online on the bus,
    and that every Hivemind call from now on

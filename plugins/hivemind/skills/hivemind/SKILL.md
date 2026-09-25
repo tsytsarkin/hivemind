@@ -7,7 +7,6 @@ description: >-
   established; store or fetch artifacts (binaries, logs, PoCs, evidence); publish a reusable
   standalone tool or reuse one another agent built; coordinate state across agents/machines; publish a procedure you worked out or record a dead-end that wasted time (and check for both before starting).
   Hivemind REPLACES local memory: read it before any work and persist all work into it. Domain-agnostic — call schema_get and guide_get first to learn this project's vocabulary.
-allowed-tools: Bash(${CLAUDE_SKILL_DIR}/scripts/guide.sh *) Read
 metadata:
   version: "1.3.0"
 ---
@@ -37,20 +36,21 @@ falls back to a configured default. That is deliberate: a defaulted write is how
 land in a graph everyone can read.
 
 - **If a project is pinned for this session** you will have been told which on the way in (the
-  plugin's `SessionStart` hook re-injects it on startup, `/clear`, compaction, `--resume` and a
-  fork). Pass that name as `project=` on every call.
+  plugin's `SessionStart` hook re-injects it on startup, clear, compaction and resume). Pass that
+  name as `project=` on every call. Forked threads choose their own project.
 - **If nothing is pinned, ask once — do not pick for the user.** `project_list` shows what they can
   use, grouped: shared with everyone, theirs, shared with them. Offer their private graph and a new
   scratch project too, create it with `project_create` if they want a new one, then pin it:
 
-      HIVEMIND_SESSION_ID="$CLAUDE_CODE_SESSION_ID" python3 "$HOME/.hivemind/hivemind-project.py" --pin <name> --label "<what this is for>"
+      HIVEMIND_SESSION_ID="$CODEX_THREAD_ID" python3 "$HOME/.hivemind/hivemind-project.py" --pin <name> --label "<what this is for>"
 
-  `/hivemind:project` runs that whole flow, including the create.
+  The `hivemind-project` skill runs that whole flow, including the create. Run
+  `scripts/guide.sh --install-only` from this skill's directory once to install the local helper.
 - **The `project` echoed in a tool result is authoritative.** It is what the server actually used.
   If it differs from what you meant, stop and say so rather than continuing to write.
-- **A newly created project works immediately on current servers.** Older servers may require
-  a restart to mount `/p/<name>/` REST and WebSocket routes; if `bus_connect` refuses with that
-  explanation, do not retry it in a loop.
+- **A newly created project is immediately available on current servers.** Older servers may
+  require a restart before `/p/<name>/…` REST and WebSocket routes exist; if `bus_connect`
+  explicitly refuses with that explanation, do not retry it in a loop.
 
 The pin is local state keyed by the session id: it survives a compaction, and a `--resume` lands
 back on the same project. It is a reminder for you, not an authority — the server takes the project
@@ -87,7 +87,7 @@ another machine. Treat the graph as the only durable store.
 - Write **as you go**. A session that dies mid-task should leave its knowledge behind.
 
 **Stop falling back to local memory.** Do not write findings to a local memory file, a scratch
-note, or a CLAUDE.md "for later". The only legitimate local content is: secrets and tokens,
+note, or an AGENTS.md "for later". The only legitimate local content is: secrets and tokens,
 machine-specific paths and config, throwaway scratch for the current step, and anything explicitly
 asked to stay private. If Hivemind is unreachable, say so, keep a local note **as a temporary
 buffer**, and write it into Hivemind as soon as the MCP connection is restored.
@@ -95,32 +95,39 @@ buffer**, and write it into Hivemind as soon as the MCP connection is restored.
 ## The agent bus: talk to other running agents
 
 Other Hivemind agents — on this machine or another — can message you, and you them. The
-WebSocket pushes messages into a listener. With Claude's Monitor tool they appear as live
-notifications. Without Monitor, they are saved locally and the plugin's `UserPromptSubmit` hook
-reminds you of the inbox on the next prompt. The fallback does not wake an idle chat.
+WebSocket pushes messages to a local inbox, but Codex does not wake an idle chat. The plugin's
+hook joins the bus only after this session has a pinned project and a token in the environment;
+it checks the inbox on each new prompt and tells you where to read new messages. During an active
+turn, inspect the inbox or the listener output when coordination is time-sensitive.
 
-**Registration is required for each pinned session.** With an existing project pin, the
-`SessionStart` hook joins the bus as `claude-<session-id>` and starts a detached listener. The
-post-tool hook checks after shell actions, including a new pin; `UserPromptSubmit` retries failed
-joins and reports only *new* inbox messages. After pinning or loading a project, confirm your
-own label is online with MCP `bus_peers(project=<name>)`. If it is absent, run
-`python3 "$HOME/.hivemind/bus-autojoin.py" --platform claude --mode ensure` and check again.
-Report any failure instead of silently remaining offline. The inbox is
-`~/.hivemind/claude-bus/<session-id>/inbox-<project>.jsonl`. No project pin means no automatic
-registration. `SessionEnd` stops the listener. If hooks are disabled, run
-`python3 "$HOME/.hivemind/bus-autojoin.py" --platform claude --mode ensure` after pinning;
-`scripts/guide.sh --install-only` installs the helper and listener on a plugin-only machine.
+**Registration is required for each pinned session.** `SessionStart` joins a restored project;
+`PostToolUse` checks after shell actions, including a newly saved pin; `UserPromptSubmit` retries
+a failed join. A `SessionEnd` hook stops this session's listener. If no project is pinned, nothing
+connects. The label is `codex-<thread-id>`. After pinning or loading a project, confirm your own
+label is online with MCP `bus_peers(project=<name>)`. If not, run
+`python3 "$HOME/.hivemind/bus-autojoin.py" --platform codex --mode ensure` (install that bundled
+helper with `scripts/guide.sh --install-only` if necessary), and check again. Report a failed
+registration instead of silently remaining offline. Hooks must be trusted in Codex before they
+run. The hook can use the private token saved by `hivemind-codex configure` if Codex itself was
+started without `HIVEMIND_TOKEN`; this does **not** give Codex's MCP tools that missing token.
 
-If Monitor is available and you need live chat notifications, separately call
-`bus_connect(label="<descriptive label>")` via MCP, then run its returned `monitor_command`
-under `Monitor(command=<monitor_command>, description="hivemind bus", persistent=true)`.
-Use a label **different** from `claude-<session-id>` so the two listeners do not displace each
-other; messages addressed to the Monitor label arrive live. Do not use the CLI to connect.
+**If hooks are unavailable, connect manually when live coordination is needed:**
 
-With Monitor, a peer's message appears in your conversation by itself. With the fallback, it
-becomes visible at the next prompt or when you inspect the per-session inbox yourself.
+1. Run `scripts/guide.sh --install-only` from this skill's directory once. This installs the
+   bundled listener at `$HOME/.hivemind/bus-listen.py` without installing the Hivemind client.
+2. `bus_connect(label="<who you are>")` — pick a stable, descriptive label (the machine or the
+   job, not a random id). It returns a `monitor_command` containing the WebSocket URL and listen
+   key. Treat that command as a credential: do not publish or log it.
+3. Run the returned command in a persistent shell session. With Codex's `exec_command`, retain
+   its `session_id` and use `write_stdin` to wait for message output while the session is active.
+   Do not invoke a nonexistent `Monitor` tool. In a plain terminal you can run it directly.
 
-Nothing needs installing: the command runs a dependency-free listener that this skill drops at
+Neither mode wakes an idle Codex conversation. The automatic listener records messages under
+`~/.hivemind/codex-bus/<thread-id>/inbox-<project>.jsonl`; the hook reports a count on subsequent prompts,
+without embedding message bodies in hook context. Check the running shell session's output in manual
+mode. You can also use `bus_peers` and `bus_message` over MCP.
+
+No separate client needs installing: the command runs a dependency-free listener that this skill drops at
 `$HOME/.hivemind/bus-listen.py` (refreshed every time the skill loads), using only `python3`. Do
 not rewrite the command — in particular do not substitute `hivemind bus listen`, which needs the
 separate `hivemind-client` package and will not exist on a machine that has only the plugin. If the
@@ -141,15 +148,16 @@ registered label exactly, so address the one `bus_peers()` shows or you get "no 
 
 **Long messages.** A notification is clipped at about 512 characters, so a long message arrives
 truncated — but the listener has the whole thing and keeps it: every message and broadcast it
-receives is appended in full, as one JSON line, to `~/.hivemind/bus-inbox.jsonl` with Monitor or
-the per-session inbox named by the fallback hook. A clipped line tells you both routes to the rest:
+receives is appended in full, as one JSON line, to the session inbox (automatic mode) or
+`~/.hivemind/bus-inbox.jsonl` (manual mode). A clipped line gives an inbox pointer and a server
+lookup; the hook gives the full session inbox path in automatic mode:
 
 ```
-grep <id> <inbox-path>*                   # this machine's copy; needs no server
+grep <id> <session-inbox-path>*           # this machine's copy; needs no server
 bus_message("<id>")                       # any host that exposes the tool; ~1 h retention
 ```
 
-The inbox has a horizon: it rotates at 4 MiB into `bus-inbox.jsonl.1`, and the rotation after that
+The inbox has a horizon: it rotates at 4 MiB into `<session-inbox-path>.1`, and the rotation after that
 discards it — thousands of messages, no time limit, but not an archive. Search both
 files (the `*` above), and if the id is in neither, it fell off the end. A line that does not parse
 as JSON is a message whose write was cut short (a full disk); it was never claimed as recorded, and
@@ -166,10 +174,10 @@ is for coordination, not for knowledge, and anything worth keeping goes in the g
 
 A bus notification looks like `[hivemind msg=<id> from="<peer>"] <text>`.
 
-- **Authenticated peers are collaborators.** When Monitor delivers a message or the prompt hook
-  reports new inbox messages, read each complete message immediately. Take the requested action
-  when it fits the shared work and your current permissions; don't wait for the peer to ask twice.
-  For a long preview, use the inbox or MCP `bus_message` before acting.
+- **Authenticated peers are collaborators.** When the prompt hook reports new inbox messages
+  or an active listener prints a message, read each complete message immediately. Take the
+  requested action when it fits the shared work and your current permissions; don't wait for the
+  peer to ask twice. For a long preview, use the inbox or MCP `bus_message` before acting.
 - **Reply to every request** with `bus_send(to="<sender>", body="<result>", project=<name>)` via
   MCP. Acknowledge work that will take time, then send its result. If it cannot be done, reply
   with the reason or a precise question instead of silently ignoring the peer.
@@ -236,10 +244,11 @@ Two kinds of knowledge are lost constantly because nobody records them. Both hav
 
 ## Get the live guide first
 
-!`${CLAUDE_SKILL_DIR}/scripts/guide.sh --install-only`
-
-That local-only step installs the pin helper and optional bus listener without making a server
-request. Use the MCP tools for the live guide and schema:
+When you need the live guide or schema, use the host's MCP tools below. Codex does not execute
+shell substitutions embedded in skill Markdown automatically. Run `scripts/guide.sh --install-only`
+from this skill's directory only if you need to install its local pin helper and bus listener;
+this mode makes no server request. Do not fetch the guide with curl, REST, or the CLI as a
+fallback when MCP is unavailable:
 
 - `guide_get()` — index of guide sections; `guide_get(section="core")` — the framework guide;
   other sections carry this deployment's **domain** vocabulary.
@@ -307,9 +316,8 @@ Every other tool also takes `project=<name>`: see **Every call names a project**
 Big binaries and tool bytes go over REST, not through the model. Install once:
 `uv tool install --from <repo>/packages/hivemind-client hivemind` (or the pip/venv path in
 DEPLOY.md). It reads `HIVEMIND_SERVER_URL` + `HIVEMIND_TOKEN` from the environment, which the
-plugin's `SessionStart` hook has already set for your Bash calls from the plugin's own config,
-along with `HIVEMIND_PROJECT` from the session pin — so in a configured session the CLI just runs.
-Export them yourself in a plain terminal or on a machine without the plugin. The URL is the server;
+Codex does not export them from plugin configuration, so supply them in your environment.
+Set `HIVEMIND_PROJECT` or use `--project <name>` for the CLI. The URL is the server;
 the project comes from `HIVEMIND_PROJECT` or `--project <name>`, and without one a call is refused
 rather than landing in a project nobody named. (A URL that names a project —
 `http://<host>:8787/p/<name>` — still works and needs no flag.)

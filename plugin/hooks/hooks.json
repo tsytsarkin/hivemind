@@ -1,5 +1,5 @@
 {
-  "description": "Re-injects this session's Hivemind project pin on startup, clear, compact, resume and fork, so a rebuilt context never leaves the project choice behind.",
+  "description": "Restores the Hivemind project pin, auto-starts its session bus listener when pinned, and reports new messages on subsequent prompts.",
   "hooks": {
     "SessionStart": [
       {
@@ -9,9 +9,24 @@
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/session-start\"",
             "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/skills/hivemind/scripts/bus-autojoin.py\" --platform claude --mode ensure",
+            "timeout": 8
           }
         ]
       }
-    ]
+    ],
+    "PostToolUse": [{
+      "matcher": "Bash",
+      "hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/skills/hivemind/scripts/bus-autojoin.py\" --platform claude --mode ensure", "timeout": 8}]
+    }],
+    "UserPromptSubmit": [{
+      "hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/skills/hivemind/scripts/bus-autojoin.py\" --platform claude --mode ensure", "timeout": 8}]
+    }],
+    "SessionEnd": [{
+      "hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/skills/hivemind/scripts/bus-autojoin.py\" --platform claude --mode stop", "timeout": 3}]
+    }]
   }
 }

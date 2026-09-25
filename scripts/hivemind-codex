@@ -1,0 +1,102 @@
+#!/usr/bin/env python3
+"""Configure a local Hivemind endpoint and launch Codex with its token.
+
+Run `hivemind-codex configure` before installing/reinstalling the plugin, then
+`hivemind-codex [codex args...]` for later CLI sessions. Secrets never enter argv or the repo.
+"""
+import getpass
+import json
+import os
+from pathlib import Path
+import sys
+import tempfile
+from urllib.parse import urlsplit
+
+ROOT = Path(__file__).resolve().parents[1]
+MCP = ROOT / "plugins/hivemind/.mcp.json"
+STATE = Path.home() / ".hivemind"
+ADDRESS = STATE / "codex-server.json"
+TOKEN = STATE / "codex-token"
+
+
+def _private_write(path, value):
+    STATE.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd, candidate = tempfile.mkstemp(prefix=".hivemind-", dir=str(STATE))
+    try:
+        with os.fdopen(fd, "w") as stream:
+            stream.write(value)
+        os.replace(candidate, str(path))
+    finally:
+        if os.path.exists(candidate):
+            os.unlink(candidate)
+
+
+def _server_url(value):
+    url = value.strip().rstrip("/")
+    parsed = urlsplit(url)
+    if (parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username
+            or parsed.password or parsed.path or parsed.query or parsed.fragment):
+        raise ValueError("provide a server root such as http://127.0.0.1:8787 (no path or credentials)")
+    return url
+
+
+def configure():
+    default = "http://127.0.0.1:8787"
+    if ADDRESS.is_file():
+        try:
+            default = json.loads(ADDRESS.read_text())["server_url"]
+        except (ValueError, KeyError, OSError):
+            pass
+    try:
+        server = _server_url(input("Hivemind server URL [%s]: " % default) or default)
+        secret = getpass.getpass("Hivemind user token (not echoed): ").strip()
+    except ValueError as error:
+        print("Invalid address: %s" % error, file=sys.stderr)
+        return 1
+    except (EOFError, KeyboardInterrupt):
+        print("\nConfiguration cancelled.", file=sys.stderr)
+        return 1
+    if not secret:
+        print("Token cannot be empty; nothing was changed.", file=sys.stderr)
+        return 1
+    manifest = json.loads(MCP.read_text())
+    manifest["mcpServers"]["hivemind"]["url"] = server + "/mcp"
+    _private_write(ADDRESS, json.dumps({"server_url": server}) + "\n")
+    _private_write(TOKEN, secret + "\n")
+    MCP.write_text(json.dumps(manifest, indent=2) + "\n")
+    print("Saved the token in a private 0600 file and updated the plugin's MCP URL.")
+    print("Reinstall hivemind@personal from this repo marketplace, then start a NEW Codex thread.")
+    print("Run scripts/hivemind-codex to launch future CLI sessions with the configured token.")
+    return 0
+
+
+def launch(args):
+    try:
+        server = _server_url(json.loads(ADDRESS.read_text())["server_url"])
+        if TOKEN.stat().st_mode & 0o077:
+            raise ValueError("token file permissions are not private (want 0600)")
+        secret = TOKEN.read_text().strip()
+        if not secret:
+            raise ValueError("token file is empty")
+        endpoint = json.loads(MCP.read_text())["mcpServers"]["hivemind"]["url"]
+        if endpoint != server + "/mcp":
+            raise ValueError("MCP URL differs from configured server; run configure and reinstall")
+    except (OSError, ValueError, KeyError) as error:
+        print("Hivemind is not configured: %s. Run scripts/hivemind-codex configure." % error,
+              file=sys.stderr)
+        return 1
+    env = dict(os.environ, HIVEMIND_SERVER_URL=server, HIVEMIND_TOKEN=secret)
+    # Everything above reports its failure as one sentence, so the exec must too: a user who has
+    # configured Hivemind but has no `codex` on PATH otherwise gets a raw traceback from the last
+    # line of the script, which reads as a Hivemind fault rather than a missing CLI.
+    try:
+        os.execvpe("codex", ["codex", *args], env)
+    except OSError as error:
+        print("Cannot start codex: %s. Install the Codex CLI and make sure it is on PATH."
+              % error, file=sys.stderr)
+        return 1
+    return 0                                  # unreachable: execvpe either replaces us or raises
+
+
+if __name__ == "__main__":
+    sys.exit(configure() if sys.argv[1:] == ["configure"] else launch(sys.argv[1:]))

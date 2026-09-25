@@ -1,7 +1,17 @@
-# Using Hivemind
+# Using Hivemind with Claude Code
 
 A practical guide for the person sitting at the keyboard: how to connect a session to a Hivemind
 server — with or without installing anything — and what to do in the first five minutes.
+
+This page covers **Claude Code**. For Codex, including localhost setup and its messaging
+limitations, see the separate [Codex usage guide](codex-plugin.md). The server, projects, and
+Hivemind MCP tools are the same; the plugin installation, credentials, project command, and
+message notifications differ.
+
+Agents use **Hivemind MCP tools** for graph, project, schema, guide, registry, artifact-metadata,
+and bus-control operations; if tools are unavailable, fix the MCP connection rather than calling
+the CLI or raw HTTP. Large binary upload/download uses the optional client because MCP does not
+expose file-byte transfer; the notification listener uses a WebSocket after MCP `bus_connect`.
 
 If you are setting up the **server**, see [`deploy/DEPLOY.md`](../deploy/DEPLOY.md). If you are
 handing a **token** to someone else, see [`clients.md`](clients.md). This page is about using it.
@@ -17,12 +27,12 @@ Two things, whichever route you take:
 | **A server URL** | e.g. `http://<server-host>:8787`. One server, many clients — don't start a second one, it would be a separate graph. |
 | **A token** | Minted on the server with `hivemind-admin mint-token --user <you> --device <machine>`. It names a **person**, which is what puts an author on everything you write. |
 
-## Two ways in
+## Two ways in (Claude Code)
 
 | | Install the plugin | `scripts/hivemind-claude` |
 |---|---|---|
 | Setup | once per machine | none |
-| Token stored | OS keychain, permanently | a `0600` file, deleted when the session ends |
+| Token stored | managed by Claude Code as sensitive plugin config (storage backend unverified) | a `0600` file, deleted when the session ends |
 | Needs the repo | no | yes (or a copy of `plugin/` plus the script) |
 | Good for | your own machines | a borrowed machine, a VM, a box you are debugging |
 
@@ -47,7 +57,7 @@ scripts/hivemind-claude --resume                  # unrecognised → claude
 scripts/hivemind-claude -- --model sonnet         # or be explicit
 ```
 
-**A launched session starts with no project**, exactly as an installed one does, and the launcher
+**A launched session starts with no project**, exactly as an installed Claude one does, and the launcher
 says so on stderr: every Hivemind call is refused until `/hivemind:project` pins one, and the live
 guide has no URL to build until then. That is the safer shape — pin first, then work. `--project
 <name>` opts into the older project-URL form (`http://host:port/p/<name>`) if you would rather have
@@ -72,6 +82,12 @@ your model, theme and other plugins are untouched.
 
 ### Route B — install the plugin
 
+First mint a **user token** on the server with
+`hivemind-admin mint-token --user <you> --device <machine>`; the plugin installer does not mint
+credentials for you. The Claude plugin declares `server_url` and sensitive `api_token` fields in
+its manifest. Supply both when you install, pointing `server_url` at the server **root** (no
+`/mcp` or `/p/<project>`):
+
 ```sh
 claude plugin marketplace add tsytsarkin/hivemind
 claude plugin install hivemind@hivemind-marketplace --scope user \
@@ -83,7 +99,11 @@ claude mcp list      # expect: plugin:hivemind:hivemind … ✔ Connected
 `api_token` is declared sensitive, and what that buys you is that it is **not** written to your
 settings file — `grep -c api_token ~/.claude/settings.json` answers `0` on an installed, connecting
 plugin (measured on Claude Code 2.1.280). Where Claude Code does keep it is not something this repo
-observes. Full walkthrough, including how to move the token safely: [`clients.md`](clients.md).
+observes; do not assume a particular keychain. The example `--config api_token=hm_…` is a shell
+argument and can appear in shell history or process listings; use the prompting launcher (Route A)
+if you do not want to put the token on a command line. Installation configures MCP access; neither
+platform needs the separate `hivemind-client` package for basic graph tools or messaging. Full
+walkthrough, including how to move the token safely: [`clients.md`](clients.md).
 
 ---
 
@@ -127,10 +147,9 @@ types are permanent — schema changes are additive-only and nothing deletes a t
 
 There is a per-user cap on projects you own; the server will tell you if you reach it.
 
-> **A new project is not immediately reachable by URL.** The project-neutral `/mcp` endpoint serves
-> it right away, so your session works. But *nothing* under `/p/<name>/` exists until the server
-> restarts — not its own `/mcp`, not blob upload, not the guide, not the bus. The `hivemind` CLI
-> cannot reach it until then.
+> **New projects are immediately reachable on current servers.** The project-neutral `/mcp`
+> endpoint and `/p/<name>/` routes become available at creation. If an older server returns 404
+> from its new project's REST or WebSocket routes, restart that server.
 
 ---
 
@@ -191,9 +210,28 @@ role is a label, not a privilege boundary.
 
 ### Talking to other agents
 
-Call `bus_connect(label=…)` **once**, then run the command it returns under your harness's
-background-process tool. After that, messages from other agents arrive as notifications on their
-own; there is nothing to poll.
+Every agent session registers after it pins or loads a project. With working plugin credentials
+and trusted hooks, the plugin launches its listener on session start for an existing pin;
+pinning a project mid-session launches it after the tool action. Verify your own label is online
+with MCP `bus_peers(project=<name>)`; if not, run the installed helper shown below and report
+any join error. It registers as
+`claude-<session-id>`, keeps a WebSocket open, and saves messages to
+`~/.hivemind/claude-bus/<session-id>/inbox-<project>.jsonl`. The next user prompt reports **new**
+messages without embedding their bodies in hook context. Read new messages in full, work on peer
+requests within the shared task, and reply to the sender using MCP `bus_send` with a result or a
+concrete blocker. Ask the user before deleting files or taking another destructive action. If no
+project is pinned yet, no listener starts. If hooks are disabled, run
+`python3 "$HOME/.hivemind/bus-autojoin.py" --platform claude --mode ensure` after pinning;
+the helper is copied there when the Hivemind skill loads (or via its
+`scripts/guide.sh --install-only`). The helper needs the Claude plugin's `server_url`/`api_token` settings in
+its session environment, or `HIVEMIND_SERVER_URL`/`HIVEMIND_TOKEN` explicitly. When run from an
+outside shell, also provide `CLAUDE_CODE_SESSION_ID` for the correct pin. The listener needs only
+Python 3, not the separate Hivemind client.
+
+If Claude Monitor is available, you can additionally call the MCP `bus_connect` tool using a
+different label and run its returned command under Monitor to get live notifications. The auto
+listener remains a fallback; it cannot wake an idle chat. Do not reuse its `claude-<session-id>`
+label, as two connections with the same label displace each other.
 
 ```
 bus_peers()                       # who is connected right now
@@ -219,10 +257,11 @@ descriptive (the machine or the job, not a random id).
 |---|---|
 | `401` on every call | Token wrong, or revoked. Revocation needs no restart — it takes effect on the next request. |
 | `404` for a project you believe exists | It doesn't exist, **or** it isn't yours. The server answers identically for both on purpose, so the message cannot tell you which. |
-| A brand-new project 404s over REST/CLI/bus | Expected until the server restarts — see the note above. |
+| A brand-new project 404s over REST/CLI/bus | Current servers mount it immediately. On an older server, restart the server to create its `/p/<name>/` routes. |
 | Write refused for naming no project | You're on the project-neutral endpoint. Pass `project=`. |
-| The bus listener says "connection refused" | The project's `/p/<name>/bus/ws` route doesn't exist yet (new project, no restart), or the listener script isn't installed — load the `hivemind` skill once, which installs it. |
-| The live guide shows an `(offline: …)` copy | Read the rest of that line — it names the cause. `no HIVEMIND_SERVER_URL / HIVEMIND_TOKEN in this shell` means neither your shell nor the plugin config had them (a plain terminal, or no plugin here); `no project … run /hivemind:project` means nothing named a project, which `/guide` needs because it exists only under `/p/<project>/`; `answered HTTP 404` means the project it did name does not exist, is not yours, or was created since the server last started. `guide_get()` over MCP works in every one of those cases. |
+| The bus listener says "connection refused" | Check the project URL and credentials; on an older server, a newly created project may need a restart to mount its bus route. Open the Hivemind skill if the listener script is missing. |
+| Project pinned but your session is not in `bus_peers` | Confirm the hook is trusted and `server_url`/`api_token` are configured, inspect the next hook's join error, then run `python3 "$HOME/.hivemind/bus-autojoin.py" --platform claude --mode ensure` inside the session and verify your label online. The helper installs when the skill loads. |
+| The live guide shows an `(offline: …)` copy | Read the rest of that line — it names the cause. `no HIVEMIND_SERVER_URL / HIVEMIND_TOKEN in this shell` means neither your shell nor the plugin config had them (a plain terminal, or no plugin here); `no project … run /hivemind:project` means nothing named a project, which `/guide` needs because it exists only under `/p/<project>/`; `answered HTTP 404` means the project it did name does not exist, is not yours, or needs a restart on an older server. `guide_get()` over MCP works in every one of those cases. |
 | The CLI says `error: set HIVEMIND_SERVER_URL and HIVEMIND_TOKEN` | The plugin's hook exports them only for Bash calls **inside** a Claude Code session. In a plain terminal, export them yourself. |
 | The CLI says `this needs a project and nothing named one` | The URL is the server root and neither `--project` nor `$HIVEMIND_PROJECT` named a project. |
 | Plugin not connecting after install | `claude mcp list` shows the resolved URL; check it is the server you meant (`http://<host>:8787`, or a `/p/<name>` base). |
@@ -232,6 +271,7 @@ descriptive (the machine or the job, not a random id).
 ## Where to go next
 
 - [`clients.md`](clients.md) — minting and transferring tokens, adding machines, revocation
+- [`codex-plugin.md`](codex-plugin.md) — Codex installation and the platform-specific messaging guide
 - [`api.md`](api.md) — every tool and REST route
 - [`data-model.md`](data-model.md) — the two versioning axes, authorship, tables
 - [`security.md`](security.md) — identities, the project ACL, what private actually guarantees

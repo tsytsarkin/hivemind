@@ -7,7 +7,7 @@
 # HIVEMIND_SERVER_URL is the SERVER (plugin 1.2.0 made the root the configured shape) and /guide is
 # mounted only under /p/<project>/, so this script composes the two halves itself: the server from
 # the environment, the project from HIVEMIND_PROJECT or — read at call time, so a mid-session
-# /hivemind:project switch is picked up — the session pin.
+# $hivemind-project switch is picked up — the session pin.
 set -u
 SECTION="core"
 INSTALL_ONLY=0
@@ -25,13 +25,12 @@ OFFLINE="$HERE/../references/OFFLINE.md"
 
 # Install the agent-runnable scripts at fixed, shell-expandable paths.
 #
-# bus_connect hands the agent a Monitor command, and a Monitor command runs in a plain shell where
-# — measured — neither CLAUDE_PLUGIN_ROOT nor CLAUDE_SKILL_DIR is set. So the command cannot name
-# the plugin directory, and the server cannot know it either. Copying the listener to a path built
+# bus_connect hands the agent a listener command that runs in a plain shell without PLUGIN_ROOT.
+# The command cannot name the plugin directory, and the server cannot know it either.
+# Copying the listener to a path built
 # only from $HOME makes one fixed string work on every machine. The project-pin helper is here for
-# the same reason: /hivemind:project and the agent itself invoke it from a plain shell. (The
-# SessionStart hook can reach the plugin copy — hooks.json commands do get CLAUDE_PLUGIN_ROOT
-# substituted — and falls back to it when the skill has never loaded on this machine.)
+# the same reason: the hivemind-project skill and agent invoke it from a plain shell. The Codex
+# SessionStart hook reads the bundled helper directly if the skill has not loaded yet.
 # Refreshed on each skill load, so both track the installed plugin version. Silent and
 # best-effort: this must never fail the skill.
 install_script() {           # $1 = file in this directory, $2 = destination path
@@ -73,7 +72,7 @@ print_fallback() {
 
 # Both come from the shell. The plugin's SessionStart hook exports them from the plugin's own
 # config when the shell has not, so this is normally set even on a plugin-only machine; it is empty
-# when the plugin holds no value either, or outside a Claude Code session.
+# when those variables are not set in the Codex process environment.
 if [ -z "${HIVEMIND_SERVER_URL:-}" ] || [ -z "${HIVEMIND_TOKEN:-}" ]; then
   print_fallback "no HIVEMIND_SERVER_URL / HIVEMIND_TOKEN in this shell"
 fi
@@ -88,7 +87,7 @@ case "$BASE" in
   *)
     # The server root. HIVEMIND_PROJECT first (the SessionStart hook exports it from the pin), then
     # the pin file itself — read HERE rather than at session start, because that is what follows a
-    # /hivemind:project switch made mid-session; an exported variable is frozen at the event that
+# hivemind-project switch made mid-session; an exported variable is frozen at the event that
     # wrote it.
     PROJECT="${HIVEMIND_PROJECT:-}"
     if [ -z "$PROJECT" ] && [ -f "$PIN_HELPER" ] && command -v python3 >/dev/null 2>&1; then
@@ -105,7 +104,7 @@ case "$BASE" in
     printf '%s' "$PROJECT" | LC_ALL=C grep -q '^[a-z0-9][a-z0-9._-]\{0,63\}$' || PROJECT=""
     # Named as its own cause: "unreachable" would send the reader after a network fault that is not
     # there, and the fix is one command rather than anything to do with the server.
-    [ -n "$PROJECT" ] || print_fallback "no project for $BASE — HIVEMIND_PROJECT is unset and no session pin was readable; run /hivemind:project"
+    [ -n "$PROJECT" ] || print_fallback "no project for $BASE — HIVEMIND_PROJECT is unset and no session pin was readable; use the hivemind-project skill"
     URL="$BASE/p/$PROJECT/guide/$SECTION" ;;
 esac
 INM=""
