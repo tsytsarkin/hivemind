@@ -43,7 +43,7 @@ land in a graph everyone can read.
   use, grouped: shared with everyone, theirs, shared with them. Offer their private graph and a new
   scratch project too, create it with `project_create` if they want a new one, then pin it:
 
-      python3 "$HOME/.hivemind/hivemind-project.py" --pin <name> --label "<what this is for>"
+      HIVEMIND_SESSION_ID="$CLAUDE_CODE_SESSION_ID" python3 "$HOME/.hivemind/hivemind-project.py" --pin <name> --label "<what this is for>"
 
   `/hivemind:project` runs that whole flow, including the create.
 - **The `project` echoed in a tool result is authoritative.** It is what the server actually used.

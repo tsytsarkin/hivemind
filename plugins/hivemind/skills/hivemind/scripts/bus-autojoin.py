@@ -25,12 +25,36 @@ NAME = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 SLUG = re.compile(r"[^A-Za-z0-9_-]")
 PROTO = "2026-07-28"
 RETRY_SECONDS = 30
+# What survives a listener being stopped or replaced: where this session had read up to. Losing it
+# is not cosmetic — an empty cursor makes _notice announce every id in both inbox generations as
+# new, so a resumed session opens by telling the agent to read and act on hundreds of old messages.
+CURSOR_KEYS = ("seen_message", "seen_inbox", "seen_offset")
 
 
-def _session(event, platform):
-    value = event.get("session_id") or os.environ.get(
-        "CODEX_THREAD_ID" if platform == "codex" else "CLAUDE_CODE_SESSION_ID", "")
-    return value if isinstance(value, str) and value else ""
+# The pin helper's session_id() chain, in its order. Duplicated rather than imported: both scripts
+# are standalone stdlib files installed side by side in $HOME/.hivemind, and importing one from the
+# other through a hyphenated filename would make a join depend on the pin helper being present.
+# test_the_pin_key_is_resolved_the_same_way_as_the_helper keeps the two lists in step.
+SESSION_VARS = ("HIVEMIND_SESSION_ID", "CODEX_THREAD_ID", "CODEX_SESSION_ID",
+                "CLAUDE_CODE_SESSION_ID")
+
+
+def _session(event):
+    """This conversation's id: the hook's own event first, then the pin helper's variable chain.
+
+    The id is the KEY of the pin file this script then reads, so resolving it by a different rule
+    than the helper used to WRITE that file makes a real pin look like no pin — and the session
+    silently never joins the bus. That is why the platform does not select a variable here, though
+    it once did: `platform` names the bus label and the state directory, not the key.
+    """
+    value = event.get("session_id")
+    if isinstance(value, str) and value:
+        return value
+    for name in SESSION_VARS:
+        value = os.environ.get(name, "")
+        if value:
+            return value
+    return ""
 
 
 def _paths(session, platform):
@@ -55,8 +79,16 @@ def _endpoint(platform):
     else:
         try:
             configured = os.environ.get("HIVEMIND_SERVER_URL", "").rstrip("/")
-            manifest = Path(__file__).resolve().parents[3] / ".mcp.json"
-            if manifest.is_file():
+            # parents[3] only exists for the copy inside the plugin tree. The manual install lives
+            # at $HOME/.hivemind/bus-autojoin.py, which has exactly three parents when $HOME is one
+            # level below root (/root in a container or CI) — indexing there raised IndexError, the
+            # except below swallowed it as "no endpoint", and the ~/.hivemind/codex-server.json
+            # fallback this branch exists for was never reached. Sliced, so a short path is simply
+            # not a manifest.
+            parents = Path(__file__).resolve().parents
+            manifest = next(iter(parents[3:4]), None)
+            manifest = manifest / ".mcp.json" if manifest is not None else None
+            if manifest is not None and manifest.is_file():
                 config = json.loads(manifest.read_text())
                 url = config["mcpServers"]["hivemind"]["url"]
             else:
@@ -125,13 +157,26 @@ def _port(parts):
 
 
 def _owned_process(state, listener):
+    """Is the listener this state file describes still running?
+
+    Matched on the BASENAME plus the instance marker, never the resolved path. There are two copies
+    of bus-listen.py — the plugin tree's and the one the skill installs in $HOME/.hivemind — and the
+    hooks run one while the documented agent command runs the other. Matching the full path made
+    each copy blind to the other's listener: `_stop` became a no-op, a second listener spawned onto
+    the same inbox (so every message was recorded and counted twice), and the first was orphaned
+    with its pid overwritten in listener.json, beyond the reach of even `--mode stop` at SessionEnd.
+    It then repeated every RETRY_SECONDS for the rest of the session.
+
+    The marker is 24 random hex characters minted by the spawn that wrote this state file, so it is
+    the identity; the basename only rejects a pid that has since been recycled onto something else.
+    """
     pid, marker = state.get("pid"), state.get("marker")
     if not isinstance(pid, int) or pid <= 0 or not isinstance(marker, str) or not marker:
         return False
     try:
         cmd = subprocess.run(["ps", "-ww", "-p", str(pid), "-o", "command="],
                              capture_output=True, text=True, timeout=1, check=True).stdout
-        return str(listener) in cmd and "--instance-id " + marker in cmd
+        return listener.name in cmd and "--instance-id " + marker in cmd
     except (OSError, subprocess.SubprocessError):
         return False
 
@@ -164,39 +209,78 @@ def _stop(state, listener):
             pass
 
 
+def _frames(path, start=0):
+    """Message ids in one inbox generation from a byte offset, with the offset after the last one.
+
+    A trailing partial line is a frame the listener is still writing: stop before it and leave the
+    offset where it began, so the next call reads it whole rather than discarding it.
+    """
+    ids, offset = [], start
+    try:
+        with path.open("rb") as source:
+            source.seek(start)
+            for line in source:
+                if not line.endswith(b"\n"):
+                    break
+                offset += len(line)
+                try:
+                    frame = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(frame, dict) and frame.get("type") in ("message", "broadcast"):
+                    mid = frame.get("id")
+                    if isinstance(mid, (str, int)) and mid:
+                        ids.append(str(mid))
+    except OSError:
+        return [], start
+    return ids, offset
+
+
 def _notice(inbox, state_path, state):
-    """Notify only for unread messages, including those in the rotated inbox."""
-    ids = []
-    for path in (inbox.with_name(inbox.name + ".1"), inbox):
+    """Notify only for unread messages, including those in the rotated inbox.
+
+    Resumes from a stored byte offset. This runs on every Bash tool call and every prompt under an
+    8 s hook timeout, while the inbox is bounded at INBOX_MAX_BYTES with one rotated generation
+    kept — so re-reading both generations meant up to ~8 MiB of json.loads per invocation to
+    recompute a count that only changes when a frame arrives.
+
+    The offset is only trusted while it still addresses the same file: a rotation replaces the
+    inbox with a shorter one, and then the id-based scan below is the exact behaviour this
+    fast path replaces, so the count stays right across the rotation rather than re-announcing it.
+    """
+    start = state.get("seen_offset")
+    resumable = (state.get("seen_inbox") == inbox.name and isinstance(start, int)
+                 and not isinstance(start, bool) and start >= 0)
+    if resumable:
         try:
-            with path.open("rb") as source:
-                for line in source:
-                    try:
-                        frame = json.loads(line)
-                        if isinstance(frame, dict) and frame.get("type") in ("message", "broadcast"):
-                            mid = frame.get("id")
-                            if isinstance(mid, (str, int)) and mid:
-                                ids.append(str(mid))
-                    except ValueError:
-                        pass
+            resumable = inbox.stat().st_size >= start
         except OSError:
-            pass
-    if not ids:
-        return ""
-    seen = state.get("seen_message") if state.get("seen_inbox") == inbox.name else None
-    # If the cursor has fallen off both bounded inbox files, announce what remains instead of
-    # silently dropping the new messages. The bus is not a durable archive.
-    start = 0
-    if seen:
-        for i in range(len(ids) - 1, -1, -1):
-            if ids[i] == seen:
-                start = i + 1
-                break
-    pending = len(ids) - start
+            resumable = False
+    if resumable:
+        fresh, offset = _frames(inbox, start)
+        pending, last = len(fresh), fresh[-1] if fresh else None
+    else:
+        rotated, _ = _frames(inbox.with_name(inbox.name + ".1"))
+        current, offset = _frames(inbox)
+        ids = rotated + current
+        if not ids:
+            return ""
+        seen = state.get("seen_message") if state.get("seen_inbox") == inbox.name else None
+        # If the cursor has fallen off both bounded inbox files, announce what remains instead of
+        # silently dropping the new messages. The bus is not a durable archive.
+        index = 0
+        if seen:
+            for i in range(len(ids) - 1, -1, -1):
+                if ids[i] == seen:
+                    index = i + 1
+                    break
+        pending, last = len(ids) - index, ids[-1]
     if not pending:
         return ""
-    state["seen_message"] = ids[-1]
+    if last:
+        state["seen_message"] = last
     state["seen_inbox"] = inbox.name
+    state["seen_offset"] = offset
     try:
         _save(state_path, state)
     except OSError:
@@ -208,7 +292,7 @@ def _notice(inbox, state_path, state):
 
 
 def run(event, platform="codex", mode="ensure"):
-    session = _session(event, platform)
+    session = _session(event)
     if not session:
         return ""
     pin_path, state_dir = _paths(session, platform)
@@ -231,7 +315,10 @@ def run(event, platform="codex", mode="ensure"):
         alive = _owned_process(state, listener)
         if mode == "stop":
             _stop(state, listener)
-            _save(state_path, {})
+            # The pid and the endpoint go; the read cursor stays. SessionEnd stops the listener but
+            # does not delete the inbox, and a --resume reuses this same session id and state
+            # directory — with the cursor discarded the next `ensure` announced the entire backlog.
+            _save(state_path, {k: state[k] for k in ("project",) + CURSOR_KEYS if k in state})
             return ""
         if mode == "check":
             return notice()
@@ -240,9 +327,15 @@ def run(event, platform="codex", mode="ensure"):
         if alive and state.get("project") != project:
             _stop(state, listener)
             alive = False
-        if alive and endpoint and state.get("project") == project and state.get("endpoint") == endpoint:
+        if (alive and state.get("project") == project
+                and (not endpoint or state.get("endpoint") == endpoint)):
             # A running listener already has its restricted key. Do not claim it has left the
-            # bus when the bearer token is temporarily unavailable on a later prompt.
+            # bus when the bearer token is temporarily unavailable on a later prompt — nor when
+            # the ENDPOINT is unresolvable in this particular shell, which is the same situation
+            # wearing a different hat: the plugin publishes HIVEMIND_SERVER_URL through
+            # CLAUDE_ENV_FILE and CLAUDE_PLUGIN_OPTION_SERVER_URL is hook-only, so the agent
+            # running this command by hand can have neither while the listener is happily online.
+            # Reporting "not joined" there tells the user they are offline when they are not.
             return notice()
         if not endpoint or not token or not listener.is_file():
             reason = ("server URL is missing or differs from configured MCP endpoint" if not endpoint
@@ -257,7 +350,7 @@ def run(event, platform="codex", mode="ensure"):
                 and time.time() - state.get("attempted_at", 0) < RETRY_SECONDS):
             return ("Hivemind bus join pending for project=%s; retrying shortly. %s"
                     % (project, notice())).strip()
-        cursor = ({k: state[k] for k in ("seen_message", "seen_inbox") if k in state}
+        cursor = ({k: state[k] for k in CURSOR_KEYS if k in state}
                   if state.get("project") == project else {})
         state = {"project": project, "endpoint": endpoint, "attempted_at": time.time(), **cursor}
         _save(state_path, state)

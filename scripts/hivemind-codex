@@ -86,7 +86,16 @@ def launch(args):
               file=sys.stderr)
         return 1
     env = dict(os.environ, HIVEMIND_SERVER_URL=server, HIVEMIND_TOKEN=secret)
-    os.execvpe("codex", ["codex", *args], env)
+    # Everything above reports its failure as one sentence, so the exec must too: a user who has
+    # configured Hivemind but has no `codex` on PATH otherwise gets a raw traceback from the last
+    # line of the script, which reads as a Hivemind fault rather than a missing CLI.
+    try:
+        os.execvpe("codex", ["codex", *args], env)
+    except OSError as error:
+        print("Cannot start codex: %s. Install the Codex CLI and make sure it is on PATH."
+              % error, file=sys.stderr)
+        return 1
+    return 0                                  # unreachable: execvpe either replaces us or raises
 
 
 if __name__ == "__main__":

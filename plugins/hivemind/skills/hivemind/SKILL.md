@@ -42,7 +42,7 @@ land in a graph everyone can read.
   use, grouped: shared with everyone, theirs, shared with them. Offer their private graph and a new
   scratch project too, create it with `project_create` if they want a new one, then pin it:
 
-      python3 "$HOME/.hivemind/hivemind-project.py" --pin <name> --label "<what this is for>"
+      HIVEMIND_SESSION_ID="$CODEX_THREAD_ID" python3 "$HOME/.hivemind/hivemind-project.py" --pin <name> --label "<what this is for>"
 
   The `hivemind-project` skill runs that whole flow, including the create. Run
   `scripts/guide.sh --install-only` from this skill's directory once to install the local helper.

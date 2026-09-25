@@ -3,7 +3,13 @@
 
 The pin exists because the project choice otherwise lives only in conversation context, where a
 compaction drops it — and a dropped choice plus a defaulted write is how private work would end up
-in the shared graph. Keyed by CODEX_THREAD_ID so a resume lands back on the same project.
+in the shared graph. Keyed by the host's session id (see session_id) so a resume lands back on the
+same project.
+
+ONE file serves both hosts. Both plugins install this script to the same $HOME/.hivemind path, so
+whichever skill loaded last is the copy every session runs: a build that knew only its own host's
+session-id variable left the other host unable to pin at all. Keep the two copies byte-identical —
+test_the_two_plugin_copies_are_byte_identical holds that.
 
 Purely local state: nothing here talks to the server. Listing projects needs the API token, and
 `project_list` over MCP is already authenticated, so the session hook that reads this file cannot
@@ -49,6 +55,25 @@ def clean(text):
     return CTRL.sub(" ", ANSI.sub("", text))[:LABEL_MAX].strip()
 
 
+def session_id():
+    """This conversation's id, from whichever host is running us.
+
+    HIVEMIND_SESSION_ID first: it is what a SessionStart hook passes after reading the id out of its
+    own event, which is the only source that cannot be stale. The host variables follow as the
+    fallback for a plain shell — the agent and the slash command both run this script themselves,
+    and neither hook variable reaches that shell.
+
+    Codex's variable is preferred over Claude's when BOTH are set, which means one host is running
+    inside the other's shell and the inherited one is stale. Codex-inside-Claude is the direction
+    that actually happens — Claude Code exports its session id into every tool shell, so a `codex`
+    started from one inherits it — and preferring Claude there collapses every Codex thread onto the
+    one outer id, which is the same shared-pin bug as no id at all. Both SessionStart hooks pass
+    HIVEMIND_SESSION_ID explicitly, so neither loses this tie; the order only decides a plain shell.
+    """
+    return (os.environ.get("HIVEMIND_SESSION_ID") or os.environ.get("CODEX_THREAD_ID")
+            or os.environ.get("CODEX_SESSION_ID") or os.environ.get("CLAUDE_CODE_SESSION_ID") or "")
+
+
 def pin_path():
     """One file per session id.
 
@@ -57,12 +82,6 @@ def pin_path():
     """
     slug = UNSAFE.sub("-", session_id())[:100]
     return pathlib.Path(os.path.expanduser("~")) / ".hivemind" / ("session-%s.json" % slug)
-
-
-def session_id():
-    """Codex exposes its thread id to tools; hooks can pass the input's session_id explicitly."""
-    return (os.environ.get("HIVEMIND_SESSION_ID") or os.environ.get("CODEX_THREAD_ID")
-            or os.environ.get("CODEX_SESSION_ID") or "")
 
 
 def main(argv=None):
@@ -76,9 +95,13 @@ def main(argv=None):
     if args.session_id:
         print(session_id())
         return 0
-    # Never share a fallback 'no-session' pin across unrelated conversations.
+    # A fallback filename shared by every session with no resolvable id is worse than a refusal: the
+    # pin is per-conversation, so one shared file hands a project this session never chose to the
+    # next unrelated one — the exact defaulted write the pin exists to prevent. Refuse and say how
+    # to supply the id instead. --session-id is answered above, so "" is still reportable.
     if not session_id():
-        print(json.dumps({"error": "no Codex session id; set HIVEMIND_SESSION_ID to this thread id"}))
+        print(json.dumps({"error": "no session id; set HIVEMIND_SESSION_ID to this conversation's "
+                                   "id (CLAUDE_CODE_SESSION_ID / CODEX_THREAD_ID are read too)"}))
         return 1
     path = pin_path()
     # `is not None`, not truthiness: --pin "" is a mis-parsed answer, and falling through to the

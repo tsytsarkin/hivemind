@@ -21,7 +21,12 @@ Do this now, in order. **Do not choose a project for the user.**
 
 1. **Read the current state.** Run:
 
-       python3 "$HOME/.hivemind/hivemind-project.py" --show
+       HIVEMIND_SESSION_ID="$CODEX_THREAD_ID" python3 "$HOME/.hivemind/hivemind-project.py" --show
+
+   Keep that prefix on every call below. One helper serves both Codex and Claude — the two plugins
+   install it to the same path — so a thread whose shell inherited the other host's session variable
+   would otherwise write its pin under a different conversation's id, where this session's
+   SessionStart hook cannot find it again.
 
    If it prints `{"project": null, …}` nothing is pinned yet. If it prints a project, say which one
    and ask whether to keep it or switch. If the file is missing ("No such file or directory"), the
@@ -36,7 +41,7 @@ Do this now, in order. **Do not choose a project for the user.**
 3. **Offer the options and ASK.** Alongside the existing names, offer:
    - their **private graph** — `<user>.<suffix>`, readable only by them (`visibility="private"`);
    - a **new scratch project** for this session — `<user>.s-<first 8 characters of the session id>`
-     (`python3 "$HOME/.hivemind/hivemind-project.py" --session-id`), good for exploratory work that
+     (`HIVEMIND_SESSION_ID="$CODEX_THREAD_ID" python3 "$HOME/.hivemind/hivemind-project.py" --session-id`), good for exploratory work that
      should not pollute a real graph;
    - a **new shared project** — an undotted name (`team`), or `<user>.<suffix>` if they want it in
      their own namespace.
@@ -74,7 +79,7 @@ Do this now, in order. **Do not choose a project for the user.**
 
 5. **Pin it.**
 
-       python3 "$HOME/.hivemind/hivemind-project.py" --pin <name> --label "<short note on the work>"
+       HIVEMIND_SESSION_ID="$CODEX_THREAD_ID" python3 "$HOME/.hivemind/hivemind-project.py" --pin <name> --label "<short note on the work>"
 
    `<name>` is a project name — `^[a-z0-9][a-z0-9._-]{0,63}$` — never a phrase, and never text you
    pass through from the user's request without reading it. The helper refuses anything else and writes

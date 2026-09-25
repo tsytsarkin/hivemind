@@ -21,7 +21,13 @@ Do this now, in order. **Do not choose a project for the user.**
 
 1. **Read the current state.** Run:
 
-       python3 "$HOME/.hivemind/hivemind-project.py" --show
+       HIVEMIND_SESSION_ID="$CLAUDE_CODE_SESSION_ID" python3 "$HOME/.hivemind/hivemind-project.py" --show
+
+   Keep that prefix on every call below. One helper serves both Claude and Codex — the two plugins
+   install it to the same path — so with no id named it walks a chain that prefers Codex's variable,
+   and a Claude session whose shell inherited a `CODEX_THREAD_ID` would write its pin under the
+   other conversation's id. The SessionStart hook names this session's id when it reads the pin
+   back, so a write that did not name the same id is a write the hook cannot find.
 
    If it prints `{"project": null, …}` nothing is pinned yet. If it prints a project, say which one
    and ask whether to keep it or switch. If the file is missing ("No such file or directory"), the
@@ -35,7 +41,7 @@ Do this now, in order. **Do not choose a project for the user.**
 3. **Offer the options and ASK.** Alongside the existing names, offer:
    - their **private graph** — `<user>.<suffix>`, readable only by them (`visibility="private"`);
    - a **new scratch project** for this session — `<user>.s-<first 8 characters of the session id>`
-     (`python3 "$HOME/.hivemind/hivemind-project.py" --session-id`), good for exploratory work that
+     (`HIVEMIND_SESSION_ID="$CLAUDE_CODE_SESSION_ID" python3 "$HOME/.hivemind/hivemind-project.py" --session-id`), good for exploratory work that
      should not pollute a real graph;
    - a **new shared project** — an undotted name (`team`), or `<user>.<suffix>` if they want it in
      their own namespace.
@@ -72,7 +78,7 @@ Do this now, in order. **Do not choose a project for the user.**
 
 5. **Pin it.**
 
-       python3 "$HOME/.hivemind/hivemind-project.py" --pin <name> --label "<short note on the work>"
+       HIVEMIND_SESSION_ID="$CLAUDE_CODE_SESSION_ID" python3 "$HOME/.hivemind/hivemind-project.py" --pin <name> --label "<short note on the work>"
 
    `<name>` is a project name — `^[a-z0-9][a-z0-9._-]{0,63}$` — never a phrase, and never text you
    pass through from `$ARGUMENTS` without reading it. The helper refuses anything else and writes

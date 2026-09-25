@@ -94,7 +94,16 @@ def test_plugin_metadata_and_session_isolation(tmp_path):
     no_id = subprocess.run([sys.executable, str(HELPER), "--pin", "default"],
                            env={"HOME": str(tmp_path), "PATH": "/usr/bin:/bin"},
                            capture_output=True, text=True)
-    assert no_id.returncode != 0 and "no Codex session id" in no_id.stdout
+    assert no_id.returncode != 0 and "no session id" in no_id.stdout
+    # The same script is what a Claude session runs — both plugins install it to the one
+    # $HOME/.hivemind path, so a Codex-only reading of the session id locks the other host out.
+    claude = subprocess.run([sys.executable, str(HELPER), "--pin", "default"],
+                            env={"HOME": str(tmp_path), "PATH": "/usr/bin:/bin",
+                                 "CLAUDE_CODE_SESSION_ID": "claude-thread"},
+                            capture_output=True, text=True)
+    assert claude.returncode == 0, claude.stdout
+    assert (PLUGIN.parents[1] / "plugin/skills/hivemind/scripts/hivemind-project.py").read_bytes() \
+        == HELPER.read_bytes(), "the two installed copies must not diverge"
 
 
 def test_setup_configures_server_and_stores_token_privately(tmp_path, monkeypatch, capsys):

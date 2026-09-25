@@ -58,8 +58,13 @@ Trust the plugin's `SessionStart` hook with `/hooks` in the Codex CLI when promp
 new Codex conversation. The hook re-injects a validated project pin on startup, clear, compaction,
 and resume. Use `$hivemind-project` to list projects, ask which one to use, and pin your choice.
 Every Hivemind MCP call must pass `project=<name>`; a root URL refuses calls without one.
-Forked sessions must choose their own project. The pin helper uses `CODEX_THREAD_ID` (or
-`HIVEMIND_SESSION_ID` if the client does not export it).
+Forked sessions must choose their own project. One pin helper serves both hosts — the Codex and
+Claude plugins install it to the same `$HOME/.hivemind/hivemind-project.py` — so it reads
+`HIVEMIND_SESSION_ID` first, then `CODEX_THREAD_ID`, `CODEX_SESSION_ID` and
+`CLAUDE_CODE_SESSION_ID`. Set `HIVEMIND_SESSION_ID` when the client exports none of them, and in a
+shell where both hosts' variables are present (a `codex` started from a Claude tool call inherits
+`CLAUDE_CODE_SESSION_ID`); with no resolvable id the helper refuses to write rather than sharing one
+pin file between unrelated conversations.
 
 ## First session and everyday use
 
