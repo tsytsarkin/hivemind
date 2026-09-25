@@ -1,2 +1,6 @@
 [plugins."hivemind@personal"]
 enabled = true
+
+[mcp_servers.hivemind]
+url = "http://127.0.0.1:8787/mcp"
+bearer_token_env_var = "HIVEMIND_TOKEN"

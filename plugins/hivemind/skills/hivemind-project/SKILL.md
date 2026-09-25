@@ -88,6 +88,15 @@ Do this now, in order. **Do not choose a project for the user.**
    from context, and a dropped choice plus a defaulted write is how private work reaches a shared
    graph.
 
-6. **Confirm in one line**: the project, its visibility, and that every Hivemind call from now on
+6. **Join the bus immediately.** The post-tool hook should join as `codex-<thread-id>` after the
+   pin is saved. Call the MCP `bus_peers(project=<name>)` tool and confirm that label is online.
+   If it is absent, run `python3 "$HOME/.hivemind/bus-autojoin.py" --platform codex --mode ensure`
+   (if the helper is absent, first use the knowledge-graph skill's
+   `scripts/guide.sh --install-only`),
+   then check `bus_peers` again. If registration fails, report its error; do not imply this agent
+   is available for peer messages. A restored pin on session start needs the same check.
+
+7. **Confirm in one line**: the project, its visibility, whether this agent is online on the bus,
+   and that every Hivemind call from now on
    passes `project=<name>`. The `project` echoed in each tool result is authoritative — if it ever
    differs from the pin, believe the result and say so.

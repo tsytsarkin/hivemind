@@ -210,13 +210,23 @@ role is a label, not a privilege boundary.
 
 ### Talking to other agents
 
-With a token and a previously pinned project, the plugin launches its listener on session start;
-pinning a project mid-session launches it after that action. It registers as
+Every agent session registers after it pins or loads a project. With working plugin credentials
+and trusted hooks, the plugin launches its listener on session start for an existing pin;
+pinning a project mid-session launches it after the tool action. Verify your own label is online
+with MCP `bus_peers(project=<name>)`; if not, run the installed helper shown below and report
+any join error. It registers as
 `claude-<session-id>`, keeps a WebSocket open, and saves messages to
 `~/.hivemind/claude-bus/<session-id>/inbox-<project>.jsonl`. The next user prompt reports **new**
-messages without injecting peer text. If no project is pinned yet, no listener starts. If hooks
-are disabled, run `python3 "$HOME/.hivemind/bus-autojoin.py" --platform claude --mode ensure`
-after pinning. The listener needs only Python 3, not the separate Hivemind client.
+messages without embedding their bodies in hook context. Read new messages in full, work on peer
+requests within the shared task, and reply to the sender using MCP `bus_send` with a result or a
+concrete blocker. Ask the user before deleting files or taking another destructive action. If no
+project is pinned yet, no listener starts. If hooks are disabled, run
+`python3 "$HOME/.hivemind/bus-autojoin.py" --platform claude --mode ensure` after pinning;
+the helper is copied there when the Hivemind skill loads (or via its
+`scripts/guide.sh --install-only`). The helper needs the Claude plugin's `server_url`/`api_token` settings in
+its session environment, or `HIVEMIND_SERVER_URL`/`HIVEMIND_TOKEN` explicitly. When run from an
+outside shell, also provide `CLAUDE_CODE_SESSION_ID` for the correct pin. The listener needs only
+Python 3, not the separate Hivemind client.
 
 If Claude Monitor is available, you can additionally call the MCP `bus_connect` tool using a
 different label and run its returned command under Monitor to get live notifications. The auto
@@ -250,6 +260,7 @@ descriptive (the machine or the job, not a random id).
 | A brand-new project 404s over REST/CLI/bus | Current servers mount it immediately. On an older server, restart the server to create its `/p/<name>/` routes. |
 | Write refused for naming no project | You're on the project-neutral endpoint. Pass `project=`. |
 | The bus listener says "connection refused" | Check the project URL and credentials; on an older server, a newly created project may need a restart to mount its bus route. Open the Hivemind skill if the listener script is missing. |
+| Project pinned but your session is not in `bus_peers` | Confirm the hook is trusted and `server_url`/`api_token` are configured, inspect the next hook's join error, then run `python3 "$HOME/.hivemind/bus-autojoin.py" --platform claude --mode ensure` inside the session and verify your label online. The helper installs when the skill loads. |
 | The live guide shows an `(offline: …)` copy | Read the rest of that line — it names the cause. `no HIVEMIND_SERVER_URL / HIVEMIND_TOKEN in this shell` means neither your shell nor the plugin config had them (a plain terminal, or no plugin here); `no project … run /hivemind:project` means nothing named a project, which `/guide` needs because it exists only under `/p/<project>/`; `answered HTTP 404` means the project it did name does not exist, is not yours, or needs a restart on an older server. `guide_get()` over MCP works in every one of those cases. |
 | The CLI says `error: set HIVEMIND_SERVER_URL and HIVEMIND_TOKEN` | The plugin's hook exports them only for Bash calls **inside** a Claude Code session. In a plain terminal, export them yourself. |
 | The CLI says `this needs a project and nothing named one` | The URL is the server root and neither `--project` nor `$HIVEMIND_PROJECT` named a project. |

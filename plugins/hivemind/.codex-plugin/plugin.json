@@ -1,6 +1,6 @@
 {
   "name": "hivemind",
-  "version": "1.3.0+codex.20260925205033",
+  "version": "1.3.0+codex.20260925220826",
   "description": "Shared, versioned knowledge graph, artifact store, and tool registry for Codex.",
   "author": {
     "name": "Nik Tsytsarkin",

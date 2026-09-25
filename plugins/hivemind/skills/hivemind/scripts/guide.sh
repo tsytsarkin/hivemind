@@ -42,6 +42,7 @@ install_script() {           # $1 = file in this directory, $2 = destination pat
   return 0
 }
 install_script bus-listen.py "${HIVEMIND_LISTENER:-$HOME/.hivemind/bus-listen.py}"
+install_script bus-autojoin.py "$HOME/.hivemind/bus-autojoin.py"
 PIN_HELPER="${HIVEMIND_PIN_HELPER:-$HOME/.hivemind/hivemind-project.py}"
 install_script hivemind-project.py "$PIN_HELPER"
 if [ "$INSTALL_ONLY" -eq 1 ]; then

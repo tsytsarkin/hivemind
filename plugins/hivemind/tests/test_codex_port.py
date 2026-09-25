@@ -157,6 +157,7 @@ def test_install_only_bootstraps_helpers_without_fetching_guide(tmp_path):
                          capture_output=True, text=True, timeout=5, check=True)
     assert run.stdout == ""
     assert (tmp_path / ".hivemind/bus-listen.py").is_file()
+    assert (tmp_path / ".hivemind/bus-autojoin.py").is_file()
     assert (tmp_path / ".hivemind/hivemind-project.py").is_file()
 
 
@@ -168,7 +169,7 @@ def test_claude_plugin_registers_autolaunch_and_has_credentials():
     startup = [item["command"] for item in hooks["SessionStart"][0]["hooks"]]
     assert any("session-start" in command for command in startup)
     assert any("bus-autojoin.py" in command and "--mode ensure" in command for command in startup)
-    assert "--mode after-pin" in hooks["PostToolUse"][0]["hooks"][0]["command"]
+    assert "--mode ensure" in hooks["PostToolUse"][0]["hooks"][0]["command"]
     assert "--mode ensure" in hooks["UserPromptSubmit"][0]["hooks"][0]["command"]
     assert "--mode stop" in hooks["SessionEnd"][0]["hooks"][0]["command"]
 
@@ -188,6 +189,37 @@ def test_autojoin_uses_the_installed_platform_endpoint(monkeypatch):
             monkeypatch.delenv("HIVEMIND_SERVER_URL", raising=False)
             monkeypatch.setenv("CLAUDE_PLUGIN_OPTION_SERVER_URL", "http://127.0.0.1:18888")
             assert helper._endpoint("claude") == "http://127.0.0.1:18888/mcp"
+
+
+def test_codex_hook_uses_only_a_private_token_for_the_matching_server(tmp_path, monkeypatch):
+    spec = importlib.util.spec_from_file_location("bus_autojoin_token", AUTOJOIN)
+    helper = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(helper)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("HIVEMIND_TOKEN", raising=False)
+    secret_dir = tmp_path / ".hivemind"
+    secret_dir.mkdir()
+    address = secret_dir / "codex-server.json"
+    token = secret_dir / "codex-token"
+    address.write_text(json.dumps({"server_url": "http://127.0.0.1:8787"}))
+    token.write_text("private-test-token\n")
+    token.chmod(0o600)
+    assert helper._token("codex", "http://127.0.0.1:8787/mcp") == "private-test-token"
+    assert helper._token("codex", "http://127.0.0.1:18888/mcp") == ""
+    token.chmod(0o644)
+    assert helper._token("codex", "http://127.0.0.1:8787/mcp") == ""
+
+
+def test_pinned_agent_without_credentials_gets_a_registration_error(tmp_path, monkeypatch):
+    spec = importlib.util.spec_from_file_location("bus_autojoin_missing_token", AUTOJOIN)
+    helper = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(helper)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("HIVEMIND_TOKEN", raising=False)
+    monkeypatch.delenv("HIVEMIND_SERVER_URL", raising=False)
+    _pin(tmp_path, "missing-token-session", "--pin", "default")
+    result = helper.run({"session_id": "missing-token-session"}, "codex", "ensure")
+    assert "not joined for project=default" in result and "no token" in result
 
 
 def _receive(lines, substring, timeout=7):
@@ -349,15 +381,26 @@ def test_autojoin_codex_and_claude_fallback_on_localhost(tmp_path):
     shutil.copy2(LISTENER, script_dir / "bus-listen.py")
     (installed / ".mcp.json").write_text(json.dumps({"mcpServers": {"hivemind": {
         "type": "http", "url": base + "/mcp", "bearerTokenEnvVar": "HIVEMIND_TOKEN"}}}))
-    hook_env = dict(env, HOME=str(tmp_path), HIVEMIND_TOKEN=token,
-                    HIVEMIND_SERVER_URL=base)
+    credentials = tmp_path / ".hivemind"
+    credentials.mkdir()
+    (credentials / "codex-server.json").write_text(json.dumps({"server_url": base}))
+    (credentials / "codex-token").write_text(token + "\n")
+    (credentials / "codex-token").chmod(0o600)
+    hook_env = dict(env, HOME=str(tmp_path))
+    hook_env.pop("HIVEMIND_TOKEN", None)
+    hook_env.pop("HIVEMIND_SERVER_URL", None)
     codex = {"session_id": "codex-thread-1"}
     claude = {"session_id": "claude-thread-2"}
+    manual = {"session_id": "codex-thread-3"}
 
-    def hook(platform, event, mode="ensure"):
-        script = installed_autojoin if platform == "codex" else CLAUDE_AUTOJOIN
+    def hook(platform, event, mode="ensure", script=None):
+        script = script or (installed_autojoin if platform == "codex" else CLAUDE_AUTOJOIN)
+        platform_env = dict(hook_env)
+        if platform == "claude":
+            platform_env.update(CLAUDE_PLUGIN_OPTION_SERVER_URL=base,
+                                CLAUDE_PLUGIN_OPTION_API_TOKEN=token)
         result = subprocess.run([sys.executable, str(script), "--platform", platform,
-                                 "--mode", mode], input=json.dumps(event), env=hook_env,
+                                 "--mode", mode], input=json.dumps(event), env=platform_env,
                                 capture_output=True, text=True, check=True, timeout=12)
         return (json.loads(result.stdout).get("hookSpecificOutput", {}).get("additionalContext", "")
                 if result.stdout.strip() else "")
@@ -375,13 +418,24 @@ def test_autojoin_codex_and_claude_fallback_on_localhost(tmp_path):
         assert hook("codex", codex) == ""  # no project: never choose or register automatically
         _pin(tmp_path, codex["session_id"], "--pin", "default")
         _pin(tmp_path, claude["session_id"], "--pin", "default")
-        assert "joined" in hook("codex", codex)
+        _pin(tmp_path, manual["session_id"], "--pin", "default")
+        subprocess.run(["bash", str(GUIDE), "--install-only"], env=hook_env, check=True,
+                       capture_output=True, timeout=5)
+        manual_script = tmp_path / ".hivemind/bus-autojoin.py"
+        assert manual_script.is_file()
+        # A project loaded by a shell wrapper must join even when the command was not --pin.
+        assert "joined" in hook("codex", dict(codex, tool_input={"command": "echo loaded"}),
+                                "ensure")
         assert "joined" in hook("claude", claude)
+        # A trusted-hook-free Codex session uses the copy under HOME; it has no .mcp.json
+        # alongside it and resolves the saved server address and private token instead.
+        assert "joined" in hook("codex", manual, script=manual_script)
         assert "joined" not in hook("codex", codex)  # idempotent: no second listener
         for _ in range(60):
             online = {p["peer"] for p in _mcp_call(base, token, "bus_peers", {
                 "project": "default"})["peers"] if p["online"]}
-            if {"codex-codex-thread-1", "claude-claude-thread-2"} <= online:
+            if {"codex-codex-thread-1", "claude-claude-thread-2",
+                    "codex-codex-thread-3"} <= online:
                 break
             time.sleep(0.05)
         else:
@@ -390,16 +444,20 @@ def test_autojoin_codex_and_claude_fallback_on_localhost(tmp_path):
             "codex-codex-thread-1", "body": "from claude"})["delivered"]
         assert _mcp_call(base, token, "bus_send", {"project": "default", "to":
             "claude-claude-thread-2", "body": "from codex"})["delivered"]
-        for platform, event in (("codex", codex), ("claude", claude)):
+        assert _mcp_call(base, token, "bus_send", {"project": "default", "to":
+            "codex-codex-thread-3", "body": "from claude to manual"})["delivered"]
+        for platform, event, script in (("codex", codex, None), ("claude", claude, None),
+                                        ("codex", manual, manual_script)):
             for _ in range(60):
-                hint = hook(platform, event, "check")
+                hint = hook(platform, event, "check", script=script)
                 if "new message(s)" in hint:
                     break
                 time.sleep(0.05)
             else:
                 raise AssertionError("no saved message for " + platform)
             assert "from codex" not in hint and "from claude" not in hint
-            assert hook(platform, event, "check") == ""  # no repeated prompt notifications
+            assert "MCP bus_send" in hint  # the prompt hook tells either agent to reply
+            assert hook(platform, event, "check", script=script) == ""  # no repeated notices
         created = _mcp_call(base, token, "project_create", {"name": "alice.private",
                              "visibility": "private", "schema": "bare"})
         assert created.get("ok") is not False
@@ -417,5 +475,7 @@ def test_autojoin_codex_and_claude_fallback_on_localhost(tmp_path):
     finally:
         hook("codex", codex, "stop")
         hook("claude", claude, "stop")
+        if (tmp_path / ".hivemind/bus-autojoin.py").is_file():
+            hook("codex", manual, "stop", script=tmp_path / ".hivemind/bus-autojoin.py")
         server.terminate()
         server.wait(timeout=3)

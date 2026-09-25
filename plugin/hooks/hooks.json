@@ -20,7 +20,7 @@
     ],
     "PostToolUse": [{
       "matcher": "Bash",
-      "hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/skills/hivemind/scripts/bus-autojoin.py\" --platform claude --mode after-pin", "timeout": 8}]
+      "hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/skills/hivemind/scripts/bus-autojoin.py\" --platform claude --mode ensure", "timeout": 8}]
     }],
     "UserPromptSubmit": [{
       "hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/skills/hivemind/scripts/bus-autojoin.py\" --platform claude --mode ensure", "timeout": 8}]

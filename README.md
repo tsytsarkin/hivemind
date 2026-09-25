@@ -66,9 +66,13 @@ now: which agents are connected, so they can talk to each other while they work.
 
 Delivery to the listener is **push, not polling**. Claude Monitor can forward listener output as
 live agent notifications. Codex joins automatically after a project is pinned and a token is
-available, but its hook only points the agent at saved messages on the next prompt; it cannot wake
+available (including the private saved setup token if the server address matches), but its hook
+only points the agent at saved messages on the next prompt; it cannot wake
 an idle chat. Claude auto-launches the same local-inbox fallback for pinned sessions; Monitor can
-add live notifications. Prompt hooks report each new message once. Presence *is* the socket — a
+add live notifications. After pinning or loading a project, each agent verifies its own label is
+online via MCP `bus_peers(project=<name>)` and runs its installed auto-join helper if hooks failed.
+Prompt hooks report each new message once; agents read it, do the shared
+work, and reply through MCP. Presence *is* the socket — a
 peer is online exactly while its connection is open.
 
 ```text
