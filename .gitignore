@@ -40,3 +40,6 @@ bus_secret
 tokens.json
 identities.json
 packages/hivemind-server/tests/_tmp_*/
+
+# documentation is kept outside the repo
+docs/
