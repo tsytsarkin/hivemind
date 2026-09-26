@@ -1,11 +1,15 @@
 """Opt-in graph task marker, heartbeat sidecars and fenced claim lifecycle."""
 from __future__ import annotations
 
+import hashlib
+import json
+import secrets
 import time
 from typing import Optional
 
 from .chat import StableAddress, _address
-from .db import Conflict, Database, Invalid, NotFound
+from .db import Conflict, Database, Invalid, NotFound, SENTINEL
+from .ids import ulid
 
 DEFAULT_INTERVAL = 300
 DEFAULT_EXPIRY = 3600
@@ -39,24 +43,76 @@ def enable(db: Database, agent_id: str, node_id: str, room_id: Optional[str] = N
             raise NotFound("task room does not exist; create it explicitly")
         if cur.execute("SELECT 1 FROM graph_task WHERE node_id=?", (node_id,)).fetchone():
             raise Conflict("node already marked as a task")
+        props = cur.execute("SELECT props FROM node_version WHERE node_id=? AND tx_to=?",
+                            (node_id, SENTINEL)).fetchone()
+        if props is None or json.loads(props["props"]).get("status", "unclaimed") != "unclaimed":
+            raise Invalid("task graph status must start unclaimed")
         cur.execute("INSERT INTO graph_task VALUES(?,?,?,?,?)",
                     (node_id, room_id, "unclaimed", tx.tx_id, tx.tx_id))
     return read(db, node_id)
 
 
+def offer(db: Database, agent_id: str, room_name: str,
+          title: str, summary: str) -> dict:
+    """Create a versioned work_item and explicit-room marker in one transaction."""
+    if (not isinstance(title, str) or not 1 <= len(title.strip()) <= 256 or
+            not isinstance(summary, str) or not 1 <= len(summary.strip()) <= 2048):
+        raise Invalid("task title and summary must be nonempty and bounded")
+    from .chat import ChatStore
+    from .graph import _create_node_tx, get_node
+    with db.write(agent_id, "offer graph task") as tx:
+        room_id = ChatStore(db)._lookup_room(tx.cur, room_name)
+        exists = tx.cur.execute("SELECT 1 FROM node_type WHERE name='work_item' AND "
+                                "status='active' LIMIT 1").fetchone()
+        if exists is None:
+            raise Invalid("project needs an active work_item schema; propose it with schema_propose")
+        props = {"title": title.strip(), "summary": summary.strip(),
+                 "status": "unclaimed", "room_id": room_id}
+        try:
+            node = _create_node_tx(tx, "work_item", props)
+        except Invalid as exc:
+            raise Invalid("work_item schema must permit title, summary, status and room_id; "
+                          "propose an additive schema update") from exc
+        tx.cur.execute("INSERT INTO graph_task VALUES(?,?,?,?,?)",
+                       (node["node_id"], room_id, "unclaimed", tx.tx_id, tx.tx_id))
+        _event(tx, node["node_id"], "offer", 0, None, time.time())
+    return get_node(db, node_id=node["node_id"])
+
+
 def _read(cur, node_id: str, t: float) -> dict:
     task = _marker(cur, node_id)
+    claim = cur.execute("SELECT * FROM graph_task_claim WHERE node_id=?", (node_id,)).fetchone()
+    live = claim is not None and claim["token_digest"] is not None and \
+        claim["last_beat_at"] + claim["expires_after_seconds"] > t
     rows = cur.execute("SELECT user,device,client,last_beat_at,interval_seconds,"
                        "expires_after_seconds FROM graph_task_activity WHERE node_id=? "
                        "AND last_beat_at+expires_after_seconds>? ORDER BY user,device,client",
                        (node_id, t)).fetchall()
-    return {"node_id": node_id, "room_id": task["room_id"], "status": task["status"],
-            "effective_status": task["status"],
+    progress = None
+    if live and task["room_id"] is not None:
+        found = cur.execute("SELECT MAX(created_at) AS last_progress FROM chat_message "
+                            "WHERE room_id=? AND sender_user=? AND sender_device=? AND "
+                            "sender_client=? AND message_kind='progress' AND created_at>=?",
+                            (task["room_id"], claim["holder_user"], claim["holder_device"],
+                             claim["holder_client"], claim["claimed_at"])).fetchone()
+        progress = found["last_progress"] if found else None
+    out = {"node_id": node_id, "room_id": task["room_id"], "status": task["status"],
+            "effective_status": ("unclaimed" if task["status"] == "in_progress" and not live
+                                 else task["status"]),
             "active_agents": [{"address": (r["user"], r["device"], r["client"]),
                                "last_beat_at": r["last_beat_at"],
                                "interval_seconds": r["interval_seconds"],
                                "expires_at": r["last_beat_at"] + r["expires_after_seconds"]}
                               for r in rows]}
+    if live:
+        out["claim"] = {"holder": (claim["holder_user"], claim["holder_device"],
+                                   claim["holder_client"]), "generation": claim["generation"],
+                        "last_beat_at": claim["last_beat_at"],
+                        "expires_at": claim["last_beat_at"] + claim["expires_after_seconds"],
+                        "interval_seconds": claim["interval_seconds"],
+                        "last_progress_at": progress,
+                        "progress_overdue": t >= (progress or claim["claimed_at"]) + 900}
+    return out
 
 
 def read(db: Database, node_id: str, *, now: Optional[float] = None) -> dict:
@@ -81,3 +137,119 @@ def activity(db: Database, node_id: str, who: StableAddress, *,
                     (node_id, *stable, t, interval_seconds, expires_after_seconds))
     return {"node_id": node_id, "address": stable, "last_beat_at": t,
             "expires_at": t + expires_after_seconds}
+
+
+def _event(tx, node_id: str, kind: str, generation: int,
+           who: StableAddress | None, t: float) -> None:
+    tx.cur.execute("INSERT INTO graph_task_event VALUES(?,?,?,?,?,?,?,?,?)",
+                   (ulid(), node_id, kind, generation, *(who or (None, None, None)), t, tx.tx_id))
+
+
+def _transition(tx, node_id: str, status: str) -> None:
+    from .graph import _task_transition
+    _task_transition(tx, node_id, status)
+    tx.cur.execute("UPDATE graph_task SET status=?,updated_tx=? WHERE node_id=?",
+                   (status, tx.tx_id, node_id))
+
+
+def claim(db: Database, agent_id: str, node_id: str, who: StableAddress, *,
+          interval_seconds: int = DEFAULT_INTERVAL,
+          expires_after_seconds: int = DEFAULT_EXPIRY,
+          now: Optional[float] = None) -> dict:
+    stable = _address(who)
+    _timing(interval_seconds, expires_after_seconds)
+    t = time.time() if now is None else float(now)
+    token = secrets.token_urlsafe(32)
+    digest = hashlib.sha256(token.encode()).hexdigest()
+    with db.write(agent_id, "claim graph task") as tx:
+        task = _marker(tx.cur, node_id)
+        if task["status"] == "complete":
+            raise Conflict("completed task cannot be claimed")
+        current = tx.cur.execute("SELECT * FROM graph_task_claim WHERE node_id=?", (node_id,)).fetchone()
+        if current and current["token_digest"] and \
+                current["last_beat_at"] + current["expires_after_seconds"] > t:
+            raise Conflict("task already claimed; wait for expiry or request a release")
+        generation = 1 + (current["generation"] if current else 0)
+        tx.cur.execute("INSERT INTO graph_task_claim VALUES(?,?,?,?,?,?,?,?,?,?) "
+                       "ON CONFLICT(node_id) DO UPDATE SET holder_user=excluded.holder_user,"
+                       "holder_device=excluded.holder_device,holder_client=excluded.holder_client,"
+                       "token_digest=excluded.token_digest,generation=excluded.generation,"
+                       "claimed_at=excluded.claimed_at,last_beat_at=excluded.last_beat_at,"
+                       "interval_seconds=excluded.interval_seconds,"
+                       "expires_after_seconds=excluded.expires_after_seconds",
+                       (node_id, *stable, digest, generation, t, t,
+                        interval_seconds, expires_after_seconds))
+        _transition(tx, node_id, "in_progress")
+        _event(tx, node_id, "claim", generation, stable, t)
+    return {**read(db, node_id, now=t), "claim_token": token}
+
+
+def _valid_claim(cur, node_id: str, token: str, stable: StableAddress, t: float):
+    _marker(cur, node_id)
+    if not isinstance(token, str) or not token:
+        raise Invalid("claim token is required")
+    row = cur.execute("SELECT * FROM graph_task_claim WHERE node_id=?", (node_id,)).fetchone()
+    digest = hashlib.sha256(token.encode()).hexdigest()
+    if (row is None or row["token_digest"] is None or
+            not secrets.compare_digest(row["token_digest"], digest) or
+            (row["holder_user"], row["holder_device"], row["holder_client"]) != stable or
+            row["last_beat_at"] + row["expires_after_seconds"] <= t):
+        raise Conflict("claim is not live or is held by another agent")
+    return row
+
+
+def heartbeat(db: Database, node_id: str, claim_token: str, who: StableAddress, *,
+              now: Optional[float] = None) -> dict:
+    stable = _address(who)
+    t = time.time() if now is None else float(now)
+    with db.write_light() as cur:
+        lease = _valid_claim(cur, node_id, claim_token, stable, t)
+        cur.execute("UPDATE graph_task_claim SET last_beat_at=? WHERE node_id=? "
+                    "AND generation=?", (t, node_id, lease["generation"]))
+    return {"node_id": node_id, "generation": lease["generation"],
+            "expires_at": t + lease["expires_after_seconds"]}
+
+
+def _end(db: Database, agent_id: str, node_id: str, claim_token: str,
+         who: StableAddress, kind: str, now: Optional[float]) -> dict:
+    stable = _address(who)
+    t = time.time() if now is None else float(now)
+    with db.write(agent_id, kind + " graph task claim") as tx:
+        lease = _valid_claim(tx.cur, node_id, claim_token, stable, t)
+        status = "complete" if kind == "complete" else "unclaimed"
+        _transition(tx, node_id, status)
+        tx.cur.execute("UPDATE graph_task_claim SET token_digest=NULL,holder_user=NULL,"
+                       "holder_device=NULL,holder_client=NULL WHERE node_id=? AND generation=?",
+                       (node_id, lease["generation"]))
+        _event(tx, node_id, kind, lease["generation"], stable, t)
+    return read(db, node_id, now=t)
+
+
+def release(db: Database, agent_id: str, node_id: str, claim_token: str,
+            who: StableAddress, *, now: Optional[float] = None) -> dict:
+    return _end(db, agent_id, node_id, claim_token, who, "release", now)
+
+
+def complete(db: Database, agent_id: str, node_id: str, claim_token: str,
+             who: StableAddress, *, now: Optional[float] = None) -> dict:
+    return _end(db, agent_id, node_id, claim_token, who, "complete", now)
+
+
+def reap_expired(db: Database, *, now: Optional[float] = None) -> int:
+    t = time.time() if now is None else float(now)
+    with db.read() as cur:
+        due = cur.execute("SELECT 1 FROM graph_task_claim WHERE token_digest IS NOT NULL "
+                          "AND last_beat_at+expires_after_seconds<=? LIMIT 1", (t,)).fetchone()
+    if not due:
+        return 0
+    with db.write("task-reaper", "reap expired graph task claims") as tx:
+        expired = tx.cur.execute("SELECT node_id,generation FROM graph_task_claim "
+                                 "WHERE token_digest IS NOT NULL AND "
+                                 "last_beat_at+expires_after_seconds<=?", (t,)).fetchall()
+        for row in expired:
+            _transition(tx, row["node_id"], "unclaimed")
+            tx.cur.execute("UPDATE graph_task_claim SET token_digest=NULL,holder_user=NULL,"
+                           "holder_device=NULL,holder_client=NULL WHERE node_id=? AND generation=?",
+                           (row["node_id"], row["generation"]))
+            _event(tx, row["node_id"], "expired", row["generation"], None, t)
+    return len(expired)

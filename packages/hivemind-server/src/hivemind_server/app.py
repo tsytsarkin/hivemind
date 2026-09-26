@@ -363,6 +363,7 @@ def build_app(cfg: Optional[Config] = None) -> Starlette:
 
         from . import bus_ws as _bus_ws
         from .chat import ChatStore
+        from . import graph_tasks
         # WebSocket sends issued from MCP tool threads are scheduled onto this loop.
         _bus_ws.set_loop(_asyncio.get_running_loop())
 
@@ -370,6 +371,7 @@ def build_app(cfg: Optional[Config] = None) -> Starlette:
             for current in registry.all():
                 try:
                     await _asyncio.to_thread(ChatStore(current.db).cleanup)
+                    await _asyncio.to_thread(graph_tasks.reap_expired, current.db)
                 except Exception:
                     log.exception("chat retention cleanup failed for project %r", current.name)
 

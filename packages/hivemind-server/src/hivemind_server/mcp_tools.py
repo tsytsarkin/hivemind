@@ -364,4 +364,6 @@ def build_mcp(registry, identities, *, instructions: str = INSTRUCTIONS) -> MCPS
     bus_ws_tools.attach(mcp, _config())
     from . import chat_tools      # durable DMs, public project rooms and canonical sessions
     chat_tools.attach(mcp, _config(), identities)
+    from . import graph_task_tools  # graph-backed optional work, fenced lease sidecars
+    graph_task_tools.attach(mcp)
     return real                   # mount the real server; the proxy only wraps registration

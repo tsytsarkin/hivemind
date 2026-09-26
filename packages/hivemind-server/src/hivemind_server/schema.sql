@@ -388,3 +388,20 @@ CREATE TABLE IF NOT EXISTS graph_task_activity (
   expires_after_seconds INTEGER NOT NULL,
   PRIMARY KEY(node_id,user,device,client)
 );
+CREATE TABLE IF NOT EXISTS graph_task_claim (
+  node_id TEXT PRIMARY KEY REFERENCES graph_task(node_id),
+  holder_user TEXT, holder_device TEXT, holder_client TEXT,
+  token_digest TEXT, generation INTEGER NOT NULL,
+  claimed_at REAL NOT NULL, last_beat_at REAL NOT NULL,
+  interval_seconds INTEGER NOT NULL, expires_after_seconds INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS graph_task_event (
+  event_id TEXT PRIMARY KEY,
+  node_id TEXT NOT NULL REFERENCES graph_task(node_id),
+  kind TEXT NOT NULL,
+  generation INTEGER NOT NULL,
+  user TEXT, device TEXT, client TEXT,
+  happened_at REAL NOT NULL,
+  tx_id INTEGER NOT NULL REFERENCES tx(tx_id)
+);
+CREATE INDEX IF NOT EXISTS ix_graph_task_event_node ON graph_task_event(node_id, tx_id);

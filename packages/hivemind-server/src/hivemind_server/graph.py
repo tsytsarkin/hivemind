@@ -132,6 +132,29 @@ def _stamp_author(out: dict, cur, row: Optional[dict]) -> None:
     out["agent_label"] = r["agent_id"] if r else None
 
 
+def _create_node_tx(tx: Tx, node_type: str, props: dict, *,
+                    subject_key: Optional[str] = None,
+                    subject_version: Optional[str] = None,
+                    subject_order: Optional[str] = None,
+                    node_id: Optional[str] = None) -> dict:
+    """Create a graph node in an existing provenance transaction (e.g. task + room link)."""
+    cur = tx.cur
+    schema_ver = schemas.validate_props(cur, "node", node_type, props)
+    nid = node_id or ulid()
+    cur.execute("INSERT INTO node(node_id,node_type,subject_key,subject_version,subject_order,"
+                "created_by,created_tx) VALUES(?,?,?,?,?,?,?)",
+                (nid, node_type, subject_key, subject_version, subject_order, tx.user, tx.tx_id))
+    vid = ulid()
+    cur.execute("INSERT INTO node_version(version_id,node_id,seq,prev_version,props,schema_ver,"
+                "content_hash,author_user,tx_from,tx_to) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (vid, nid, 1, None, canonical_json(props), schema_ver, content_hash(props),
+                 tx.user, tx.tx_id, SENTINEL))
+    from . import search as _search
+    _search.index_node(cur, nid, props)
+    return {"node_id": nid, "version_id": vid, "seq": 1, "created": True,
+            "superseded": False, "axis": "subject"}
+
+
 # ── node upsert (chooses axis by subject identity) ─────────────────────────────────
 def upsert_node(db: Database, agent_id: str, node_type: str, props: dict, *,
                 subject_key: Optional[str] = None, subject_version: Optional[str] = None,
@@ -162,23 +185,9 @@ def upsert_node(db: Database, agent_id: str, node_type: str, props: dict, *,
                 raise Conflict(
                     "expected_head given but there is no existing node to supersede. Omit "
                     "expected_head to create, or pass the node_id/subject cell you meant.")
-            nid = node_id or ulid()
-            cur.execute(
-                "INSERT INTO node(node_id,node_type,subject_key,subject_version,subject_order,"
-                "created_by,created_tx) VALUES(?,?,?,?,?,?,?)",
-                (nid, node_type, subject_key, subject_version, subject_order, tx.user, tx.tx_id),
-            )
-            vid = ulid()
-            cur.execute(
-                "INSERT INTO node_version(version_id,node_id,seq,prev_version,props,schema_ver,"
-                "content_hash,author_user,tx_from,tx_to) VALUES(?,?,?,?,?,?,?,?,?,?)",
-                (vid, nid, 1, None, canonical_json(props), schema_ver, ch, tx.user,
-                 tx.tx_id, SENTINEL),
-            )
-            from . import search as _search
-            _search.index_node(cur, nid, props)
-            return {"node_id": nid, "version_id": vid, "seq": 1, "created": True,
-                    "superseded": False, "axis": "subject"}
+            return _create_node_tx(tx, node_type, props, subject_key=subject_key,
+                                   subject_version=subject_version, subject_order=subject_order,
+                                   node_id=node_id)
 
         # ── revision axis: supersede the existing cell's head ──
         nid = target["node_id"]
@@ -189,6 +198,10 @@ def upsert_node(db: Database, agent_id: str, node_type: str, props: dict, *,
         head = _current_node_version(cur, nid)
         if head is None:
             raise Invalid(f"node {nid} has no current version (corrupt)")
+        if cur.execute("SELECT 1 FROM graph_task WHERE node_id=?", (nid,)).fetchone():
+            previous_props = json.loads(head["props"])
+            if any(props.get(k) != previous_props.get(k) for k in ("status", "room_id")):
+                raise Invalid("marked task status and room_id can change only through task tools")
         if expected_head is not None and head["version_id"] != expected_head:
             raise Conflict(
                 f"stale write: head is {head['version_id']}, you sent {expected_head} — "
@@ -216,6 +229,27 @@ def upsert_node(db: Database, agent_id: str, node_type: str, props: dict, *,
         _search.index_node(cur, nid, props)
         return {"node_id": nid, "version_id": vid, "seq": seq, "created": False,
                 "superseded": True, "axis": "revision"}
+
+
+def _task_transition(tx: Tx, node_id: str, status: str) -> None:
+    """Change a structured task's graph status inside its lease write transaction."""
+    cur = tx.cur
+    node = _node_row(cur, node_id)
+    head = _current_node_version(cur, node_id)
+    if node is None or head is None:
+        raise NotFound("task graph node does not exist")
+    props = json.loads(head["props"])
+    if "status" not in props or props["status"] == status:
+        return  # statusless schema: the task marker and attributed events own this status
+    props["status"] = status
+    schema_ver = schemas.validate_props(cur, "node", node["node_type"], props)
+    cur.execute("UPDATE node_version SET tx_to=? WHERE version_id=?", (tx.tx_id, head["version_id"]))
+    cur.execute("INSERT INTO node_version(version_id,node_id,seq,prev_version,props,schema_ver,"
+                "content_hash,author_user,tx_from,tx_to) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (ulid(), node_id, head["seq"] + 1, head["version_id"], canonical_json(props),
+                 schema_ver, content_hash(props), tx.user, tx.tx_id, SENTINEL))
+    from . import search as _search
+    _search.index_node(cur, node_id, props)
 
 
 # ── node reads ─────────────────────────────────────────────────────────────────────
