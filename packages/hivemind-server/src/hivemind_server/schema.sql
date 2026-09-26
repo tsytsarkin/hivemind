@@ -24,6 +24,30 @@ CREATE TABLE IF NOT EXISTS chat_subscription (
 );
 CREATE INDEX IF NOT EXISTS ix_chat_subscription_address
   ON chat_subscription(user, device, client);
+CREATE TABLE IF NOT EXISTS room_manager (
+  room_id       TEXT PRIMARY KEY REFERENCES chat_room(room_id),
+  user          TEXT,
+  device        TEXT,
+  client        TEXT,
+  revision      INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS room_team_event (
+  event_id      TEXT PRIMARY KEY,
+  room_id       TEXT NOT NULL REFERENCES chat_room(room_id),
+  action        TEXT NOT NULL,
+  actor_user    TEXT NOT NULL,
+  actor_device  TEXT NOT NULL,
+  actor_client  TEXT NOT NULL,
+  target_user   TEXT NOT NULL,
+  target_device TEXT NOT NULL,
+  target_client TEXT NOT NULL,
+  prior_user    TEXT,
+  prior_device  TEXT,
+  prior_client  TEXT,
+  revision      INTEGER NOT NULL,
+  tx_id         INTEGER NOT NULL REFERENCES tx(tx_id)
+);
+CREATE INDEX IF NOT EXISTS ix_room_team_event_room ON room_team_event(room_id,tx_id);
 
 CREATE TABLE IF NOT EXISTS chat_message (
   seq            INTEGER PRIMARY KEY AUTOINCREMENT,
