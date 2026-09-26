@@ -3,7 +3,8 @@ from __future__ import annotations
 
 from typing import Optional
 
-from . import assignments, graph, graph_tasks
+from . import assignments, chat_ws, graph, graph_tasks, task_announcements, task_listing, teams
+from .bus_ws_tools import _run
 from .chat import ChatStore, StableAddress, _address, stable_identity
 from .db import Invalid
 from .envelope import WRITE, current_project, envelope as _envelope
@@ -12,6 +13,36 @@ from .projects_meta import can_access
 
 
 def attach(mcp, identities) -> None:
+    def _notify_room(p, room: str, message: dict, sender: StableAddress) -> int:
+        delivered = 0
+        try:
+            recipients = ChatStore(p.db).subscribers(room)
+        except Exception:
+            task_announcements.log.exception("task room subscriber lookup failed after persistence")
+            recipients = []
+        for recipient in recipients:
+            try:
+                if (recipient == sender or not identities.has_device(recipient[0], recipient[1])
+                        or not can_access(Identity(recipient[0], recipient[1]), p.meta)):
+                    continue
+                frame = {"v": 2, "type": "chat", "id": message["id"], "channel": "room",
+                         "room": room, "from": "-".join(sender),
+                         "preview": message["body"].encode("utf-8")[:160].decode("utf-8", "ignore"),
+                         "ts": message["created_at"]}
+                delivered += _run(chat_ws.hub_for(p.dir).notify(recipient, frame))
+            except Exception:
+                # Room history is durable and available on reconnect; one dead socket cannot
+                # prevent other subscribers from receiving the new-task signal.
+                task_announcements.log.exception("room task push failed for %r", recipient)
+        return delivered
+
+    def _announce(p, room: str, offered: dict, sender: StableAddress) -> dict:
+        message = task_announcements.announce_offer(p.db, p.dir, room, offered, sender)
+        if message is None:
+            return {**offered, "room_notification": "could not persist; task remains available"}
+        return {**offered, "room_notification": "stored",
+                "notified_count": _notify_room(p, room, message, sender)}
+
     def _context(client: str, session_id: str) -> tuple[object, StableAddress]:
         user, device, actual_client, session = stable_identity(
             current_identity(), client, session_id)
@@ -25,22 +56,28 @@ def attach(mcp, identities) -> None:
     @_envelope
     def graph_task_offer(room: str, title: str, summary: str, client: str, session_id: str,
                          required_capabilities: Optional[list[str]] = None) -> dict:
-        p, _ = _context(client, session_id)
-        return graph_tasks.offer(p.db, "graph-task-offer", room, title, summary,
-                                 required_capabilities=required_capabilities)
+        p, who = _context(client, session_id)
+        offered = graph_tasks.offer(p.db, "graph-task-offer", room, title, summary,
+                                    required_capabilities=required_capabilities)
+        return _announce(p, room, offered, who)
 
     @mcp.tool(annotations=WRITE, description="Mark an existing graph node as an optional task; optionally link an explicitly created room.")
     @_envelope
     def graph_task_enable(node_id: str, client: str, session_id: str,
                           room: Optional[str] = None,
                           required_capabilities: Optional[list[str]] = None) -> dict:
-        p, _ = _context(client, session_id)
+        p, who = _context(client, session_id)
         room_id = None
         if room is not None:
             with p.db.read() as cur:
                 room_id = ChatStore(p.db)._lookup_room(cur, room)
-        return graph_tasks.enable(p.db, "graph-task-enable", node_id, room_id,
-                                  required_capabilities=required_capabilities)
+        enabled = graph_tasks.enable(p.db, "graph-task-enable", node_id, room_id,
+                                     required_capabilities=required_capabilities)
+        if room is None:
+            return enabled
+        announcement = _announce(p, room, graph.get_node(p.db, node_id=node_id), who)
+        return {**enabled, "room_notification": announcement["room_notification"],
+                "notified_count": announcement.get("notified_count", 0)}
 
     @mcp.tool(annotations=WRITE, description="Optional non-exclusive graph task heartbeat; never changes the node revision or claims a task.")
     @_envelope
@@ -87,6 +124,30 @@ def attach(mcp, identities) -> None:
         pending = assignments.mine(p.db, who)
         return {"assignments": pending, "count": len(pending)}
 
+    @mcp.tool(annotations=WRITE, description="Page available, unreserved graph tasks whose required capability tags you advertise; an atomic claim is still required before starting work.")
+    @_envelope
+    def graph_task_available(client: str, session_id: str, limit: int = 25,
+                             before_id: Optional[str] = None) -> dict:
+        p, who = _context(client, session_id)
+        return task_listing.page(p.db, status="available", before_id=before_id,
+                                 limit=limit, eligible_for=who)
+
+    @mcp.tool(annotations=WRITE, description="As current manager, page all tasks in your room with project-wide-for-room status totals, current assignees and claim progress. No claim token is returned.")
+    @_envelope
+    def graph_task_room_status(room: str, client: str, session_id: str,
+                               limit: int = 25, before_id: Optional[str] = None) -> dict:
+        p, who = _context(client, session_id)
+        if teams.manager(p.db, room)["manager"] != who:
+            raise Invalid("only the current room manager can inspect room task status")
+        result = task_listing.page(p.db, room=room, limit=limit, before_id=before_id,
+                                   with_counts=True)
+        for task in result["tasks"]:
+            state = assignments.view(p.db, task["node_id"])
+            task["assignee"] = state["assignee"]
+            task["revision"] = state["revision"]
+            task["claim"] = graph_tasks.read(p.db, task["node_id"]).get("claim")
+        return result
+
     @mcp.tool(annotations=WRITE, description="As the current room manager, cancel a waiting or active mandatory assignment and fence the old claim.")
     @_envelope
     def graph_task_assignment_clear(node_id: str, expected_revision: int,
@@ -124,7 +185,24 @@ def attach(mcp, identities) -> None:
     def graph_task_complete(node_id: str, claim_token: str, client: str,
                             session_id: str) -> dict:
         p, who = _context(client, session_id)
-        return graph_tasks.complete(p.db, "graph-task-complete", node_id, claim_token, who)
+        completed = graph_tasks.complete(p.db, "graph-task-complete", node_id, claim_token, who)
+        if completed["room_id"] is None:
+            return completed
+        try:
+            with p.db.read() as cur:
+                row = cur.execute("SELECT name FROM chat_room WHERE room_id=?",
+                                  (completed["room_id"],)).fetchone()
+            room = row["name"] if row else None
+            if room is None:
+                return {**completed, "room_notification": "room no longer exists"}
+            message = task_announcements.announce_complete(p.db, p.dir, room, node_id, who)
+            if message is None:
+                return {**completed, "room_notification": "could not persist; task remains complete"}
+            return {**completed, "room_notification": "stored",
+                    "notified_count": _notify_room(p, room, message, who)}
+        except Exception:
+            task_announcements.log.exception("task %s completed but announcement lookup failed", node_id)
+            return {**completed, "room_notification": "could not persist; task remains complete"}
 
     @mcp.tool(annotations=WRITE, description="Read the graph node and its effective claim/activity; expired claims are available even before a reaper runs. Returns no claim token.")
     @_envelope

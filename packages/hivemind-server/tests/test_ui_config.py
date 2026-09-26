@@ -53,20 +53,20 @@ def test_listener_fails_clearly_if_port_already_bound():
             _open_listener("127.0.0.1", occupied.getsockname()[1])
 
 
-def test_release_and_bundled_agent_guides_share_version_1_5_0():
+def test_release_and_bundled_agent_guides_share_version_1_5_1():
     import json
     import tomllib
     from pathlib import Path
     root = Path(__file__).resolve().parents[3]
     for path in (root / "pyproject.toml", root / "packages/hivemind-server/pyproject.toml",
                  root / "packages/hivemind-client/pyproject.toml"):
-        assert tomllib.loads(path.read_text())["project"]["version"] == "1.5.0"
+        assert tomllib.loads(path.read_text())["project"]["version"] == "1.5.1"
     for path in (root / "plugin/.claude-plugin/plugin.json",
                  root / "plugins/hivemind/.codex-plugin/plugin.json"):
-        assert json.loads(path.read_text())["version"].startswith("1.5.0")
+        assert json.loads(path.read_text())["version"].startswith("1.5.1")
     for path in (root / "plugin/skills/hivemind/SKILL.md",
                  root / "plugins/hivemind/skills/hivemind/SKILL.md"):
         guide = path.read_text()
         assert "agent_instruction_inbox" in guide and "agent_capabilities_set" in guide
     client_init = (root / "packages/hivemind-client/src/hivemind/__init__.py").read_text()
-    assert '__version__ = "1.5.0"' in client_init
+    assert '__version__ = "1.5.1"' in client_init

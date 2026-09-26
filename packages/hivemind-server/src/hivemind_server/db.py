@@ -120,7 +120,12 @@ class Database:
         ("graph_task", "required_capabilities_json", "TEXT NOT NULL DEFAULT '[]'"),
         ("chat_message", "task_node_id", "TEXT REFERENCES node(node_id)"),
         ("chat_message", "sender_origin", "TEXT NOT NULL DEFAULT 'agent'"),
+        ("chat_message", "summary", "TEXT"),
+        ("agent_capability", "human_managed", "INTEGER NOT NULL DEFAULT 0"),
         ("chat_cursor", "message_id", "TEXT"),
+        ("chat_session", "model_name", "TEXT"),
+        ("chat_session", "work_status", "TEXT"),
+        ("chat_session", "work_updated_at", "REAL"),
     )
 
     # Tables from a removed feature. Dropped on startup so a database that predates the removal
@@ -147,6 +152,15 @@ class Database:
                 if cols and column not in cols:
                     con.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
             con.executescript(_SCHEMA_PATH.read_text())
+            # Existing project-local advertisements and task requirements predate the catalog.
+            # Preserve them as editable definitions with an empty legacy description; no claim
+            # or required tag changes during this compatibility migration.
+            con.execute("INSERT OR IGNORE INTO project_capability(name,description,created_at,updated_at) "
+                        "SELECT DISTINCT value,'',0,0 FROM agent_capability, "
+                        "json_each(agent_capability.tags_json)")
+            con.execute("INSERT OR IGNORE INTO project_capability(name,description,created_at,updated_at) "
+                        "SELECT DISTINCT value,'',0,0 FROM graph_task, "
+                        "json_each(graph_task.required_capabilities_json)")
             # Add a first arrival record for projects that persisted instructions before the
             # delivery cursor existed. Handoffs append later arrivals, never reorder IDs.
             con.execute("INSERT INTO agent_instruction_delivery(instruction_id,recipient_user,"

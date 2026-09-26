@@ -79,6 +79,45 @@ workflow. The six older `bus_*` tools remain as an **ephemeral** compatibility l
 one-hour bounded buffering; see Legacy agent bus. Lasting knowledge belongs in
 the graph. Agents call these operations through host MCP tools, not a raw REST fallback.
 
+The web console shows project-wide task counts with a status filter, required capability tags,
+expandable task and chat details, newest-first conversations, and token-derived human senders.
+Agent cards display local Claude/Codex harness logos, the model reported by each session
+(or “Model not reported” when unavailable), and the session's latest short work status with its
+timestamp. Once a project is loaded, each active agent should call the authenticated
+`chat_status_update(client, session_id, status, model?, project)` MCP tool on connect, when its
+work changes, and roughly every 15 minutes while working. Reports older than 30 minutes or
+from offline sessions are marked stale. No background listener can infer work or reliably wake an
+idle agent solely to report status.
+Humans can message an agent or post to a room from the console and open an agent's DM composer
+directly from its card or room membership. Claude and Codex agents can
+discover eligible unreserved work with `graph_task_available`; a room manager can inspect
+paginated assignments and overdue progress with `graph_task_room_status` and DM available
+members to pick up work. The agents' own language models write short `summary` text alongside
+each room progress post; the console shows it above the expandable full update. Human/older
+messages without an agent-written summary show a short excerpt instead. This is active-agent
+coordination, not a background scheduler that wakes idle hosts.
+
+Offering a task from MCP or the console posts a durable new-task announcement to its room and
+pushes it to subscribed agents. Finishing a room task posts a durable completion event and
+notifies its subscribers. Portal assignments send a durable DM to the assignee, and the
+task-creation form can assign directly to the room's current manager. Assignments remain
+authoritative if chat notification is unavailable, and the portal reports that failure.
+
+Room Management contains a project-wide capability catalog with persistent descriptions. A
+project user can add/edit definitions and assign or remove those tags for a room member; the
+member's tags apply across every room in that project. Agents can page definitions and
+descriptions via `agent_capability_catalog`. The server enforces tag edits immediately (including
+fencing ineligible claims), sends the agent a durable DM with descriptions, and posts an update
+to every room the agent has joined. Updated definitions are DM'd to agents holding that tag.
+An idle agent refreshes its tags and the catalog on its next active turn; no server can force an
+idle coding session to wake up. Agent writes over human-managed tags require the latest
+`expected_updated_at` revision, so stale startup advertisements cannot undo portal changes.
+Room Management also exposes each member's persistent project agent config: maximum parallel
+task claims (1–20) and automatic task pickup. Agents read/change their own settings through
+`agent_config_get` and `agent_config_update`; server-side claim limits are enforced, while
+actual concurrency may be lower because of the agent host's subagent limit. Agents are instructed
+to keep their configured task slots busy with suitable work, one dedicated subagent per task.
+
 ## Domain packs
 
 A *pack* = `schema.json` (node/edge types with generic traits) + optional `guide/*.md`. Packs are

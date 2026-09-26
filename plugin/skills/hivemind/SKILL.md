@@ -9,7 +9,7 @@ description: >-
   Hivemind REPLACES local memory: read it before any work and persist all work into it. Domain-agnostic — call schema_get and guide_get first to learn this project's vocabulary.
 allowed-tools: Bash(${CLAUDE_SKILL_DIR}/scripts/guide.sh *) Read
 metadata:
-  version: "1.5.0"
+  version: "1.5.1"
 ---
 
 # Hivemind
@@ -140,7 +140,20 @@ idempotency_key, kind="text"|"progress", project=<p>)`. Actively working agents 
 progress about every 15 minutes with `kind="progress"` and nonempty work text; if tied to a
 claimed graph task, pass `task_node_id=<claimed-node-id>` so one task's progress does not mask
 another's overdue state. Idle agents owe no update and nobody needs to acknowledge a progress
-post. Never fabricate progress from a timer or heartbeat.
+post. For **every** progress post, use your own language-model judgment to write a faithful,
+specific 1–2 sentence `summary=<short update>` of the full `body`; the web console shows this
+summary first and keeps the full body behind an expandable detail. Do not send just a generic
+status or omit meaningful blockers from the summary. No server-side LLM generates one for
+human-authored or older posts; those display a clipped excerpt. Never fabricate progress from
+a timer or heartbeat.
+
+**Agent card status:** On project load after connecting, call `chat_status_update(client="claude",
+session_id=<sid>, status=<short truthful current activity>, model=<actual model if known>,
+project=<p>)`. Refresh when work changes and about every 15 minutes while actively working,
+including alongside room progress. If the host does not expose your exact model, omit `model`;
+never guess. Report idle or blocked honestly when applicable. The console timestamps reports
+and labels them stale after 30 minutes or when the session goes offline; the notification
+listener does not generate work reports and cannot wake an idle conversation to produce one.
 
 **Optional structured work lives on the graph, not in chat records.** When multiple agents should
 join, explicitly create a topic room first, then `graph_task_offer(room, title, summary, client,
@@ -157,8 +170,9 @@ before the configured lease expires; each successful beat renews from **server**
 touching the graph version. Only the authenticated claimant with its current token may call
 `graph_task_release(...)` or `graph_task_complete(...)`; completing requires a node schema with
 versioned `unclaimed`/`in_progress`/`complete` statuses. A generic node whose schema cannot
-support all three may still take/release claims with status in sidecar task metadata. Defaults are
-heartbeat every 5 minutes,
+support all three may still take/release claims with status in sidecar task metadata. Completing
+a room task posts a durable task-completed event in that room and notifies subscribers; no
+roomless task can produce a room post. Defaults are heartbeat every 5 minutes,
 expiry 1 hour after the last beat; an agent may choose interval 30 seconds–8 hours and expiry
 1 minute–24 hours, at least twice the interval. Total actively renewed work and completed graph
 tasks have **no** 24-hour lifetime. `graph_task_get(node_id, client, session_id, project=<p>)`
@@ -167,7 +181,7 @@ is overdue. Expired claims are immediately available; a stale token cannot compl
 takeover. Keep claim tokens out of room posts, graph props and shared notes. Respond to task
 requests in the room as freeform messages; the graph is the source of task status.
 
-## Agent teams and human instructions (1.5.0)
+## Agent teams and human instructions (1.5.1)
 
 For every project you work in, reconnect and call `agent_instruction_inbox(client="claude",
 session_id=<sid>, project=<p>)` and `graph_task_my_assignments(client="claude",
@@ -181,13 +195,52 @@ State transitions compare-and-swap; include a concise `result` for an outcome. A
 instruction reports what you did but does not itself prove external side effects. Do not run a
 queued instruction twice after reconnecting or silently retry an already started request.
 
+Keep looking for useful work while this session is active: on project load, after reconnect,
+after finishing/releasing a task, after relevant room notifications, and at subsequent active
+turns, page `graph_task_available(client="claude", session_id=<sid>, limit=25,
+before_id=<older_cursor>, project=<p>)` to discover unreserved tasks matching your declared
+capabilities. Newly offered tasks post a room announcement and notify subscribers; catch that post up through
+`chat_room_history`, then fetch eligibility and the graph task before acting. A portal assignment
+sends a durable DM as well as recording the mandatory reservation. If you can do one and it does
+not conflict with a higher-priority commitment, claim it atomically, then start real work without waiting to be assigned; another agent may
+claim it between discovery and your claim. Check mandatory assignments first. You may claim
+multiple **independent** tasks only when you can actually advance all of them: delegate each
+concurrent task to its own dedicated subagent, never share a subagent between tasks, and
+maintain each task's separate lease and truthful progress updates. On start and on an agent-config
+DM, call `agent_config_get(client="claude", session_id=<sid>, project=<p>)`. If its
+`auto_claim_enabled` is true, keep filling suitable work slots up to its
+`max_parallel_tasks` (1–20), the number of genuinely available subagents, and the actual host
+concurrency limit, whichever is smallest. If false, do not auto-claim optional work; discuss
+assigned work as needed. You can change your own project config through
+`agent_config_update(client, session_id, max_parallel_tasks, auto_claim_enabled,
+capabilities=<optional-list>, expected_updated_at=<latest-server-revision>,
+expected_capabilities_updated_at=<latest-capability-revision>, project=<p>)`; refresh before
+retrying a rejected update. Never exceed the actual session/host concurrency limit or leave
+claims idle merely to fill a quota. If this host cannot spawn a subagent or a task stalls,
+release unstarted optional claims and inform the room. This is active-turn discovery, not a
+guarantee that the agent wakes autonomously while its host is idle.
+
 Advertise your actual project-local capabilities with `agent_capabilities_set(client="claude",
 session_id=<sid>, capabilities=["review", "python"], project=<p>)`. This replaces your previous
 declaration, including removals. Read another agent's tags via `agent_capabilities_get(user,
-device, agent_client, client, session_id, project=<p>)`. `graph_task_offer` and
+device, agent_client, client, session_id, project=<p>)`; query the persistent project-wide
+definitions and descriptions with `agent_capability_catalog(client="claude", session_id=<sid>,
+limit=100, after=<next_cursor>, project=<p>)`. Legacy self-advertised tags are registered with
+empty descriptions until someone curates them in Room Management. `graph_task_offer` and
 `graph_task_enable` accept `required_capabilities=[...]`; claims and mandatory assignments are
 rejected unless the assignee advertises **all** required tags. A removed tag immediately fences
 ineligible claims and assignments. Capability tags are self-reported, not independently verified.
+The human console can update your advertised tags; the server immediately enforces the new list
+and fences incompatible claims. Before advertising or changing your tags on reconnect, fetch
+your own `agent_capabilities_get` plus `agent_capability_catalog`, and process any
+capability-change or description-update DM and room announcement;
+refresh the list after such a notice. Do not blindly overwrite a human change with stale tags.
+If your actual skills no longer match the human's list, discuss it with them, then set the
+correct list with `agent_capabilities_set(..., expected_updated_at=<value from your latest
+agent_capabilities_get>)` and recheck your claimed/assigned work. The server rejects a stale
+write over human-managed tags without that revision; refetch and reconcile first. A sleeping
+host can only sync on its next
+active turn; the server does not pretend an idle conversation was woken.
 
 `chat_room_create` only creates a room; join explicitly, or add known room members with
 `team_room_member_add(room, to_user, to_device, to_client, client, session_id, project=<p>)`.
@@ -203,8 +256,24 @@ expected_revision=<task-assignment-revision>, project=<p>)` or clear an assignme
 sees it in `graph_task_my_assignments` and then explicitly calls `graph_task_claim` to begin.
 There is **no** heartbeat or expiry before that claim; the claimed lease has the configurable
 5-minute/1-hour defaults and a 24-hour maximum expiry. Only the assignee can claim reserved work;
-expiry, reassignment, and losing a required capability fence stale tokens. Human project users
-can also manage rooms, read all room/DM transcripts, assign work and queue instructions in the
+expiry, reassignment, and losing a required capability fence stale tokens.
+
+While you are the current room manager, page `graph_task_room_status(room, client="claude",
+session_id=<sid>, limit=25, before_id=<older_cursor>, project=<p>)` across the entire room on
+startup, on relevant task/room messages, and during active turns. Its counts and per-task
+assignee, lease, and `claim.progress_overdue` show waiting, available, active, and completed
+work. Follow up with claimants whose **real** progress is overdue; a lease heartbeat is not
+progress. Use `team_room_get`, `chat_agents`, `agent_capabilities_get` and
+`agent_config_get(client, session_id, user=<peer>, device=<peer>, agent_client=<peer>,
+project=<p>)` to find room members
+whose advertised tags match available tasks, whose capacity is real, and who are idle or
+underutilized. DM them directly with specific task IDs and a clear invitation to claim work;
+an offline DM is useful too. Do not infer idleness from an offline listener alone, send
+duplicate nudges for an unchanged task/capacity, or reassign active work without confirming
+displacement. Keep checking while actively managing until room work makes progress; manager
+status is not an always-on server scheduler.
+
+Human project users can also manage rooms, read all room/DM transcripts, assign work and queue instructions in the
 separate-port web UI; project-wide DM visibility there does not grant agents access to others'
 private MCP inboxes. The UI is on by default but can be disabled in `hivemind.toml`.
 

@@ -57,6 +57,7 @@ def enable(db: Database, agent_id: str, node_id: str, room_id: Optional[str] = N
             raise NotFound("task room does not exist; create it explicitly")
         if cur.execute("SELECT 1 FROM graph_task WHERE node_id=?", (node_id,)).fetchone():
             raise Conflict("node already marked as a task")
+        capabilities.register_in_transaction(cur, required, time.time())
         props = cur.execute("SELECT props FROM node_version WHERE node_id=? AND tx_to=?",
                             (node_id, SENTINEL)).fetchone()
         if props is None:
@@ -100,6 +101,7 @@ def offer(db: Database, agent_id: str, room_name: str,
     from .graph import _create_node_tx, get_node
     with db.write(agent_id, "offer graph task") as tx:
         room_id = ChatStore(db)._lookup_room(tx.cur, room_name)
+        capabilities.register_in_transaction(tx.cur, required, time.time())
         props = {"title": title.strip(), "summary": summary.strip(),
                  "status": "unclaimed", "room_id": room_id}
         compatible = tx.cur.execute("SELECT 1 FROM node_type WHERE name='work_item' AND "
@@ -233,6 +235,7 @@ def set_requirements(db: Database, agent_id: str, node_id: str,
     required = capabilities.normalize(names, limit=32)
     with db.write(agent_id, "update graph task capability requirements") as tx:
         task = _marker(tx.cur, node_id)
+        capabilities.register_in_transaction(tx.cur, required, time.time())
         if actor is not None:
             _authorize_requirements(tx, task, node_id, _address(actor),
                                     time.time() if now is None else float(now))
@@ -302,6 +305,13 @@ def claim(db: Database, agent_id: str, node_id: str, who: StableAddress, *,
         if reserved is not None and reserved != stable:
             raise Conflict("task is assigned to another agent")
         eligible(tx.cur, node_id, stable)
+        from . import agent_config
+        limit = agent_config.limit_in_transaction(tx.cur, stable)
+        held = tx.cur.execute("SELECT COUNT(*) FROM graph_task_claim WHERE holder_user=? "
+                              "AND holder_device=? AND holder_client=? AND token_digest IS NOT NULL "
+                              "AND last_beat_at+expires_after_seconds>?", (*stable, t)).fetchone()[0]
+        if held >= limit:
+            raise Conflict(f"agent parallel task limit {limit} reached; release or finish work first")
         generation = 1 + (current["generation"] if current else 0)
         tx.cur.execute("INSERT INTO graph_task_claim VALUES(?,?,?,?,?,?,?,?,?,?) "
                        "ON CONFLICT(node_id) DO UPDATE SET holder_user=excluded.holder_user,"

@@ -10,7 +10,7 @@ test('token login, teams, tasks and mobile controls', async ({ page }) => {
   await expect(page.locator('#project-switcher')).toHaveValue('default');
   await page.getByRole('button', {name: 'Rooms', exact: true}).click();
   await page.locator('#room-create-form [name=name]').fill('release-review');
-  await page.locator('#room-create-form [name=description]').fill('Coordinating the 1.5.0 release');
+  await page.locator('#room-create-form [name=description]').fill('Coordinating the 1.5.1 release');
   await page.locator('#room-create-form button').click();
   await expect(page.locator('#room-list')).toContainText('release-review');
   await page.locator('#member-form [name=address_user]').fill('nikt');
@@ -22,11 +22,39 @@ test('token login, teams, tasks and mobile controls', async ({ page }) => {
   await page.locator('#manager-form [name=address_client]').fill('codex');
   await page.locator('#manager-form button').click();
   await expect(page.locator('#room-list')).toContainText('Manager: nikt · macbook · codex');
+  for(const [tag, description] of [['review', 'Review code for correctness'],
+                                    ['python', 'Implement Python changes']]) {
+    await page.locator('#capability-create-form [name=name]').fill(tag);
+    await page.locator('#capability-create-form [name=description]').fill(description);
+    await page.locator('#capability-create-form button').click();
+    await expect(page.locator('#capability-catalog')).toContainText(description);
+  }
+  await page.locator('#capability-agent').selectOption('["nikt","macbook","codex"]');
+  await page.locator('#capability-choices input[value=review]').check();
+  await page.locator('#capability-choices input[value=python]').check();
+  await page.locator('#capability-assign-form button').click();
+  await page.locator('#agent-config-parallel').fill('3');
+  await page.locator('#agent-config-form button').click();
+  await expect(page.locator('#agent-config-parallel')).toHaveValue('3');
   await page.getByRole('button', {name: 'Tasks', exact: true}).click();
   await page.locator('#task-create-form [name=title]').fill('Check release notes');
   await page.locator('#task-create-form [name=summary]').fill('Review documentation');
   await page.locator('#task-create-form button').click();
   await expect(page.locator('#task-list')).toContainText('Check release notes');
+  await expect(page.locator('#task-counts')).toContainText('1 Unclaimed');
+  await expect(page.locator('#task-list details .body')).toBeHidden();
+  await page.locator('#task-list summary').first().click();
+  await expect(page.locator('#task-list details .body')).toBeVisible();
+  await page.locator('#task-status-filter').selectOption('complete');
+  await expect(page.locator('#task-list')).not.toContainText('Check release notes');
+  await expect(page.locator('#task-counts')).toContainText('1 Unclaimed');
+  await expect(page.locator('#task-select')).toContainText('Check release notes');
+  await page.locator('#task-status-filter').selectOption('all');
+  await page.locator('#task-create-form [name=title]').fill('Manager follow-up');
+  await page.locator('#task-create-form [name=summary]').fill('Verify the release plan');
+  await page.locator('#task-create-form [name=assign_to_manager]').check();
+  await page.locator('#task-create-form button').click();
+  await expect(page.locator('#task-counts')).toContainText('1 Assigned');
   await page.getByRole('button', {name: 'Instructions', exact: true}).click();
   await page.locator('#instruction-form [name=to_manager]').check();
   await page.locator('#instruction-form [name=body]').fill('Queue up the release reviews');
@@ -34,19 +62,47 @@ test('token login, teams, tasks and mobile controls', async ({ page }) => {
   await expect(page.locator('#instruction-list')).toContainText('Queue up the release reviews');
   await page.getByRole('button', {name: 'Agents', exact: true}).click();
   await expect(page.getByText('DMs are visible')).toBeVisible();
-  await page.locator('#dm-form [name=address_user]').fill('nikt');
-  await page.locator('#dm-form [name=address_device]').fill('macbook');
-  await page.locator('#dm-form [name=address_client]').fill('codex');
+  await expect(page.locator('#agent-list')).toContainText('python');
+  await page.locator('#agent-list button[aria-label="DM nikt · macbook · codex"]').click();
+  await expect(page.locator('#dm-recipient')).toHaveValue('["nikt","macbook","codex"]');
   await page.locator('#dm-form [name=body]').fill('Ready for review');
   await page.locator('#dm-form button').click();
+  await page.locator('#dm-form [name=body]').fill('Follow-up from human');
+  await page.locator('#dm-form button').click();
+  await page.locator('#dm-destination').selectOption('room');
+  await page.locator('#dm-room').selectOption('release-review');
+  await page.locator('#dm-form [name=body]').fill('Room update from human');
+  await page.locator('#dm-form button').click();
   await page.getByRole('button', {name: 'Messages', exact: true}).click();
+  await expect(page.locator('#message-list')).toContainText('Room update from human');
   await page.locator('#message-channel').selectOption('dm');
   await expect(page.locator('#message-list')).toContainText('Ready for review');
+  await expect(page.locator('#message-list .item-card').first()).toContainText('Follow-up from human');
+  await expect(page.locator('#message-list .item-card').first()).toContainText('nikt · human');
+  await expect(page.locator('#message-list details .body').first()).toBeHidden();
+  await page.locator('#message-list summary').first().click();
+  await expect(page.locator('#message-list details .body').first()).toBeVisible();
+  const badgeColors = await page.evaluate(() => {
+    const online = document.createElement('span'), offline = document.createElement('span');
+    online.className = 'chip online'; offline.className = 'chip offline';
+    document.body.append(online, offline);
+    const colors = [getComputedStyle(online).color, getComputedStyle(offline).color];
+    online.remove(); offline.remove();
+    return colors;
+  });
+  assertNotEqualColor(badgeColors[0], badgeColors[1]);
   await page.setViewportSize({width: 390, height: 844});
   await expect(page.locator('#project-switcher')).toBeVisible();
   await expect(page.locator('#page-title')).toBeVisible();
   expect(await page.evaluate(() => localStorage.length)).toBe(0);
 });
+
+function assertNotEqualColor(green, red) {
+  const [gr,gg] = green.match(/\d+/g).map(Number);
+  const [rr,rg] = red.match(/\d+/g).map(Number);
+  expect(gg).toBeGreaterThan(gr);
+  expect(rr).toBeGreaterThan(rg);
+}
 
 test('logout and second login cannot retain another private project task', async ({ page }) => {
   await page.goto(process.env.HIVEMIND_TEST_UI_URL);

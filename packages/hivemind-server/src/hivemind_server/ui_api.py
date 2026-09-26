@@ -7,7 +7,7 @@ import time
 
 from starlette.responses import JSONResponse
 
-from . import assignments, capabilities, graph, graph_tasks, instructions, teams, ui_agents, ui_chat, ui_rooms
+from . import agent_config, assignments, capabilities, graph_tasks, instructions, task_announcements, task_listing, teams, ui_agents, ui_capabilities, ui_chat, ui_rooms
 from . import chat_ws
 from .chat import ChatStore, _address
 from .db import Conflict, Invalid, NotFound
@@ -55,6 +55,17 @@ async def handle(req, p, who, identities: IdentityStore):
                      p.name, who.user, path[0], path[1] if len(path) > 1 else None)
         store = ChatStore.for_project(db, p.dir)
         if method == "GET":
+            if path == ["capabilities"]:
+                return _answer(capabilities.catalog(db, after=req.query_params.get("after"),
+                                                    limit=_page(req)))
+            if path == ["agents", "capabilities"]:
+                address = _recipient([req.query_params.get(part) for part in
+                                      ("user", "device", "client")], identities, p)
+                return _answer(capabilities.get(db, address))
+            if path == ["agents", "config"]:
+                address = _recipient([req.query_params.get(part) for part in
+                                      ("user", "device", "client")], identities, p)
+                return _answer(agent_config.get(db, address))
             if path == ["summary"]:
                 now = time.time()
                 hub = chat_ws.hub_for(p.dir)
@@ -123,28 +134,12 @@ async def handle(req, p, who, identities: IdentityStore):
                                 "member_count": page["member_count"]})
             if path == ["tasks"]:
                 limit = _page(req)
-                before_id = req.query_params.get("before_id")
-                if before_id is not None and len(before_id) > 64:
-                    raise Invalid("invalid before_id cursor")
-                with db.read() as cur:
-                    rows = cur.execute("SELECT node_id FROM graph_task WHERE node_id<? "
-                                       "ORDER BY node_id DESC LIMIT ?",
-                                       (before_id or "Z", limit + 1)).fetchall()
-                has_older = len(rows) > limit
-                rows = rows[:limit]
-                items = []
-                for row in rows:
-                    nid = row["node_id"]
-                    # `current` is None for a node with no live head version, and indexing that
-                    # raised TypeError -> 422 for the WHOLE page. With the console refreshing
-                    # tasks every 20 seconds, one degenerate row made the Tasks view permanently
-                    # unusable rather than showing that row without a title.
-                    current = graph.get_node(db, node_id=nid)["current"] or {}
-                    props = current.get("props") or {}
-                    items.append({**assignments.view(db, nid), **graph_tasks.read(db, nid),
-                                  "title": props.get("title"), "summary": props.get("summary")})
-                return _answer({"tasks": items,
-                                "older_cursor": rows[-1]["node_id"] if has_older else None})
+                page = task_listing.page(db, status=req.query_params.get("status", "all"),
+                    before_id=req.query_params.get("before_id"), limit=limit, with_counts=True)
+                page["tasks"] = [{**assignments.view(db, item["node_id"]),
+                                  **graph_tasks.read(db, item["node_id"]), **item}
+                                 for item in page["tasks"]]
+                return _answer(page)
             if path == ["instructions"]:
                 return _answer(instructions.list_project(db,
                     before_id=req.query_params.get("before_id"), limit=_page(req)))
@@ -164,6 +159,34 @@ async def handle(req, p, who, identities: IdentityStore):
                 return _answer(ui_chat.mark_console_read(db, actor,
                     channel=data.get("channel"), room=data.get("room"),
                     seq=data.get("up_to_seq")))
+            if path == ["messages", "room"]:
+                room = data.get("room")
+                sent = ui_chat.send_human_room(db, who, room, data.get("body"),
+                                               data.get("idempotency_key"))
+                delivered = await ui_chat.notify_human_room(p.dir, db, p.meta, identities,
+                                                             room, sent)
+                return _answer({**sent, "notified_live": delivered > 0,
+                                "notified_count": delivered}, 201)
+            if path == ["agents", "capabilities"]:
+                target = _recipient(data.get("address"), identities, p)
+                if "expected_updated_at" not in data:
+                    raise Invalid("expected_updated_at is required; refresh agent capabilities")
+                return _answer(await ui_capabilities.replace_and_notify(
+                    p, identities, who, target, data.get("capabilities"),
+                    data["expected_updated_at"]))
+            if path == ["agents", "config"]:
+                target = _recipient(data.get("address"), identities, p)
+                if "expected_updated_at" not in data:
+                    raise Invalid("expected_updated_at is required; refresh agent config")
+                return _answer(await ui_capabilities.update_agent_config(
+                    p, identities, who, target, max_parallel_tasks=data.get("max_parallel_tasks"),
+                    auto_claim_enabled=data.get("auto_claim_enabled"),
+                    expected_updated_at=data["expected_updated_at"],
+                    capability_tags=data.get("capabilities"),
+                    expected_capabilities_updated_at=data.get("expected_capabilities_updated_at")))
+            if path == ["capabilities"]:
+                return _answer(await ui_capabilities.define_and_notify(
+                    p, identities, who, data.get("name"), data.get("description")))
             if path == ["rooms"]:
                 return _answer(store.create_room(data.get("name"), data.get("description"), actor), 201)
             if len(path) == 3 and path[0] == "rooms" and path[2] == "members":
@@ -175,9 +198,44 @@ async def handle(req, p, who, identities: IdentityStore):
                 return _answer(teams.promote(db, path[1], _recipient(data.get("address"),
                     identities, p), actor, expected_revision=data.get("expected_revision")))
             if path == ["tasks"]:
-                return _answer(graph_tasks.offer(db, who.user, data.get("room"),
+                to_manager = data.get("assign_to_manager", False)
+                if type(to_manager) is not bool:
+                    raise Invalid("assign_to_manager must be true or false")
+                room = data.get("room")
+                manager = None
+                if to_manager:
+                    manager = teams.manager(db, room)["manager"]
+                    if manager is None:
+                        raise Invalid("room has no manager to assign this task to")
+                    manager = _recipient(manager, identities, p)
+                offered = graph_tasks.offer(db, who.user, data.get("room"),
                     data.get("title"), data.get("summary"),
-                    required_capabilities=data.get("required_capabilities")), 201)
+                    required_capabilities=data.get("required_capabilities"))
+                if manager is not None:
+                    try:
+                        assigned = assignments.assign(db, who.user, offered["node_id"], manager,
+                                                       expected_revision=0, manager_actor=manager)
+                        offered["assignment"] = assigned
+                        dm = task_announcements.announce_assignment(
+                            db, p.dir, offered["node_id"], manager, (who.user, who.device, "human"),
+                            assigned["revision"])
+                        if dm is None:
+                            offered["assignment_notification"] = "could not persist; assignment remains queued"
+                        else:
+                            offered["assignment_notification"] = "stored"
+                            offered["assignment_notified_live"] = await ui_chat.notify_human_dm(
+                                p.dir, manager, dm)
+                    except (Conflict, Invalid) as exc:
+                        offered["assignment_warning"] = str(exc)
+                message = task_announcements.announce_offer(
+                    db, p.dir, room, offered, (who.user, who.device, "human"),
+                    sender_origin="human_ui", assigned=offered.get("assignment") is not None)
+                if message is None:
+                    return _answer({**offered, "room_notification": "could not persist; task remains available"}, 201)
+                delivered = await ui_chat.notify_human_room(p.dir, db, p.meta, identities,
+                                                             room, message)
+                return _answer({**offered, "room_notification": "stored",
+                                "notified_count": delivered}, 201)
             if len(path) == 3 and path[0] == "tasks" and path[2] == "assign":
                 # Required, not `data.get(...)`: assign() only compares the revision when it is
                 # not None, so a body that simply omitted the key performed an UNFENCED assign
@@ -186,10 +244,19 @@ async def handle(req, p, who, identities: IdentityStore):
                 revision = data.get("expected_revision")
                 if type(revision) is not int or revision < 0:
                     raise Invalid("expected_revision must be the current assignment revision")
-                return _answer(assignments.assign(db, who.user, path[1], _recipient(
-                    data.get("address"), identities, p),
+                recipient = _recipient(data.get("address"), identities, p)
+                assigned = assignments.assign(db, who.user, path[1], recipient,
                     expected_revision=revision,
-                    confirm_displace=data.get("confirm_displace") is True))
+                    confirm_displace=data.get("confirm_displace") is True)
+                message = task_announcements.announce_assignment(
+                    db, p.dir, path[1], recipient, (who.user, who.device, "human"),
+                    assigned["revision"])
+                if message is None:
+                    return _answer({**assigned, "assignment_notification":
+                                    "could not persist; assignment remains queued"})
+                live = await ui_chat.notify_human_dm(p.dir, recipient, message)
+                return _answer({**assigned, "assignment_notification": "stored",
+                                "assignment_notified_live": live})
             if len(path) == 3 and path[0] == "tasks" and path[2] == "clear":
                 return _answer(assignments.clear(db, who.user, path[1], "browser_unassign",
                     expected_revision=data.get("expected_revision"),

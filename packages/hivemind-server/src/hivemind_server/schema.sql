@@ -144,6 +144,7 @@ CREATE TABLE IF NOT EXISTS chat_message (
   sender_origin TEXT NOT NULL DEFAULT 'agent',
   target_key     TEXT NOT NULL,
   body           TEXT NOT NULL,
+  summary        TEXT,
   body_bytes     INTEGER NOT NULL,
   message_kind   TEXT NOT NULL CHECK (message_kind IN ('text', 'progress')),
   task_node_id   TEXT REFERENCES node(node_id),
@@ -179,6 +180,9 @@ CREATE TABLE IF NOT EXISTS chat_session (
   client           TEXT NOT NULL,
   session_id       TEXT NOT NULL,
   last_activity_at REAL NOT NULL,
+  model_name       TEXT,
+  work_status      TEXT,
+  work_updated_at  REAL,
   PRIMARY KEY (user, device, client, session_id)
 );
 CREATE INDEX IF NOT EXISTS ix_chat_session_last_activity ON chat_session(last_activity_at);
@@ -198,7 +202,24 @@ CREATE TABLE IF NOT EXISTS agent_capability (
   client        TEXT NOT NULL,
   tags_json     TEXT NOT NULL CHECK (json_valid(tags_json)),
   updated_at    REAL NOT NULL,
+  human_managed INTEGER NOT NULL DEFAULT 0 CHECK (human_managed IN (0,1)),
   PRIMARY KEY (user, device, client)
+);
+CREATE TABLE IF NOT EXISTS agent_config (
+  user                TEXT NOT NULL,
+  device              TEXT NOT NULL,
+  client              TEXT NOT NULL,
+  max_parallel_tasks  INTEGER NOT NULL DEFAULT 20 CHECK(max_parallel_tasks BETWEEN 1 AND 20),
+  auto_claim_enabled  INTEGER NOT NULL DEFAULT 1 CHECK(auto_claim_enabled IN (0,1)),
+  updated_at          REAL NOT NULL,
+  human_managed       INTEGER NOT NULL DEFAULT 0 CHECK(human_managed IN (0,1)),
+  PRIMARY KEY(user,device,client)
+);
+CREATE TABLE IF NOT EXISTS project_capability (
+  name        TEXT PRIMARY KEY,
+  description TEXT NOT NULL,
+  created_at  REAL NOT NULL,
+  updated_at  REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS chat_usage (
   id            INTEGER PRIMARY KEY CHECK (id=1),

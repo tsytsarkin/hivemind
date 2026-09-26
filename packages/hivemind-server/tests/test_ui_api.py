@@ -11,10 +11,19 @@ from hivemind_server.ui_app import build_ui_app
 
 
 @pytest.mark.anyio
-async def test_console_creates_team_assigns_task_and_queues_manager_instruction(env):
+async def test_console_creates_team_assigns_task_and_queues_manager_instruction(env, monkeypatch):
+    from hivemind_server import ui_chat
     mcp, project, _ = env
     ids = IdentityStore(mcp.state.cfg.identities_path)
     nik, ana = ids.mint("nik", "mac"), ids.mint("ana", "laptop")
+    frames = []
+
+    class Hub:
+        async def notify(self, target, frame):
+            frames.append((target, frame))
+            return 1
+
+    monkeypatch.setattr(ui_chat.chat_ws, "hub_for", lambda path: Hub())
     app = build_ui_app(mcp.state.cfg, mcp.state.registry, ids)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
                                  base_url="http://testserver") as c:
@@ -45,6 +54,12 @@ async def test_console_creates_team_assigns_task_and_queues_manager_instruction(
                                       "expected_revision": 0})
         assert assigned.status_code == 200 and assigned.json()["state"] == "assigned_waiting", assigned.text
         assert assignments.view(project.db, nid)["assignee"] == ("ana", "laptop", "claude")
+        from hivemind_server.chat import ChatStore
+        notice = ChatStore(project.db).inbox(("ana", "laptop", "claude"))["messages"]
+        assert len(notice) == 1 and nid in notice[0]["body"]
+        assert notice[0]["sender"] == ("nik", "mac", "human")
+        assert any(target == ("ana", "laptop", "claude") and frame["id"] == notice[0]["id"]
+                   for target, frame in frames)
         queued = await c.post(root + "/instructions", headers=headers,
                               json={"room": "reviews", "to_manager": True,
                                     "body": "Queue the next patch", "idempotency_key": "once"})
@@ -64,6 +79,152 @@ async def test_console_creates_team_assigns_task_and_queues_manager_instruction(
         assert (await c.post(root + f"/tasks/{nid}/assign", headers=headers,
                              json={"address": ["nik", "mac", "codex"]})).status_code == 403
     assert teams.manager(project.db, "reviews")["manager"] == ("nik", "mac", "codex")
+
+
+@pytest.mark.anyio
+async def test_console_task_offer_announces_to_room_subscribers(env, monkeypatch):
+    from hivemind_server import ui_chat
+    from hivemind_server.chat import ChatStore
+    mcp, project, _ = env
+    ids = IdentityStore(mcp.state.cfg.identities_path)
+    nik, _ = ids.mint("nik", "mac"), ids.mint("ana", "laptop")
+    store = ChatStore(project.db)
+    store.create_room("reviews", "Review work", ("nik", "mac", "codex"))
+    store.join("reviews", ("ana", "laptop", "claude"))
+    frames = []
+
+    class Hub:
+        async def notify(self, target, frame):
+            frames.append((target, frame))
+            return 1
+
+    monkeypatch.setattr(ui_chat.chat_ws, "hub_for", lambda path: Hub())
+    app = build_ui_app(mcp.state.cfg, mcp.state.registry, ids)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                 base_url="http://testserver") as c:
+        csrf = (await c.post("/api/login", json={"token": nik})).json()["csrf_token"]
+        offered = await c.post(f"/api/projects/{project.name}/tasks", headers={"x-csrf-token": csrf},
+                               json={"room": "reviews", "title": "Review patch",
+                                     "summary": "Check parser carefully"})
+    assert offered.status_code == 201
+    posts = store.history("reviews")["messages"]
+    assert len(posts) == 1 and offered.json()["node_id"] in posts[0]["body"]
+    assert posts[0]["sender_origin"] == "human_ui"
+    assert frames[0][0] == ("ana", "laptop", "claude")
+
+
+@pytest.mark.anyio
+async def test_console_can_offer_task_to_room_manager_and_notify_them(env):
+    from hivemind_server.chat import ChatStore
+    mcp, project, _ = env
+    ids = IdentityStore(mcp.state.cfg.identities_path)
+    nik, _ = ids.mint("nik", "mac"), ids.mint("ana", "laptop")
+    store = ChatStore(project.db)
+    owner, manager = ("nik", "mac", "codex"), ("ana", "laptop", "claude")
+    store.create_room("reviews", "Review work", owner)
+    app = build_ui_app(mcp.state.cfg, mcp.state.registry, ids)
+    root = f"/api/projects/{project.name}/tasks"
+    payload = {"room": "reviews", "title": "Audit", "summary": "Review patch",
+               "assign_to_manager": True}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                 base_url="http://testserver") as c:
+        csrf = (await c.post("/api/login", json={"token": nik})).json()["csrf_token"]
+        headers = {"x-csrf-token": csrf}
+        missing = await c.post(root, headers=headers, json=payload)
+        assert missing.status_code == 422 and (await c.get(root)).json()["counts"]["available"] == 0
+        teams.add_member(project.db, "reviews", manager, owner)
+        teams.promote(project.db, "reviews", manager, owner, expected_revision=0)
+        offered = await c.post(root, headers=headers, json=payload)
+    assert offered.status_code == 201, offered.text
+    node_id = offered.json()["node_id"]
+    assert assignments.view(project.db, node_id)["assignee"] == manager
+    inbox = store.inbox(manager)["messages"]
+    assert len(inbox) == 1 and node_id in inbox[0]["body"]
+    assert inbox[0]["sender"] == ("nik", "mac", "human")
+
+
+@pytest.mark.anyio
+async def test_console_updates_agent_capabilities_fences_claim_and_notifies_rooms(env, monkeypatch):
+    from hivemind_server import capabilities, graph_tasks, ui_chat
+    from hivemind_server.chat import ChatStore
+    mcp, project, _ = env
+    ids = IdentityStore(mcp.state.cfg.identities_path)
+    nik, _ = ids.mint("nik", "mac"), ids.mint("ana", "laptop")
+    owner, peer = ("nik", "mac", "codex"), ("ana", "laptop", "claude")
+    store = ChatStore(project.db)
+    store.create_room("reviews", "Review work", owner)
+    store.join("reviews", peer)
+    capabilities.replace(project.db, peer, ["review", "python"])
+    revision = capabilities.get(project.db, peer)["updated_at"]
+    node = graph_tasks.offer(project.db, "setup", "reviews", "Audit", "Review patch",
+                             required_capabilities=["review"])["node_id"]
+    graph_tasks.claim(project.db, "setup", node, peer)
+    frames = []
+
+    class Hub:
+        async def notify(self, target, frame):
+            frames.append((target, frame))
+            return 1
+
+    monkeypatch.setattr(ui_chat.chat_ws, "hub_for", lambda path: Hub())
+    app = build_ui_app(mcp.state.cfg, mcp.state.registry, ids)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                 base_url="http://testserver") as c:
+        csrf = (await c.post("/api/login", json={"token": nik})).json()["csrf_token"]
+        path = f"/api/projects/{project.name}/agents/capabilities"
+        invalid = await c.post(path, headers={"x-csrf-token": csrf},
+                               json={"address": list(peer), "capabilities": ["Uppercase"],
+                                     "expected_updated_at": revision})
+        assert invalid.status_code == 422
+        missing_csrf = await c.post(path, json={"address": list(peer), "capabilities": ["python"]})
+        assert missing_csrf.status_code == 403
+        changed = await c.post(f"/api/projects/{project.name}/agents/capabilities",
+                               headers={"x-csrf-token": csrf},
+                               json={"address": list(peer), "capabilities": ["python"],
+                                     "expected_updated_at": revision})
+        stale = await c.post(path, headers={"x-csrf-token": csrf},
+                             json={"address": list(peer), "capabilities": ["review"],
+                                   "expected_updated_at": revision})
+    assert changed.status_code == 200, changed.text
+    assert stale.status_code == 409
+    assert capabilities.get(project.db, peer)["capabilities"] == ["python"]
+    assert graph_tasks.read(project.db, node)["effective_status"] == "unclaimed"
+    assert len(store.inbox(peer)["messages"]) == 1
+    posts = store.history("reviews")["messages"]
+    assert len(posts) == 1 and "capabilities" in posts[0]["body"].lower()
+    assert any(target == peer for target, _ in frames)
+
+
+@pytest.mark.anyio
+async def test_console_defines_project_capability_and_pushes_description_to_assigned_agent(env):
+    from hivemind_server import capabilities
+    from hivemind_server.chat import ChatStore
+    mcp, project, _ = env
+    ids = IdentityStore(mcp.state.cfg.identities_path)
+    nik, _ = ids.mint("nik", "mac"), ids.mint("ana", "laptop")
+    peer = ("ana", "laptop", "claude")
+    capabilities.replace(project.db, peer, ["review"])
+    ChatStore(project.db).create_room("reviews", "Review work", ("nik", "mac", "codex"))
+    ChatStore(project.db).join("reviews", peer)
+    app = build_ui_app(mcp.state.cfg, mcp.state.registry, ids)
+    root = f"/api/projects/{project.name}"
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                 base_url="http://testserver") as c:
+        csrf = (await c.post("/api/login", json={"token": nik})).json()["csrf_token"]
+        headers = {"x-csrf-token": csrf}
+        saved = await c.post(root + "/capabilities", headers=headers,
+                             json={"name": "review", "description": "Assess code for correctness"})
+        listed = await c.get(root + "/capabilities")
+        invalid = await c.post(root + "/agents/capabilities", headers=headers,
+                               json={"address": peer, "capabilities": ["unknown"]})
+    assert saved.status_code == 200 and listed.status_code == 200
+    assert listed.json()["capabilities"][0]["description"] == "Assess code for correctness"
+    assert invalid.status_code == 422
+    assert capabilities.get(project.db, peer)["capabilities"] == ["review"]
+    dm = ChatStore(project.db).inbox(peer)["messages"]
+    assert len(dm) == 1 and "Assess code for correctness" in dm[0]["body"]
+    room = ChatStore(project.db).history("reviews")["messages"]
+    assert len(room) == 1 and "Assess code for correctness" in room[0]["body"]
 
 
 @pytest.mark.anyio
@@ -150,6 +311,45 @@ async def test_browser_dm_notifies_connected_recipient_after_persisting(env, mon
 
 
 @pytest.mark.anyio
+async def test_browser_room_post_notifies_subscribed_agent_and_uses_token_identity(env, monkeypatch):
+    from hivemind_server import ui_chat
+    from hivemind_server.chat import ChatStore
+    mcp, project, _ = env
+    ids = IdentityStore(mcp.state.cfg.identities_path)
+    token = ids.mint("nik", "mac")
+    ids.mint("ana", "laptop")
+    who, peer = ("nik", "mac", "human"), ("ana", "laptop", "claude")
+    store = ChatStore(project.db)
+    store.create_room("reviews", "Review", who)
+    store.join("reviews", peer)
+    frames = []
+
+    class Hub:
+        async def notify(self, target, frame):
+            frames.append((target, frame))
+            return 1
+
+    monkeypatch.setattr(ui_chat.chat_ws, "hub_for", lambda path: Hub())
+    app = build_ui_app(mcp.state.cfg, mcp.state.registry, ids)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                 base_url="http://testserver") as c:
+        csrf = (await c.post("/api/login", json={"token": token})).json()["csrf_token"]
+        root = f"/api/projects/{project.name}/messages/room"
+        data = {"room": "reviews", "body": "Please review", "idempotency_key": "once",
+                "sender": ["ana", "laptop", "claude"]}
+        no_csrf = await c.post(root, json=data)
+        sent = await c.post(root, json=data, headers={"x-csrf-token": csrf})
+        missing = await c.post(root, json={**data, "room": "missing"},
+                               headers={"x-csrf-token": csrf})
+    assert no_csrf.status_code == 403
+    assert sent.status_code == 201 and sent.json()["sender"] == list(who)
+    assert sent.json()["notified_count"] == 1
+    assert frames[0][0] == peer and "body" not in frames[0][1]
+    assert frames[0][1]["room"] == "reviews"
+    assert missing.status_code in (404, 422)
+
+
+@pytest.mark.anyio
 async def test_console_task_list_pages_beyond_first_bounded_batch(env):
     from hivemind_server import graph_tasks
     from hivemind_server.chat import ChatStore
@@ -167,6 +367,41 @@ async def test_console_task_list_pages_beyond_first_bounded_batch(env):
         first = (await c.get(base)).json()
         older = (await c.get(base + "&before_id=" + first["older_cursor"])).json()
     assert [t["node_id"] for t in first["tasks"] + older["tasks"]] == sorted(node_ids, reverse=True)
+
+
+@pytest.mark.anyio
+async def test_task_counts_and_filter_use_effective_states_across_all_pages(env):
+    from hivemind_server import graph_tasks
+    from hivemind_server.chat import ChatStore
+    mcp, project, _ = env
+    ids = IdentityStore(mcp.state.cfg.identities_path)
+    token = ids.mint("nik", "mac")
+    who = ("nik", "mac", "codex")
+    ChatStore(project.db).create_room("reviews", "Review", who)
+    teams.add_member(project.db, "reviews", who, who)
+    nodes = [graph_tasks.offer(project.db, "setup", "reviews", f"Task {n}", "Review")
+             ["node_id"] for n in range(5)]
+    assignments.assign(project.db, "setup", nodes[1], who)
+    graph_tasks.claim(project.db, "setup", nodes[2], who)
+    finished = graph_tasks.claim(project.db, "setup", nodes[3], who)
+    graph_tasks.complete(project.db, "setup", nodes[3], finished["claim_token"], who)
+    graph_tasks.claim(project.db, "setup", nodes[4], who, now=time.time() - 4000)
+    app = build_ui_app(mcp.state.cfg, mcp.state.registry, ids)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                 base_url="http://testserver") as c:
+        await c.post("/api/login", json={"token": token})
+        base = f"/api/projects/{project.name}/tasks"
+        first = (await c.get(base, params={"limit": 1, "status": "available"})).json()
+        second = (await c.get(base, params={"limit": 1, "status": "available",
+                                            "before_id": first["older_cursor"]})).json()
+        claimed = (await c.get(base, params={"status": "in_progress"})).json()
+        invalid = await c.get(base, params={"status": "unknown"})
+    assert first["counts"] == {"available": 2, "assigned_waiting": 1,
+                                "in_progress": 1, "complete": 1}
+    assert {t["node_id"] for t in first["tasks"] + second["tasks"]} == {nodes[0], nodes[4]}
+    assert all(t["state"] == "available" for t in first["tasks"] + second["tasks"])
+    assert [t["node_id"] for t in claimed["tasks"]] == [nodes[2]]
+    assert invalid.status_code == 422
 
 
 @pytest.mark.anyio

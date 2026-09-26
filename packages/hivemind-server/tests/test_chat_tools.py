@@ -49,7 +49,74 @@ async def test_create_room_and_offline_dm_catchup_over_mcp(env):
         assert acknowledged["ok"] is True
         resumed = await _tool(client, ana, project.name, "chat_inbox",
                               client="claude", session_id="sid-100", after_seq=0)
-        assert resumed["last_read_seq"] == sent["seq"]
+    assert resumed["last_read_seq"] == sent["seq"]
+
+
+@pytest.mark.anyio
+async def test_agent_progress_post_carries_llm_written_preview_through_mcp(env):
+    app, project, _ = env
+    nik = _token(app, "nik", "mac")
+    ChatStore(project.db).create_room("reviews", "Review work", ("nik", "mac", "codex"))
+    async with Lifespan(app), httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                               base_url="http://t", timeout=30) as client:
+        sent = await _tool(client, nik, project.name, "chat_room_post", name="reviews",
+                           client="codex", session_id="sid-1", kind="progress",
+                           body="Full detailed update with several steps and results.",
+                           summary="Reviewed the work; results are ready for the next step.",
+                           idempotency_key="summary-one")
+        history = await _tool(client, nik, project.name, "chat_room_history", name="reviews",
+                              client="codex", session_id="sid-1")
+    assert sent["ok"] is True
+    assert history["messages"][0]["summary"] == "Reviewed the work; results are ready for the next step."
+
+
+@pytest.mark.anyio
+async def test_agent_status_is_authenticated_session_scoped_and_visible_in_roster(env):
+    from hivemind_server.ui_app import build_ui_app
+
+    app, project, _ = env
+    nik = _token(app, "nik", "mac")
+    ana = _token(app, "ana", "laptop")
+    async with Lifespan(app), httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                               base_url="http://t", timeout=30) as client:
+        first = await _tool(client, nik, project.name, "chat_status_update",
+                            client="codex", session_id="one", model="gpt-6-sol",
+                            status="Reviewing the parser task")
+        second = await _tool(client, nik, project.name, "chat_status_update",
+                             client="codex", session_id="two", model="gpt-5.6-sol",
+                             status="Writing tests")
+        refreshed = await _tool(client, nik, project.name, "chat_status_update",
+                                client="codex", session_id="one", status="Running tests")
+        forbidden = await _tool(client, ana, project.name, "chat_status_update",
+                                client="codex", session_id="one", model="gpt-1",
+                                status="Attempting another identity")
+        invalid = await _tool(client, nik, project.name, "chat_status_update",
+                              client="codex", session_id="one", status="x" * 301)
+        agents = await _tool(client, nik, project.name, "chat_agents",
+                             client="codex", session_id="one")
+    assert first["ok"] and second["ok"] and refreshed["ok"]
+    assert forbidden["ok"]  # Token binds the other user's own address, never nik's.
+    assert not invalid["ok"]
+    nik_sessions = {s["session_id"]: s for s in agents["agents"]
+                    if s["address"] == ["nik", "mac", "codex"] or
+                    tuple(s["address"]) == ("nik", "mac", "codex")}
+    assert nik_sessions["one"]["model"] == "gpt-6-sol"
+    assert nik_sessions["one"]["work_status"] == "Running tests"
+    assert nik_sessions["one"]["work_updated_at"] >= first["work_updated_at"]
+    assert nik_sessions["two"]["work_status"] == "Writing tests"
+    ui = build_ui_app(app.state.cfg, app.state.registry,
+                      IdentityStore(app.state.cfg.identities_path))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=ui),
+                                 base_url="http://testserver") as c:
+        assert (await c.post("/api/login", json={"token": nik})).status_code == 200
+        response = await c.get(f"/api/projects/{project.name}/agents")
+    assert response.status_code == 200, response.text
+    roster = response.json()["agents"]
+    nik_agent = next(a for a in roster if tuple(a["address"]) == ("nik", "mac", "codex"))
+    sessions = {s["session_id"]: s for s in nik_agent["sessions"]}
+    assert sessions["one"]["model"] == "gpt-6-sol"
+    assert sessions["one"]["work_status"] == "Running tests"
+    assert sessions["two"]["model"] == "gpt-5.6-sol"
 
 
 @pytest.mark.anyio

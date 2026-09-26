@@ -86,6 +86,17 @@ def attach(mcp, cfg, identities) -> None:
             agents = [entry for entry in agents if entry["online"]]
         return {"agents": agents, "count": len(agents)}
 
+    @mcp.tool(annotations=WRITE,
+              description="Report this authenticated agent session's actual model (when known) "
+                          "and current work in a short single-line status. Call on session "
+                          "start and when work changes; refresh approximately every 15 minutes "
+                          "while actively working. Omit model if unknown; never guess it.")
+    @_envelope
+    def chat_status_update(client: str, session_id: str, status: str,
+                           model: Optional[str] = None) -> dict:
+        who, session = _addressed(client, session_id)
+        return _store().update_status(who, session, status, model)
+
     @mcp.tool(annotations=WRITE, description="Explicitly create a public-within-project topic room with a short description.")
     @_envelope
     def chat_room_create(name: str, description: str, client: str, session_id: str) -> dict:
@@ -165,16 +176,20 @@ def attach(mcp, cfg, identities) -> None:
 
     @mcp.tool(annotations=WRITE,
               description="Post a freeform text or informational progress update to an EXISTING room; "
-                          "progress needs no acknowledgement. Set task_node_id for a live "
-                          "claim's nonempty progress so unrelated tasks stay overdue.")
+                          "progress needs no acknowledgement. LLM agents should supply a "
+                          "faithful 1–2 sentence summary for every progress post; the UI "
+                          "collapses the full body. Set task_node_id for a live claim's "
+                          "nonempty progress so unrelated tasks stay overdue.")
     @_envelope
     def chat_room_post(name: str, client: str, session_id: str, body: str,
                        idempotency_key: str, kind: str = "text",
-                       task_node_id: Optional[str] = None) -> dict:
+                       task_node_id: Optional[str] = None,
+                       summary: Optional[str] = None) -> dict:
         who, session = _addressed(client, session_id)
         store = _store()
         message = store.send("room", name, who, body, idempotency_key,
-                             kind=kind, session_id=session, task_node_id=task_node_id)
+                             kind=kind, session_id=session, task_node_id=task_node_id,
+                             summary=summary)
         delivered = 0
         try:
             for recipient in store.subscribers(name):

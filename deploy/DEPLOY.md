@@ -1,6 +1,6 @@
 # Deploying Hivemind
 
-Hivemind 1.5.0 starts an optional second listener for the
+Hivemind 1.5.1 starts an optional second listener for the
 [project web console](../docs/web-console.md), enabled by default on `127.0.0.1:8788`.
 Set `[web_ui] enabled = false` in `<data-dir>/hivemind.toml` to close the UI socket; changing
 `HIVEMIND_HOST` for MCP does **not** widen the UI bind automatically. For remote browser access,

@@ -170,7 +170,7 @@ class ChatStore:
                 row["sender_device"], row["sender_client"]),
                 "sender_session": row["sender_session"], "kind": row["message_kind"],
                 "sender_origin": row["sender_origin"],
-                "body": row["body"], "created_at": row["created_at"],
+                "body": row["body"], "summary": row["summary"], "created_at": row["created_at"],
                 "expires_at": row["created_at"] + MESSAGE_TTL}
 
     def _purge(self, cur, now: float) -> int:
@@ -204,7 +204,7 @@ class ChatStore:
              body: str, idempotency_key: str, *, now: Optional[float] = None,
              kind: str = "text", session_id: Optional[str] = None,
              task_node_id: Optional[str] = None,
-             sender_origin: str = "agent") -> dict:
+             sender_origin: str = "agent", summary: Optional[str] = None) -> dict:
         who = _address(sender)
         if channel not in ("dm", "room"):
             raise Invalid("channel must be dm or room")
@@ -216,6 +216,10 @@ class ChatStore:
             raise Invalid("body exceeds 256 KiB UTF-8")
         if kind == "progress" and not body.strip():
             raise Invalid("progress must describe actual work, not be empty")
+        if summary is not None and (channel != "room" or not isinstance(summary, str) or
+                                    not summary.strip() or len(summary) > 400 or
+                                    len(summary.encode("utf-8")) > 800):
+            raise Invalid("room summary must be nonempty and at most 400 characters/800 bytes")
         if task_node_id is not None and (channel != "room" or kind != "progress" or
                                           not isinstance(task_node_id, str) or not task_node_id):
             raise Invalid("task_node_id is only valid for room progress posts")
@@ -242,7 +246,8 @@ class ChatStore:
             if duplicate:
                 if (duplicate["body"] != body or duplicate["message_kind"] != kind or
                         duplicate["task_node_id"] != task_node_id or
-                        duplicate["sender_origin"] != sender_origin):
+                        duplicate["sender_origin"] != sender_origin or
+                        duplicate["summary"] != summary):
                     raise Conflict("idempotency_key already used for different content")
                 if session_id is not None:
                     self._touch(cur, who, session_id, t)
@@ -259,7 +264,7 @@ class ChatStore:
                          related["holder_client"]) != who or
                         related["last_beat_at"] + related["expires_after_seconds"] <= t):
                     raise Invalid("task progress requires a live claim in this room by its sender")
-            byte_count = len(body.encode("utf-8"))
+            byte_count = len(body.encode("utf-8")) + len((summary or "").encode("utf-8"))
             cur.execute("INSERT INTO chat_usage VALUES(1,0,0) ON CONFLICT(id) DO NOTHING")
             usage = cur.execute("SELECT counted_bytes, message_count FROM chat_usage WHERE id=1").fetchone()
             if (usage["counted_bytes"] + byte_count + MESSAGE_OVERHEAD > self.max_bytes or
@@ -268,10 +273,10 @@ class ChatStore:
             message_id = ulid()
             cur.execute("INSERT INTO chat_message(message_id,channel,room_id,target_user,"
                         "target_device,target_client,sender_user,sender_device,sender_client,"
-                        "sender_session,target_key,body,body_bytes,message_kind,task_node_id,"
-                        "retry_key,created_at,sender_origin) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        "sender_session,target_key,body,summary,body_bytes,message_kind,task_node_id,"
+                        "retry_key,created_at,sender_origin) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                         (message_id, channel, room_id, *(addressed or (None, None, None)),
-                         *who, session_id, target_key, body, byte_count, kind, task_node_id,
+                         *who, session_id, target_key, body, summary, byte_count, kind, task_node_id,
                          idempotency_key, t, sender_origin))
             seq = cur.lastrowid
             cur.execute("UPDATE chat_usage SET counted_bytes=counted_bytes+?, "
@@ -281,6 +286,7 @@ class ChatStore:
                 self._touch(cur, who, session_id, t)
         return {"id": message_id, "seq": seq, "channel": channel, "room_id": room_id,
                 "sender": who, "sender_session": session_id, "kind": kind, "body": body,
+                "summary": summary,
                 "task_node_id": task_node_id,
                 "sender_origin": sender_origin,
                 "created_at": t, "expires_at": t + MESSAGE_TTL, "duplicate": False}
@@ -390,7 +396,8 @@ class ChatStore:
     @staticmethod
     def _touch(cur, who: StableAddress, session: str, now: float) -> None:
         cur.execute("DELETE FROM chat_session WHERE last_activity_at<=?", (now - MESSAGE_TTL,))
-        cur.execute("INSERT INTO chat_session VALUES(?,?,?,?,?) "
+        cur.execute("INSERT INTO chat_session(user,device,client,session_id,last_activity_at) "
+                    "VALUES(?,?,?,?,?) "
                     "ON CONFLICT(user,device,client,session_id) DO UPDATE SET "
                     "last_activity_at=MAX(chat_session.last_activity_at,excluded.last_activity_at)",
                     (*who, session, now))
@@ -403,11 +410,35 @@ class ChatStore:
         with self.db.write_light() as cur:
             self._touch(cur, who, session, time.time() if now is None else float(now))
 
+    def update_status(self, stable: StableAddress, session: str, status: str,
+                      model: Optional[str] = None) -> dict:
+        who = _address(stable)
+        if not isinstance(session, str) or not _SESSION.fullmatch(session):
+            raise Invalid("invalid session_id")
+        if not isinstance(status, str) or not 1 <= len(status.strip()) <= 300 or any(
+                ord(c) < 32 or ord(c) == 127 for c in status):
+            raise Invalid("status must be a single-line description of 1–300 characters")
+        if model is not None and (not isinstance(model, str) or not 1 <= len(model) <= 128
+                                  or any(ord(c) < 33 or ord(c) > 126 for c in model)):
+            raise Invalid("model must be a printable identifier of 1–128 characters")
+        t = time.time()
+        with self.db.write_light() as cur:
+            self._touch(cur, who, session, t)
+            cur.execute("UPDATE chat_session SET model_name=COALESCE(?,model_name), "
+                        "work_status=?,work_updated_at=? WHERE user=? AND device=? "
+                        "AND client=? AND session_id=?", (model, status.strip(), t, *who, session))
+            stored = cur.execute("SELECT model_name FROM chat_session WHERE user=? AND device=? "
+                                 "AND client=? AND session_id=?", (*who, session)).fetchone()
+        return {"address": who, "session_id": session, "model": stored["model_name"],
+                "work_status": status.strip(), "work_updated_at": t}
+
     def agents(self, *, now: Optional[float] = None) -> list[dict]:
         t = time.time() if now is None else float(now)
         with self.db.read() as cur:
             rows = cur.execute("SELECT * FROM chat_session WHERE last_activity_at>? "
                                "ORDER BY last_activity_at DESC", (t - MESSAGE_TTL,)).fetchall()
         return [{"address": (r["user"], r["device"], r["client"]),
-                 "session_id": r["session_id"], "last_activity_at": r["last_activity_at"]}
+                 "session_id": r["session_id"], "last_activity_at": r["last_activity_at"],
+                 "model": r["model_name"], "work_status": r["work_status"],
+                 "work_updated_at": r["work_updated_at"]}
                 for r in rows]

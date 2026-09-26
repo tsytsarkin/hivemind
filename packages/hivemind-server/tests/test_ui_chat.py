@@ -5,6 +5,7 @@ from hivemind_server.chat import ChatStore
 from hivemind_server.db import Invalid
 from hivemind_server.identity import Identity, IdentityStore
 import time
+import pytest
 
 
 def test_console_reads_all_project_dms_without_widening_agent_inbox(db):
@@ -29,6 +30,7 @@ def test_browser_dm_is_human_origin_and_requires_real_recipient(db, tmp_path):
     who = Identity("nik", "mac")
     sent = ui_chat.send_human_dm(db, who, store, ("ana", "laptop", "claude"), "Hello", "one")
     assert sent["sender_origin"] == "human_ui"
+    assert sent["sender"] == ("nik", "mac", "human")
     assert ui_chat.list_transcript(db, channel="dm")["messages"][0]["sender_origin"] == "human_ui"
     try:
         ui_chat.send_human_dm(db, who, store, ("ghost", "pc", "codex"), "Hello", "two")
@@ -36,6 +38,45 @@ def test_browser_dm_is_human_origin_and_requires_real_recipient(db, tmp_path):
         pass
     else:
         raise AssertionError("browser cannot send a DM to an unknown device")
+
+
+def test_browser_room_post_is_from_token_identity_and_keeps_room_history(db):
+    who = Identity("nik", "mac")
+    ChatStore(db).create_room("reviews", "Review", ("nik", "mac", "codex"))
+    sent = ui_chat.send_human_room(db, who, "reviews", "Please review", "once")
+    assert sent["sender"] == ("nik", "mac", "human")
+    assert sent["sender_origin"] == "human_ui"
+    assert ui_chat.list_transcript(db, channel="room", room="reviews")["messages"][0][
+        "body"] == "Please review"
+
+
+@pytest.mark.anyio
+async def test_human_room_push_failure_does_not_skip_other_subscribers(db, tmp_path, monkeypatch):
+    owner = ("nik", "mac", "codex")
+    first, second = ("ana", "laptop", "claude"), ("zoe", "desktop", "codex")
+    store = ChatStore(db)
+    store.create_room("reviews", "Review", owner)
+    store.join("reviews", first)
+    store.join("reviews", second)
+    ids = IdentityStore(tmp_path / "identities.json")
+    ids.mint("ana", "laptop")
+    ids.mint("zoe", "desktop")
+    sent = ui_chat.send_human_room(db, Identity("nik", "mac"), "reviews", "Update", "one")
+    delivered = []
+
+    class Hub:
+        async def notify(self, recipient, frame):
+            delivered.append(recipient)
+            if recipient == first:
+                raise OSError("subscriber disconnected")
+            assert frame["id"] == sent["id"]
+            return 1
+
+    monkeypatch.setattr(ui_chat.chat_ws, "hub_for", lambda path: Hub())
+    monkeypatch.setattr(ui_chat, "can_access", lambda identity, meta: True)
+    count = await ui_chat.notify_human_room(tmp_path, db, object(), ids, "reviews", sent)
+    assert delivered == [first, second]
+    assert count == 1
 
 
 def test_room_history_expiration_indicator_is_scoped_to_that_room(db):

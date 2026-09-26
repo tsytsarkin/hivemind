@@ -116,8 +116,40 @@ def send_human_dm(db: Database, who: Identity, identities: IdentityStore,
     if not identities.has_device(recipient[0], recipient[1]) or (project_meta is not None and
             not can_access(Identity(recipient[0], recipient[1]), project_meta)):
         raise Invalid("recipient user/device does not exist or lacks project access")
-    return ChatStore(db).send("dm", recipient, (who.user, who.device, "webui"), body,
+    return ChatStore(db).send("dm", recipient, (who.user, who.device, "human"), body,
                               retry_key, sender_origin="human_ui")
+
+
+def send_human_room(db: Database, who: Identity, room: str,
+                    body: str, retry_key: str) -> dict:
+    """The human sender comes from the verified UI session, never the posted JSON."""
+    return ChatStore(db).send("room", room, (who.user, who.device, "human"), body,
+                              retry_key, sender_origin="human_ui")
+
+
+async def notify_human_room(project_dir: Path, db: Database, project_meta,
+                            identities: IdentityStore, room: str, message: dict) -> int:
+    """Notify currently subscribed project members; a failed push does not undo persistence."""
+    frame = {"v": 2, "type": "chat", "id": message["id"], "channel": "room", "room": room,
+             "from": "-".join(message["sender"]),
+             "preview": message["body"].encode("utf-8")[:160].decode("utf-8", errors="ignore"),
+             "ts": message["created_at"]}
+    count = 0
+    try:
+        recipients = ChatStore(db).subscribers(room)
+    except Exception:
+        log.exception("live browser room subscriber lookup failed; message remains persisted")
+        return 0
+    for recipient in recipients:
+        try:
+            if (recipient != tuple(message["sender"])
+                    and identities.has_device(recipient[0], recipient[1])
+                    and can_access(Identity(recipient[0], recipient[1]), project_meta)):
+                count += await chat_ws.hub_for(project_dir).notify(recipient, frame)
+        except Exception:
+            log.exception("live browser room notification failed for %r; message remains persisted",
+                          recipient)
+    return count
 
 
 async def notify_human_dm(project_dir: Path, to: StableAddress, message: dict) -> bool:

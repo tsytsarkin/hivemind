@@ -1,9 +1,27 @@
 """Durable chat storage: rooms and identities are separate from live socket presence."""
 
 import pytest
+import sqlite3
 
 from hivemind_server.db import Conflict, Database, Invalid, NotFound
 from hivemind_server.identity import Identity
+
+
+def test_existing_chat_session_survives_status_column_migration(tmp_path):
+    from hivemind_server.chat import ChatStore
+    path = tmp_path / "existing.sqlite"
+    with sqlite3.connect(path) as con:
+        con.execute("CREATE TABLE chat_session (user TEXT NOT NULL,device TEXT NOT NULL,"
+                    "client TEXT NOT NULL,session_id TEXT NOT NULL,last_activity_at REAL NOT NULL,"
+                    "PRIMARY KEY(user,device,client,session_id))")
+        con.execute("INSERT INTO chat_session VALUES ('nik','mac','claude','old',99999999999)")
+    db = Database(path)
+    store = ChatStore(db)
+    store.touch(("nik", "mac", "claude"), "old")
+    assert store.agents()[0]["model"] is None
+    assert store.agents()[0]["work_status"] is None
+    assert store.update_status(("nik", "mac", "claude"), "old", "Reviewing", "opus-4")["model"] == "opus-4"
+    assert ChatStore(Database(path)).agents()[0]["work_status"] == "Reviewing"
 
 
 def test_room_is_explicit_and_stays_joinable_after_restart(db):
@@ -87,6 +105,40 @@ def test_same_retry_key_is_idempotent_and_cannot_change_body(db):
     assert len(store.inbox(RECEIVER, 0, now=T0 + 2)["messages"]) == 1
     with pytest.raises(Conflict):
         store.send("dm", RECEIVER, SENDER, "changed", "retry-1", now=T0 + 2)
+
+
+def test_llm_written_room_progress_summary_roundtrips_and_is_idempotent(db):
+    from hivemind_server.chat import ChatStore
+    store = ChatStore(db)
+    store.create_room("reviews", "Review", SENDER)
+    full = "I inspected the parser and reproduced a null dereference in the fallback path. " \
+           "The reproduction is saved for the next pass."
+    brief = "Reproduced a parser null dereference; investigating the fallback path."
+    sent = store.send("room", "reviews", SENDER, full, "one", kind="progress", summary=brief)
+    history = store.history("reviews")["messages"]
+    assert history[0]["summary"] == brief
+    assert history[0]["body"] == full
+    assert sent["summary"] == brief
+    assert store.send("room", "reviews", SENDER, full, "one", kind="progress",
+                      summary=brief)["duplicate"] is True
+    with pytest.raises(Conflict):
+        store.send("room", "reviews", SENDER, full, "one", kind="progress",
+                   summary="different summary")
+    with pytest.raises(Invalid):
+        store.send("dm", RECEIVER, SENDER, "Hi", "two", summary="Not for DMs")
+    with pytest.raises(Invalid):
+        store.send("room", "reviews", SENDER, full, "two", kind="progress", summary="x" * 401)
+
+
+def test_existing_chat_table_adds_nullable_summary_without_losing_messages(db):
+    from hivemind_server.chat import ChatStore
+    store = ChatStore(db)
+    store.create_room("reviews", "Review", SENDER)
+    store.send("room", "reviews", SENDER, "Existing post", "before")
+    db.conn().execute("ALTER TABLE chat_message DROP COLUMN summary")
+    db.apply_schema()
+    assert store.history("reviews")["messages"][0]["summary"] is None
+    assert store.history("reviews")["messages"][0]["body"] == "Existing post"
 
 
 def test_room_history_available_to_late_joiner_for_24_hours(db):

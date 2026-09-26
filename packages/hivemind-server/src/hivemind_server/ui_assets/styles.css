@@ -96,15 +96,31 @@ p { line-height:1.55 }
 .row-title { display:flex; align-items:center; gap:10px; min-width:0 }
 .row-title h3 { overflow-wrap:anywhere }
 .symbol { width:34px; height:34px; display:grid; place-items:center; background:#334a4a; border-radius:9px; color:var(--accent); flex:none }
+.harness-icon { font-size:1.3rem; font-weight:700 }
+.harness-icon.harness-claude { color:#eab598; background:#53392f }
+.harness-icon.harness-codex { color:#a8e4cf; background:#254b43 }
+.harness-logo { display:block; width:22px; height:22px; filter:brightness(0) invert(1) }
+.harness-label { font-size:.7rem; color:var(--muted); align-self:center }
+.agent-session { margin-top:10px; padding:8px 10px; border:1px solid #344654; border-radius:8px; overflow-wrap:anywhere }
+.agent-session .agent-work { color:var(--ink); white-space:pre-wrap; margin:5px 0 0 }
 .chip { font-size:.65rem; letter-spacing:.07em; font-weight:700; border:1px solid #567668; color:var(--mint); border-radius:30px; padding:4px 8px; text-transform:uppercase; white-space:nowrap }
-.chip.waiting { border-color:#8f7950; color:var(--warn) }
-.chip.offline { border-color:#53616f; color:#a7b4c0 }
+.chip.waiting, .chip.queued, .chip.stalled, .chip.recent, .chip.assigned_waiting { border-color:#a3895d; color:var(--warn); background:#3d3329 }
+.chip.online, .chip.complete, .chip.available { border-color:#5eaa80; color:#9cecbb; background:#1d3b32 }
+.chip.in_progress, .chip.progress { border-color:#6b9cb1; color:#a4d9ed; background:#213747 }
+.chip.offline { border-color:#aa7077; color:#ffb6b3; background:#3d2932 }
 .chip.failed { border-color:#94636a; color:var(--red) }
 .agent-presence { display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--mint); box-shadow:0 0 10px var(--mint); margin-right:4px }
-.agent-presence.offline { background:#8796a4; box-shadow:none }
+.agent-presence.offline { background:#d88b92; box-shadow:none }
 .empty { padding:24px 10px; color:var(--muted); font-size:.85rem; line-height:1.6 }
 .metadata { display:flex; flex-wrap:wrap; gap:6px; margin-top:10px }
-.metadata .chip { text-transform:none; letter-spacing:0; color:#c2d5dd; border-color:#405661 }
+#task-counts { margin:8px 0 18px }
+.capability-choice { display:flex; align-items:center; gap:9px; font-size:.84rem; line-height:1.4 }
+.capability-choice input { width:auto; flex:none }
+.expandable { margin:9px 0; font-size:.84rem; color:var(--muted); min-width:0 }
+.expandable summary { cursor:pointer; overflow-wrap:anywhere; line-height:1.5 }
+.expandable[open] .body { padding-top:8px; border-top:1px solid var(--line) }
+.expandable small { display:block; margin:7px 0 }
+.item-card .metadata .chip { text-transform:none; letter-spacing:0; color:#c2d5dd; border-color:#405661 }
 .chip-remove { border:0; background:transparent; color:var(--warn); font-size:.9rem; padding:0 0 0 5px }
 .chip-remove:hover { color:var(--ink) }
 .inline-filters { display:flex; gap:8px; flex-wrap:wrap }

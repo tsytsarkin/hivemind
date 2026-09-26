@@ -133,6 +133,10 @@ def test_guide_sh_reads_the_pin_late_so_a_mid_session_switch_is_followed(server,
     env = dict(os.environ, HOME=str(home), HIVEMIND_SERVER_URL=root, HIVEMIND_TOKEN=tok,
                CLAUDE_CODE_SESSION_ID=session, HIVEMIND_CACHE_DIR=str(tmp_path / "cache"))
     env.pop("HIVEMIND_PROJECT", None)
+    # Running pytest from inside Codex leaks the outer thread ID into this simulated Claude
+    # shell; the helper intentionally prefers that ID in a genuinely nested Codex session.
+    for foreign_host_id in ("HIVEMIND_SESSION_ID", "CODEX_THREAD_ID", "CODEX_SESSION_ID"):
+        env.pop(foreign_host_id, None)
     r = subprocess.run(["bash", str(PLUGIN_GUIDE_SH), "--section", "core"],
                        capture_output=True, text=True, env=env)
     assert r.returncode == 0, r.stderr

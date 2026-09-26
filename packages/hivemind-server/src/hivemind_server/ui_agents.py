@@ -24,7 +24,7 @@ def page(db: Database, hub, *, after: str | None = None, limit: int = 100) -> di
     # deduplicate and sort every self-advertisement on every console refresh.
     with db.read() as cur:
         candidates = set()
-        for table in ("chat_session", "chat_subscription", "agent_capability"):
+        for table in ("chat_session", "chat_subscription", "agent_capability", "agent_config"):
             active = "AND last_activity_at>?" if table == "chat_session" else ""
             params = (* (cursor or ("", "", "")),
                       *((time.time() - MESSAGE_TTL,) if active else ()), limit + 1)
@@ -40,11 +40,14 @@ def page(db: Database, hub, *, after: str | None = None, limit: int = 100) -> di
         agents = []
         for address in addresses:
             sessions = cur.execute(
-                "SELECT session_id,last_activity_at FROM chat_session WHERE user=? AND device=? "
+                "SELECT session_id,last_activity_at,model_name,work_status,work_updated_at "
+                "FROM chat_session WHERE user=? AND device=? "
                 "AND client=? AND last_activity_at>? ORDER BY last_activity_at DESC LIMIT 10",
                 (*address, time.time() - MESSAGE_TTL)).fetchall()
             sessions = [{"session_id": s["session_id"],
                          "last_activity_at": s["last_activity_at"],
+                         "model": s["model_name"], "work_status": s["work_status"],
+                         "work_updated_at": s["work_updated_at"],
                          "online": hub.online(address, s["session_id"])} for s in sessions]
             agents.append({"address": address, "last_activity_at":
                            sessions[0]["last_activity_at"] if sessions else None,
