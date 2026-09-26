@@ -77,6 +77,14 @@ CREATE TABLE IF NOT EXISTS chat_session (
   PRIMARY KEY (user, device, client, session_id)
 );
 CREATE INDEX IF NOT EXISTS ix_chat_session_last_activity ON chat_session(last_activity_at);
+CREATE TABLE IF NOT EXISTS agent_capability (
+  user          TEXT NOT NULL,
+  device        TEXT NOT NULL,
+  client        TEXT NOT NULL,
+  tags_json     TEXT NOT NULL CHECK (json_valid(tags_json)),
+  updated_at    REAL NOT NULL,
+  PRIMARY KEY (user, device, client)
+);
 CREATE TABLE IF NOT EXISTS chat_usage (
   id            INTEGER PRIMARY KEY CHECK (id=1),
   counted_bytes INTEGER NOT NULL,

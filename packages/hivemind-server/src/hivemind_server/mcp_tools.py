@@ -370,4 +370,6 @@ def build_mcp(registry, identities, *, instructions: str = INSTRUCTIONS) -> MCPS
     chat_tools.attach(mcp, _config(), identities)
     from . import graph_task_tools  # graph-backed optional work, fenced lease sidecars
     graph_task_tools.attach(mcp)
+    from . import capability_tools  # project-local self-advertised agent capabilities
+    capability_tools.attach(mcp)
     return real                   # mount the real server; the proxy only wraps registration
