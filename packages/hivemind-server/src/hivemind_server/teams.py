@@ -80,6 +80,10 @@ def manager(db: Database, room: str) -> dict:
     return {"room": room, "manager": who, "revision": revision}
 
 
+def list_members(db: Database, room: str) -> list[StableAddress]:
+    return ChatStore(db).subscribers(room)
+
+
 def promote(db: Database, room: str, target: StableAddress, actor: StableAddress,
             *, expected_revision: int) -> dict:
     stable = _address(target)
@@ -97,6 +101,8 @@ def promote(db: Database, room: str, target: StableAddress, actor: StableAddress
                        "VALUES(?,?,?,?,?) ON CONFLICT(room_id) DO UPDATE SET "
                        "user=excluded.user,device=excluded.device,client=excluded.client,"
                        "revision=excluded.revision", (room_id, *stable, revision))
+        from . import instructions
+        instructions.handoff_queued(tx, room_id, stable)
         _event(tx, room_id, "promote", actor, stable, previous, revision)
     return {"room": room, "manager": stable, "previous_manager": previous,
             "revision": revision}

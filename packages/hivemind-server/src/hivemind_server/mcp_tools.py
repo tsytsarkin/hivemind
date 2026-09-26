@@ -374,4 +374,6 @@ def build_mcp(registry, identities, *, instructions: str = INSTRUCTIONS) -> MCPS
     capability_tools.attach(mcp)
     from . import team_tools  # project rooms, membership and manager handoffs
     team_tools.attach(mcp)
+    from . import instruction_tools  # persistent project-local human instructions
+    instruction_tools.attach(mcp)
     return real                   # mount the real server; the proxy only wraps registration

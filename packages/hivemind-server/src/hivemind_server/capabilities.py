@@ -36,6 +36,17 @@ def get(db: Database, who: StableAddress) -> dict:
             "updated_at": row["updated_at"] if row else None}
 
 
+def list_project(db: Database, *, limit: int = 100) -> list[dict]:
+    if type(limit) is not int or not 1 <= limit <= 100:
+        raise Invalid("limit must be 1–100")
+    with db.read() as cur:
+        rows = cur.execute("SELECT * FROM agent_capability ORDER BY updated_at DESC "
+                           "LIMIT ?", (limit,)).fetchall()
+    return [{"address": (r["user"], r["device"], r["client"]),
+             "capabilities": json.loads(r["tags_json"]), "updated_at": r["updated_at"]}
+            for r in rows]
+
+
 def replace(db: Database, who: StableAddress, tags: list[str]) -> dict:
     stable = _address(who)
     normalized = normalize(tags)

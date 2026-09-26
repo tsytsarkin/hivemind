@@ -49,6 +49,42 @@ CREATE TABLE IF NOT EXISTS room_team_event (
 );
 CREATE INDEX IF NOT EXISTS ix_room_team_event_room ON room_team_event(room_id,tx_id);
 
+-- Instructions are durable work, not expiring chat. Retain outcomes and every handoff event.
+CREATE TABLE IF NOT EXISTS agent_instruction (
+  id TEXT PRIMARY KEY,
+  author_user TEXT NOT NULL,
+  recipient_user TEXT NOT NULL,
+  recipient_device TEXT NOT NULL,
+  recipient_client TEXT NOT NULL,
+  room_id TEXT REFERENCES chat_room(room_id),
+  to_manager INTEGER NOT NULL DEFAULT 0,
+  body TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('queued','acknowledged','in_progress',
+                                       'completed','failed','cancelled')),
+  result TEXT,
+  retry_key TEXT NOT NULL,
+  retry_of TEXT REFERENCES agent_instruction(id),
+  created_at REAL NOT NULL,
+  updated_at REAL NOT NULL,
+  created_tx INTEGER NOT NULL REFERENCES tx(tx_id),
+  UNIQUE(author_user,retry_key)
+);
+CREATE INDEX IF NOT EXISTS ix_instruction_inbox ON agent_instruction(
+  recipient_user,recipient_device,recipient_client,id);
+CREATE INDEX IF NOT EXISTS ix_instruction_room ON agent_instruction(room_id,id);
+CREATE TABLE IF NOT EXISTS agent_instruction_event (
+  id TEXT PRIMARY KEY,
+  instruction_id TEXT NOT NULL REFERENCES agent_instruction(id),
+  action TEXT NOT NULL,
+  actor TEXT NOT NULL,
+  old_state TEXT,
+  new_state TEXT NOT NULL,
+  prior_recipient TEXT,
+  created_at REAL NOT NULL,
+  tx_id INTEGER NOT NULL REFERENCES tx(tx_id)
+);
+CREATE INDEX IF NOT EXISTS ix_instruction_event_item ON agent_instruction_event(instruction_id,id);
+
 CREATE TABLE IF NOT EXISTS chat_message (
   seq            INTEGER PRIMARY KEY AUTOINCREMENT,
   message_id     TEXT NOT NULL UNIQUE,

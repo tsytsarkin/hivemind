@@ -171,3 +171,13 @@ def mine(db: Database, who: StableAddress) -> list[dict]:
             "assignee_device=? AND assignee_client=? ORDER BY assigned_at", stable).fetchall()]
     return [state for node_id in nodes if (state := view(db, node_id))["state"] ==
             "assigned_waiting"]
+
+
+def list_room(db: Database, room: str, *, limit: int = 100) -> list[dict]:
+    if type(limit) is not int or not 1 <= limit <= 100:
+        raise Invalid("limit must be 1–100")
+    with db.read() as cur:
+        room_id = teams._room(cur, db, room)
+        rows = cur.execute("SELECT node_id FROM graph_task WHERE room_id=? "
+                           "ORDER BY node_id DESC LIMIT ?", (room_id, limit)).fetchall()
+    return [view(db, row["node_id"]) for row in rows]
