@@ -370,3 +370,21 @@ CREATE TABLE IF NOT EXISTS embedding (
   updated_tx INTEGER NOT NULL REFERENCES tx(tx_id),
   PRIMARY KEY (kind, item_id)
 );
+
+-- Graph task identity and volatile activity are sidecars, never simulated node revisions.
+CREATE TABLE IF NOT EXISTS graph_task (
+  node_id TEXT PRIMARY KEY REFERENCES node(node_id),
+  room_id TEXT REFERENCES chat_room(room_id),
+  status TEXT NOT NULL DEFAULT 'unclaimed'
+    CHECK(status IN ('unclaimed', 'in_progress', 'complete')),
+  created_tx INTEGER NOT NULL REFERENCES tx(tx_id),
+  updated_tx INTEGER NOT NULL REFERENCES tx(tx_id)
+);
+CREATE TABLE IF NOT EXISTS graph_task_activity (
+  node_id TEXT NOT NULL REFERENCES graph_task(node_id),
+  user TEXT NOT NULL, device TEXT NOT NULL, client TEXT NOT NULL,
+  last_beat_at REAL NOT NULL,
+  interval_seconds INTEGER NOT NULL,
+  expires_after_seconds INTEGER NOT NULL,
+  PRIMARY KEY(node_id,user,device,client)
+);

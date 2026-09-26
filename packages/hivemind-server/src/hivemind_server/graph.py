@@ -7,6 +7,7 @@ Edges are fully schema-defined; the engine enforces only generic traits (schemas
 from __future__ import annotations
 
 import json
+import time
 from typing import Any, Optional
 
 from .db import (LEGACY_USER, SENTINEL, Conflict, Database, Invalid, NotFound, Tx,
@@ -241,6 +242,9 @@ def get_node(db: Database, *, node_id: Optional[str] = None, subject_key: Option
                # author of the version being RETURNED (the head, or the as-of one).
                "created_by": nrow["created_by"] or LEGACY_USER,
                "contributors": _contributors(cur, node_id)}
+        from . import graph_tasks
+        if cur.execute("SELECT 1 FROM graph_task WHERE node_id=?", (node_id,)).fetchone():
+            out["task"] = graph_tasks._read(cur, node_id, time.time())
 
         if history:
             rows = cur.execute(
