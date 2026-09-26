@@ -193,6 +193,55 @@ async def test_signed_canonical_connection_binds_all_identity_parts(env):
 
 
 @pytest.mark.anyio
+async def test_authorized_live_socket_refreshes_presence_at_heartbeats(env, monkeypatch):
+    import asyncio
+    import threading
+    import time
+    from hivemind_server import chat_ws, bus_ws
+    from hivemind_server.chat import ChatStore
+    app, project, _ = env
+    token = _token(app, "nik", "mac")
+    identities = IdentityStore(app.state.cfg.identities_path)
+    parts = ("nik", "mac", "codex", "sid-live")
+    hub = chat_ws.hub_for(project.dir)
+    key = hub.mint_key(parts, identities.verify(token).credential_hash)
+    store = ChatStore(project.db)
+    store.touch(parts[:3], parts[3], now=time.time() - 86401)
+    monkeypatch.setattr(bus_ws, "HEARTBEAT", 0.01)
+    touches = []
+    event_thread = threading.get_ident()
+    original = ChatStore.touch
+
+    def counting_touch(self, *args, **kwargs):
+        touches.append((args, threading.get_ident()))
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(ChatStore, "touch", counting_touch)
+
+    class Socket:
+        query_params = {"key": key}
+        reads = 0
+
+        async def accept(self):
+            pass
+
+        async def send_text(self, frame):
+            pass
+
+        async def receive_text(self):
+            self.reads += 1
+            if self.reads >= 3:
+                raise RuntimeError("disconnected")
+            await asyncio.sleep(0.035)
+
+    await chat_ws.websocket_endpoint(Socket(), project.name, project.dir,
+                                     identities=identities, db=project.db)
+    assert len(touches) >= 2
+    assert all(thread_id != event_thread for _, thread_id in touches)
+    assert store.agents()[0]["address"] == parts[:3]
+
+
+@pytest.mark.anyio
 async def test_revoked_token_cannot_reconnect_with_its_unexpired_chat_key(env):
     app, project, _ = env
     nik = _token(app, "nik", "mac")

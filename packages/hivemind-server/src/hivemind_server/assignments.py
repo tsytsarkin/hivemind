@@ -62,6 +62,7 @@ def _clear_tx(tx: Tx, node_id: str, reason: str, now: float) -> None:
 def assign(db: Database, agent_id: str, node_id: str, target: StableAddress,
            *, expected_revision: Optional[int] = None,
            manager_actor: Optional[StableAddress] = None,
+           confirm_displace: bool = True,
            now: Optional[float] = None) -> dict:
     stable = _address(target)
     t = time.time() if now is None else float(now)
@@ -84,9 +85,13 @@ def assign(db: Database, agent_id: str, node_id: str, target: StableAddress,
             raise Conflict("task assignment changed; fetch its revision and retry")
         previous = _assignee(row)
         if previous != stable:
-            old_claim = tx.cur.execute("SELECT token_digest FROM graph_task_claim "
+            old_claim = tx.cur.execute("SELECT token_digest,last_beat_at,expires_after_seconds "
+                                       "FROM graph_task_claim "
                                        "WHERE node_id=?", (node_id,)).fetchone()
             if old_claim and old_claim["token_digest"] is not None:
+                if (old_claim["last_beat_at"] + old_claim["expires_after_seconds"] > t and
+                        confirm_displace is not True):
+                    raise Conflict("active claim would be displaced; confirm the target and retry")
                 _clear_tx(tx, node_id, "reassigned", t)
                 row = _row(tx.cur, node_id)
                 revision = row["revision"] if row else revision
@@ -103,8 +108,26 @@ def assign(db: Database, agent_id: str, node_id: str, target: StableAddress,
     return view(db, node_id, now=t)
 
 
-def clear(db: Database, agent_id: str, node_id: str, reason: str) -> dict:
+def clear(db: Database, agent_id: str, node_id: str, reason: str,
+          *, expected_revision: int, manager_actor: Optional[StableAddress] = None,
+          confirm_displace: bool = True) -> dict:
+    if type(expected_revision) is not int or expected_revision < 0:
+        raise Invalid("expected_revision must be the current assignment revision")
     with db.write(agent_id, reason) as tx:
+        row = _row(tx.cur, node_id)
+        if (row["revision"] if row else 0) != expected_revision:
+            raise Conflict("task assignment revision changed; fetch it before clearing")
+        claim = tx.cur.execute("SELECT token_digest,last_beat_at,expires_after_seconds "
+                               "FROM graph_task_claim WHERE node_id=?", (node_id,)).fetchone()
+        if (claim and claim["token_digest"] is not None and
+                claim["last_beat_at"] + claim["expires_after_seconds"] > time.time() and
+                confirm_displace is not True):
+            raise Conflict("active claim would be revoked; confirm the target and retry")
+        if manager_actor is not None:
+            task = graph_tasks._marker(tx.cur, node_id)
+            if task["room_id"] is None or teams._current(tx.cur, task["room_id"])[0] != \
+                    _address(manager_actor):
+                raise Conflict("only the current room manager can clear this assignment")
         _clear_tx(tx, node_id, reason, time.time())
     return view(db, node_id)
 

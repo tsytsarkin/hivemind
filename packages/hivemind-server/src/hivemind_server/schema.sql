@@ -72,6 +72,18 @@ CREATE TABLE IF NOT EXISTS agent_instruction (
 CREATE INDEX IF NOT EXISTS ix_instruction_inbox ON agent_instruction(
   recipient_user,recipient_device,recipient_client,id);
 CREATE INDEX IF NOT EXISTS ix_instruction_room ON agent_instruction(room_id,id);
+CREATE TABLE IF NOT EXISTS agent_instruction_delivery (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  instruction_id TEXT NOT NULL REFERENCES agent_instruction(id),
+  recipient_user TEXT NOT NULL,
+  recipient_device TEXT NOT NULL,
+  recipient_client TEXT NOT NULL,
+  created_at REAL NOT NULL,
+  tx_id INTEGER NOT NULL REFERENCES tx(tx_id)
+);
+CREATE INDEX IF NOT EXISTS ix_instruction_delivery_item ON agent_instruction_delivery(instruction_id,seq);
+CREATE INDEX IF NOT EXISTS ix_instruction_delivery_recipient ON agent_instruction_delivery(
+  recipient_user,recipient_device,recipient_client,seq);
 CREATE TABLE IF NOT EXISTS agent_instruction_event (
   id TEXT PRIMARY KEY,
   instruction_id TEXT NOT NULL REFERENCES agent_instruction(id),
@@ -84,6 +96,38 @@ CREATE TABLE IF NOT EXISTS agent_instruction_event (
   tx_id INTEGER NOT NULL REFERENCES tx(tx_id)
 );
 CREATE INDEX IF NOT EXISTS ix_instruction_event_item ON agent_instruction_event(instruction_id,id);
+CREATE TABLE IF NOT EXISTS agent_instruction_archive (
+  id TEXT PRIMARY KEY,
+  author_user TEXT NOT NULL,
+  recipient_user TEXT NOT NULL,
+  recipient_device TEXT NOT NULL,
+  recipient_client TEXT NOT NULL,
+  room_id TEXT,
+  to_manager INTEGER NOT NULL,
+  state TEXT NOT NULL,
+  retry_key TEXT NOT NULL,
+  retry_of TEXT,
+  created_at REAL NOT NULL,
+  updated_at REAL NOT NULL,
+  archived_at REAL NOT NULL,
+  request_digest TEXT NOT NULL,
+  event_count INTEGER NOT NULL,
+  UNIQUE(author_user,retry_key)
+);
+CREATE TABLE IF NOT EXISTS agent_instruction_archive_event (
+  id TEXT PRIMARY KEY,
+  instruction_id TEXT NOT NULL REFERENCES agent_instruction_archive(id),
+  action TEXT NOT NULL,
+  actor TEXT NOT NULL,
+  old_state TEXT,
+  new_state TEXT NOT NULL,
+  prior_recipient TEXT,
+  created_at REAL NOT NULL,
+  tx_id INTEGER NOT NULL REFERENCES tx(tx_id),
+  archived_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_instruction_archive_event_item
+  ON agent_instruction_archive_event(instruction_id,created_at,id);
 
 CREATE TABLE IF NOT EXISTS chat_message (
   seq            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -97,6 +141,7 @@ CREATE TABLE IF NOT EXISTS chat_message (
   sender_device  TEXT NOT NULL,
   sender_client  TEXT NOT NULL,
   sender_session TEXT,
+  sender_origin TEXT NOT NULL DEFAULT 'agent',
   target_key     TEXT NOT NULL,
   body           TEXT NOT NULL,
   body_bytes     INTEGER NOT NULL,
@@ -137,6 +182,16 @@ CREATE TABLE IF NOT EXISTS chat_session (
   PRIMARY KEY (user, device, client, session_id)
 );
 CREATE INDEX IF NOT EXISTS ix_chat_session_last_activity ON chat_session(last_activity_at);
+CREATE TABLE IF NOT EXISTS console_read_cursor (
+  user TEXT NOT NULL,
+  device TEXT NOT NULL,
+  channel TEXT NOT NULL,
+  conversation TEXT NOT NULL,
+  seq INTEGER NOT NULL,
+  message_id TEXT NOT NULL,
+  updated_at REAL NOT NULL,
+  PRIMARY KEY(user,device,channel,conversation)
+);
 CREATE TABLE IF NOT EXISTS agent_capability (
   user          TEXT NOT NULL,
   device        TEXT NOT NULL,

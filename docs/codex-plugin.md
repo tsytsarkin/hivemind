@@ -1,5 +1,11 @@
 # Using Hivemind with Codex
 
+The 1.5.0 server also offers the optional [project web console](web-console.md) on port 8788.
+It uses the same user token as Codex and shows project-wide DMs, agent presence, rooms,
+assignments and durable human instructions. Codex agents should check
+`agent_instruction_inbox` and `graph_task_my_assignments` when reconnecting and advertise
+their capabilities with `agent_capabilities_set`; see [Collaboration](collaboration.md).
+
 `plugins/hivemind/` is a separate port of the Claude plugin in `plugin/`. It bundles the same
 Hivemind and schema guidance, a project-picker skill, a session pin hook, and an HTTP MCP server.
 The Claude plugin and its marketplace remain separately installable.

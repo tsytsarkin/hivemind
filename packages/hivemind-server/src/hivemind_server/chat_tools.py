@@ -118,7 +118,8 @@ def attach(mcp, cfg, identities) -> None:
     def chat_room_leave(name: str, client: str, session_id: str) -> dict:
         who, session = _addressed(client, session_id)
         store = _store()
-        result = store.leave(name, who)
+        from . import teams
+        result = teams.remove_member(_project().db, name, who, who)
         _touch(store, who, session)
         return result
 

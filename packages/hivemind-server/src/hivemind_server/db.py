@@ -119,6 +119,7 @@ class Database:
         ("graph_task", "status_mode", "TEXT NOT NULL DEFAULT 'sidecar'"),
         ("graph_task", "required_capabilities_json", "TEXT NOT NULL DEFAULT '[]'"),
         ("chat_message", "task_node_id", "TEXT REFERENCES node(node_id)"),
+        ("chat_message", "sender_origin", "TEXT NOT NULL DEFAULT 'agent'"),
         ("chat_cursor", "message_id", "TEXT"),
     )
 
@@ -146,6 +147,14 @@ class Database:
                 if cols and column not in cols:
                     con.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
             con.executescript(_SCHEMA_PATH.read_text())
+            # Add a first arrival record for projects that persisted instructions before the
+            # delivery cursor existed. Handoffs append later arrivals, never reorder IDs.
+            con.execute("INSERT INTO agent_instruction_delivery(instruction_id,recipient_user,"
+                        "recipient_device,recipient_client,created_at,tx_id) "
+                        "SELECT i.id,i.recipient_user,i.recipient_device,i.recipient_client,"
+                        "i.created_at,i.created_tx FROM agent_instruction i WHERE NOT EXISTS "
+                        "(SELECT 1 FROM agent_instruction_delivery d WHERE d.instruction_id=i.id) "
+                        "ORDER BY i.created_at,i.id")
             # Before status_mode existed, marked work_item nodes already versioned their
             # statuses. The new column defaults to sidecar so generic markers remain safe;
             # classify the old rows once, atomically, before any claim can be used. A meta

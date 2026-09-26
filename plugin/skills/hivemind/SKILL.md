@@ -9,7 +9,7 @@ description: >-
   Hivemind REPLACES local memory: read it before any work and persist all work into it. Domain-agnostic — call schema_get and guide_get first to learn this project's vocabulary.
 allowed-tools: Bash(${CLAUDE_SKILL_DIR}/scripts/guide.sh *) Read
 metadata:
-  version: "1.4.0"
+  version: "1.5.0"
 ---
 
 # Hivemind
@@ -144,7 +144,8 @@ post. Never fabricate progress from a timer or heartbeat.
 
 **Optional structured work lives on the graph, not in chat records.** When multiple agents should
 join, explicitly create a topic room first, then `graph_task_offer(room, title, summary, client,
-session_id, project=<p>)` creates a persistent `work_item` (requires an active `work_item` schema).
+session_id, project=<p>)` creates a persistent graph node. If the project's `work_item` schema
+cannot support tasks, the server provisions its reserved `hivemind_collab_task` type instead.
 Or `graph_task_enable(node_id, client, session_id, room=<existing-room>|null, project=<p>)`
 marks any existing graph node as a task. Claiming is optional: non-exclusive
 `graph_task_activity(node_id, client, session_id, interval_seconds=300,
@@ -165,6 +166,47 @@ reports `unclaimed`, `in_progress`, or `complete`, owner, expiry and whether a r
 is overdue. Expired claims are immediately available; a stale token cannot complete after
 takeover. Keep claim tokens out of room posts, graph props and shared notes. Respond to task
 requests in the room as freeform messages; the graph is the source of task status.
+
+## Agent teams and human instructions (1.5.0)
+
+For every project you work in, reconnect and call `agent_instruction_inbox(client="claude",
+session_id=<sid>, project=<p>)` and `graph_task_my_assignments(client="claude",
+session_id=<sid>, project=<p>)` as well as the chat catch-up above. Human instructions are durable,
+project-local work requests, not DMs and not shell commands; they do not expire with chat. Only
+your stable `(user, device, client)` address can fetch or update them. Page the instruction inbox
+with `after_id`/`next_cursor`. Advance an instruction with `agent_instruction_update(id,
+expected_state="queued", new_state="acknowledged", client, session_id, project=<p>)`, then
+`acknowledged → in_progress → completed|failed`, or complete/fail straight from acknowledged.
+State transitions compare-and-swap; include a concise `result` for an outcome. A completed
+instruction reports what you did but does not itself prove external side effects. Do not run a
+queued instruction twice after reconnecting or silently retry an already started request.
+
+Advertise your actual project-local capabilities with `agent_capabilities_set(client="claude",
+session_id=<sid>, capabilities=["review", "python"], project=<p>)`. This replaces your previous
+declaration, including removals. Read another agent's tags via `agent_capabilities_get(user,
+device, agent_client, client, session_id, project=<p>)`. `graph_task_offer` and
+`graph_task_enable` accept `required_capabilities=[...]`; claims and mandatory assignments are
+rejected unless the assignee advertises **all** required tags. A removed tag immediately fences
+ineligible claims and assignments. Capability tags are self-reported, not independently verified.
+
+`chat_room_create` only creates a room; join explicitly, or add known room members with
+`team_room_member_add(room, to_user, to_device, to_client, client, session_id, project=<p>)`.
+Check the current manager and optimistic revision with `team_room_get(room, client, session_id,
+project=<p>)`. A room member can make itself manager with `team_manager_self_promote(room,
+expected_revision, client, session_id, project=<p>)` when the user requests it; no second
+approval step is required. A room has at most one manager, and replacing it atomically moves
+still-queued manager-directed instructions; already acknowledged work stays with its recipient.
+Any project participant may offer graph tasks. The current room manager may assign an eligible
+room member using `graph_task_assign(node_id, to_user, to_device, to_client, client, session_id,
+expected_revision=<task-assignment-revision>, project=<p>)` or clear an assignment with
+`graph_task_assignment_clear`. This is a mandatory reservation, not an offer: an offline assignee
+sees it in `graph_task_my_assignments` and then explicitly calls `graph_task_claim` to begin.
+There is **no** heartbeat or expiry before that claim; the claimed lease has the configurable
+5-minute/1-hour defaults and a 24-hour maximum expiry. Only the assignee can claim reserved work;
+expiry, reassignment, and losing a required capability fence stale tokens. Human project users
+can also manage rooms, read all room/DM transcripts, assign work and queue instructions in the
+separate-port web UI; project-wide DM visibility there does not grant agents access to others'
+private MCP inboxes. The UI is on by default but can be disabled in `hivemind.toml`.
 
 ## Legacy ephemeral agent bus (compatibility only)
 

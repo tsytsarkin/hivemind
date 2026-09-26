@@ -1,7 +1,7 @@
 # uv workspace root — see https://docs.astral.sh/uv/concepts/projects/workspaces/
 [project]
 name = "hivemind-workspace"
-version = "1.4.0"
+version = "1.5.0"
 description = "Hivemind — shared agent knowledge-graph + artifact store + tool registry"
 requires-python = ">=3.9"
 

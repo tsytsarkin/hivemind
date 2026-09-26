@@ -169,6 +169,7 @@ class ChatStore:
                 "sender": (row["sender_user"],
                 row["sender_device"], row["sender_client"]),
                 "sender_session": row["sender_session"], "kind": row["message_kind"],
+                "sender_origin": row["sender_origin"],
                 "body": row["body"], "created_at": row["created_at"],
                 "expires_at": row["created_at"] + MESSAGE_TTL}
 
@@ -202,12 +203,15 @@ class ChatStore:
     def send(self, channel: str, target: StableAddress | str, sender: StableAddress,
              body: str, idempotency_key: str, *, now: Optional[float] = None,
              kind: str = "text", session_id: Optional[str] = None,
-             task_node_id: Optional[str] = None) -> dict:
+             task_node_id: Optional[str] = None,
+             sender_origin: str = "agent") -> dict:
         who = _address(sender)
         if channel not in ("dm", "room"):
             raise Invalid("channel must be dm or room")
         if kind not in ("text", "progress"):
             raise Invalid("message kind must be text or progress")
+        if sender_origin not in ("agent", "human_ui"):
+            raise Invalid("unknown message sender origin")
         if not isinstance(body, str) or len(body.encode("utf-8")) > MAX_BODY_BYTES:
             raise Invalid("body exceeds 256 KiB UTF-8")
         if kind == "progress" and not body.strip():
@@ -237,7 +241,8 @@ class ChatStore:
                 (*who, target_key, idempotency_key)).fetchone()
             if duplicate:
                 if (duplicate["body"] != body or duplicate["message_kind"] != kind or
-                        duplicate["task_node_id"] != task_node_id):
+                        duplicate["task_node_id"] != task_node_id or
+                        duplicate["sender_origin"] != sender_origin):
                     raise Conflict("idempotency_key already used for different content")
                 if session_id is not None:
                     self._touch(cur, who, session_id, t)
@@ -264,10 +269,10 @@ class ChatStore:
             cur.execute("INSERT INTO chat_message(message_id,channel,room_id,target_user,"
                         "target_device,target_client,sender_user,sender_device,sender_client,"
                         "sender_session,target_key,body,body_bytes,message_kind,task_node_id,"
-                        "retry_key,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        "retry_key,created_at,sender_origin) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                         (message_id, channel, room_id, *(addressed or (None, None, None)),
                          *who, session_id, target_key, body, byte_count, kind, task_node_id,
-                         idempotency_key, t))
+                         idempotency_key, t, sender_origin))
             seq = cur.lastrowid
             cur.execute("UPDATE chat_usage SET counted_bytes=counted_bytes+?, "
                         "message_count=message_count+1 WHERE id=1",
@@ -277,6 +282,7 @@ class ChatStore:
         return {"id": message_id, "seq": seq, "channel": channel, "room_id": room_id,
                 "sender": who, "sender_session": session_id, "kind": kind, "body": body,
                 "task_node_id": task_node_id,
+                "sender_origin": sender_origin,
                 "created_at": t, "expires_at": t + MESSAGE_TTL, "duplicate": False}
 
     @staticmethod

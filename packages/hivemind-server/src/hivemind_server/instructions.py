@@ -1,6 +1,8 @@
 """Durable project-local human instruction queue; no instruction executes on the server."""
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 import time
 from typing import Optional
@@ -13,6 +15,7 @@ from .ids import ulid
 MAX_BODY = 64 * 1024
 MAX_PENDING = 10_000
 MAX_TOTAL = 100_000
+TERMINAL_RETENTION = 30 * 86400
 _KEY = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
 TRANSITIONS = {
     "queued": {"acknowledged", "cancelled"},
@@ -51,6 +54,41 @@ def _event(tx: Tx, item_id: str, action: str, actor: str, old: Optional[str],
                    (ulid(), item_id, action, actor, old, new, prior, t, tx.tx_id))
 
 
+def _request_digest(body: str, room_id: Optional[str], to_manager: bool,
+                    recipient: StableAddress | None, retry_of: Optional[str]) -> str:
+    payload = [body, room_id, to_manager, recipient if not to_manager else None, retry_of]
+    return hashlib.sha256(json.dumps(payload, separators=(",", ":")).encode()).hexdigest()
+
+
+def _archive_terminal(tx: Tx, now: float, *, limit: int = 1000) -> int:
+    """Compact old terminal bodies but retain durable author/recipient/status audit metadata."""
+    rows = tx.cur.execute(
+        "SELECT * FROM agent_instruction i WHERE i.state IN ('completed','failed','cancelled') "
+        "AND i.updated_at<=? AND NOT EXISTS (SELECT 1 FROM agent_instruction c "
+        "WHERE c.retry_of=i.id) ORDER BY i.updated_at,i.id LIMIT ?",
+        (now - TERMINAL_RETENTION, limit)).fetchall()
+    for row in rows:
+        recipient = (row["recipient_user"], row["recipient_device"], row["recipient_client"])
+        digest = _request_digest(row["body"], row["room_id"], bool(row["to_manager"]),
+                                 recipient, row["retry_of"])
+        count = tx.cur.execute("SELECT COUNT(*) AS n FROM agent_instruction_event WHERE "
+                               "instruction_id=?", (row["id"],)).fetchone()["n"]
+        tx.cur.execute("INSERT INTO agent_instruction_archive VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                       (row["id"], row["author_user"], *recipient, row["room_id"],
+                        row["to_manager"], row["state"], row["retry_key"], row["retry_of"],
+                        row["created_at"], row["updated_at"], now, digest, count))
+        tx.cur.execute(
+            "INSERT INTO agent_instruction_archive_event "
+            "SELECT id,instruction_id,action,actor,old_state,new_state,prior_recipient,"
+            "created_at,tx_id,? FROM agent_instruction_event WHERE instruction_id=?",
+            (now, row["id"]))
+        tx.cur.execute("DELETE FROM agent_instruction_event WHERE instruction_id=?", (row["id"],))
+        tx.cur.execute("DELETE FROM agent_instruction_delivery WHERE instruction_id=?",
+                       (row["id"],))
+        tx.cur.execute("DELETE FROM agent_instruction WHERE id=?", (row["id"],))
+    return len(rows)
+
+
 def enqueue(db: Database, author: str, recipient: StableAddress, body: str,
             retry_key: str, *, room: Optional[str] = None,
             to_manager: bool = False, retry_of: Optional[str] = None) -> dict:
@@ -83,6 +121,13 @@ def enqueue(db: Database, author: str, recipient: StableAddress, body: str,
                      previous["recipient_client"]) != who)):
                 raise Conflict("idempotency key was used for a different instruction")
             return _public(previous, now=t)
+        archived = tx.cur.execute("SELECT * FROM agent_instruction_archive WHERE "
+                                  "author_user=? AND retry_key=?", (author, retry_key)).fetchone()
+        if archived is not None:
+            digest = _request_digest(body, room_id, to_manager, who, retry_of)
+            if archived["request_digest"] != digest:
+                raise Conflict("idempotency key was used for a different instruction")
+            return {"id": archived["id"], "state": archived["state"], "archived": True}
         if retry_of is not None:
             old = tx.cur.execute("SELECT * FROM agent_instruction WHERE id=?",
                                  (retry_of,)).fetchone()
@@ -92,12 +137,17 @@ def enqueue(db: Database, author: str, recipient: StableAddress, body: str,
         pending = tx.cur.execute("SELECT COUNT(*) AS n FROM agent_instruction WHERE state IN "
                                  "('queued','acknowledged','in_progress')").fetchone()["n"]
         total = tx.cur.execute("SELECT COUNT(*) AS n FROM agent_instruction").fetchone()["n"]
+        if total >= MAX_TOTAL:
+            total -= _archive_terminal(tx, t)
         if pending >= MAX_PENDING or total >= MAX_TOTAL:
-            raise Conflict("instruction queue quota reached; resolve or archive old work")
+            raise Conflict("instruction queue quota reached; resolve old work or archive terminal work older than 30 days")
         item_id = ulid()
         tx.cur.execute("INSERT INTO agent_instruction VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                        (item_id, author, *who, room_id, int(to_manager), body, "queued",
                         None, retry_key, retry_of, t, t, tx.tx_id))
+        tx.cur.execute("INSERT INTO agent_instruction_delivery(instruction_id,recipient_user,"
+                       "recipient_device,recipient_client,created_at,tx_id) VALUES(?,?,?,?,?,?)",
+                       (item_id, *who, t, tx.tx_id))
         _event(tx, item_id, "enqueue", author, None, "queued", None, t)
         return _public(tx.cur.execute("SELECT * FROM agent_instruction WHERE id=?",
                                       (item_id,)).fetchone(), now=t)
@@ -108,15 +158,21 @@ def inbox(db: Database, recipient: StableAddress, *, after_id: Optional[str] = N
     who = _address(recipient)
     if type(limit) is not int or not 1 <= limit <= 100:
         raise Invalid("limit must be 1–100")
-    if after_id is not None and (not isinstance(after_id, str) or len(after_id) > 64):
-        raise Invalid("invalid cursor")
+    if after_id is not None and (not isinstance(after_id, str) or not after_id.isascii() or
+                                 not after_id.isdecimal() or len(after_id) > 19):
+        raise Invalid("after_id must be the decimal delivery cursor from next_cursor")
     with db.read() as cur:
-        rows = cur.execute("SELECT * FROM agent_instruction WHERE recipient_user=? "
-                           "AND recipient_device=? AND recipient_client=? AND id>? "
-                           "ORDER BY id LIMIT ?", (*who, after_id or "", limit)).fetchall()
+        rows = cur.execute("SELECT i.*, d.seq AS delivery_seq FROM agent_instruction_delivery d "
+                           "JOIN agent_instruction i ON i.id=d.instruction_id "
+                           "WHERE d.recipient_user=? AND d.recipient_device=? AND "
+                           "d.recipient_client=? AND i.recipient_user=? AND "
+                           "i.recipient_device=? AND i.recipient_client=? AND d.seq>? AND "
+                           "d.seq=(SELECT MAX(x.seq) FROM agent_instruction_delivery x "
+                           "WHERE x.instruction_id=i.id) ORDER BY d.seq LIMIT ?",
+                           (*who, *who, int(after_id or 0), limit)).fetchall()
         items = [_public(row, last_seen=_last_seen(cur, row)) for row in rows]
     return {"instructions": items, "count": len(items),
-            "next_cursor": items[-1]["id"] if items else None}
+            "next_cursor": str(rows[-1]["delivery_seq"]) if rows else None}
 
 
 def transition(db: Database, recipient: StableAddress, instruction_id: str,
@@ -137,6 +193,9 @@ def transition(db: Database, recipient: StableAddress, instruction_id: str,
             raise Conflict("instruction is addressed to another agent")
         if row["state"] != expected_state:
             raise Conflict("instruction state changed; fetch it before retrying")
+        if (row["to_manager"] and row["state"] == "queued" and
+                teams._current(tx.cur, row["room_id"])[0] != who):
+            raise Conflict("queued manager instruction awaits the current room manager")
         tx.cur.execute("UPDATE agent_instruction SET state=?,result=?,updated_at=? WHERE id=?",
                        (new_state, result, t, instruction_id))
         _event(tx, instruction_id, new_state, "-".join(who), expected_state, new_state,
@@ -172,17 +231,31 @@ def handoff_queued(tx: Tx, room_id: str, new_manager: StableAddress) -> int:
             continue
         tx.cur.execute("UPDATE agent_instruction SET recipient_user=?,recipient_device=?,"
                        "recipient_client=?,updated_at=? WHERE id=?", (*target, t, row["id"]))
+        tx.cur.execute("INSERT INTO agent_instruction_delivery(instruction_id,recipient_user,"
+                       "recipient_device,recipient_client,created_at,tx_id) VALUES(?,?,?,?,?,?)",
+                       (row["id"], *target, t, tx.tx_id))
         _event(tx, row["id"], "manager_handoff", "-".join(target), "queued", "queued",
                "-".join(prior), t)
     return len(rows)
 
 
-def list_project(db: Database, *, after_id: Optional[str] = None, limit: int = 100) -> dict:
+def list_project(db: Database, *, after_id: Optional[str] = None,
+                 before_id: Optional[str] = None, limit: int = 100) -> dict:
     if type(limit) is not int or not 1 <= limit <= 100:
         raise Invalid("limit must be 1–100")
+    if before_id is not None and (not isinstance(before_id, str) or len(before_id) > 64):
+        raise Invalid("invalid before_id cursor")
     with db.read() as cur:
-        rows = cur.execute("SELECT * FROM agent_instruction WHERE id>? ORDER BY id LIMIT ?",
-                           (after_id or "", limit)).fetchall()
+        if after_id is not None and before_id is None:
+            rows = cur.execute("SELECT * FROM agent_instruction WHERE id>? ORDER BY id LIMIT ?",
+                               (after_id, limit)).fetchall()
+        else:
+            rows = cur.execute("SELECT * FROM agent_instruction WHERE id<? ORDER BY id DESC LIMIT ?",
+                               (before_id or "Z", limit)).fetchall()
+        more = bool(rows and cur.execute(
+            "SELECT 1 FROM agent_instruction WHERE id<? LIMIT 1",
+            (rows[-1]["id"],)).fetchone())
         items = [_public(row, last_seen=_last_seen(cur, row)) for row in rows]
     return {"instructions": items, "count": len(items),
-            "next_cursor": items[-1]["id"] if items else None}
+            "next_cursor": items[-1]["id"] if items else None,
+            "older_cursor": items[-1]["id"] if more else None}

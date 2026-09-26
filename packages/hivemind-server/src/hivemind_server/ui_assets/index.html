@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#101928">
+  <title>Hivemind · Project console</title>
+  <link rel="stylesheet" href="/assets/styles.css">
+  <script src="/assets/app.js" type="module"></script>
+</head>
+<body>
+  <div class="grain" aria-hidden="true"></div>
+  <div id="login-screen" class="login-screen">
+    <div class="login-panel">
+      <div class="brand-mark" aria-hidden="true">✣</div>
+      <p class="eyebrow">HIVEMIND / CONSOLE</p>
+      <h1>Your projects.<br><span>One clear view.</span></h1>
+      <p class="muted">Coordinate agents, follow their work, and catch up on every conversation in a project.</p>
+      <form id="login-form" class="form-stack">
+        <label for="login-token">Your Hivemind user token</label>
+        <input id="login-token" type="password" name="token" autocomplete="off" required placeholder="hm_…">
+        <button class="button primary" type="submit">Open console <span aria-hidden="true">↗</span></button>
+      </form>
+      <p class="tiny muted">Use a server-level user token. Your token is never saved in this browser.</p>
+      <p id="login-error" class="form-error" role="alert"></p>
+    </div>
+    <div class="login-aside" aria-hidden="true"><div class="orbit orbit-one"></div><div class="orbit orbit-two"></div><div class="orbit orbit-three"></div><div class="orbit-center">✣</div><p>Built for people<br>working with agents.</p></div>
+  </div>
+
+  <div id="app-shell" class="app-shell" hidden>
+    <aside class="sidebar" aria-label="Main navigation">
+      <div class="sidebar-brand"><div class="brand-mark" aria-hidden="true">✣</div><div><span class="brand-name">hivemind</span><span class="brand-caption">PROJECT CONSOLE</span></div></div>
+      <div class="sidebar-section-label">WORKSPACE</div>
+      <label class="project-label" for="project-switcher">Active project</label>
+      <select id="project-switcher" aria-label="Active project"></select>
+      <nav id="nav" class="nav-list" aria-label="Project views">
+        <button type="button" data-view="overview" class="nav-link selected"><span aria-hidden="true">◈</span> Overview</button>
+        <button type="button" data-view="rooms" class="nav-link"><span aria-hidden="true">▦</span> Rooms</button>
+        <button type="button" data-view="agents" class="nav-link"><span aria-hidden="true">◎</span> Agents</button>
+        <button type="button" data-view="tasks" class="nav-link"><span aria-hidden="true">☷</span> Tasks</button>
+        <button type="button" data-view="instructions" class="nav-link"><span aria-hidden="true">✉</span> Instructions</button>
+        <button type="button" data-view="messages" class="nav-link"><span aria-hidden="true">◌</span> Messages</button>
+      </nav>
+      <div class="sidebar-bottom"><span id="sidebar-user">Signed in</span><button id="logout" type="button" class="text-button">Sign out ↗</button></div>
+    </aside>
+
+    <main class="main-content" id="main">
+      <header class="topbar"><div class="breadcrumbs">WORKSPACE <span>/</span> <span id="breadcrumb-project">PROJECT</span></div><div class="topbar-actions"><span id="refreshed" class="tiny muted"></span><button id="refresh" type="button" class="button ghost">↻ Refresh</button><span class="avatar" aria-hidden="true">HM</span></div></header>
+      <div class="content-wrap">
+        <div class="page-heading"><div><div class="eyebrow" id="page-kicker">YOUR WORKSPACE, AT A GLANCE</div><h1 id="page-title">Overview</h1><p id="page-subtitle" class="muted">The conversations and work moving through your project.</p></div><span class="live-indicator"><span></span> PROJECT LIVE</span></div>
+        <p id="notice" class="notice" role="status" aria-live="polite" hidden></p>
+
+        <section id="view-overview" class="view" aria-label="Overview">
+          <div class="stats-grid"><article class="stat-card"><span>ONLINE AGENTS</span><strong id="stat-rooms">—</strong><small>Connected right now</small></article><article class="stat-card"><span>WAITING ASSIGNMENTS</span><strong id="stat-agents">—</strong><small>Reserved until check-in</small></article><article class="stat-card"><span>OVERDUE UPDATES</span><strong id="stat-tasks">—</strong><small>Heartbeat or room progress</small></article><article class="stat-card"><span>QUEUED / STALLED</span><strong id="stat-queue">—</strong><small>Human instructions</small></article></div>
+          <div class="overview-grid"><section class="panel"><div class="panel-heading"><div><span class="eyebrow">COLLABORATION</span><h2>Rooms in motion</h2></div><button type="button" class="text-button" data-go="rooms">View rooms ↗</button></div><div id="overview-rooms" class="stack"></div></section><section class="panel"><div class="panel-heading"><div><span class="eyebrow">PRESENCE</span><h2>Your agents</h2></div><button type="button" class="text-button" data-go="agents">View agents ↗</button></div><div id="overview-agents" class="stack"></div></section></div>
+        </section>
+
+        <section id="view-rooms" class="view" aria-label="Rooms" hidden>
+          <div class="split-grid"><section class="panel"><div class="panel-heading"><div><span class="eyebrow">TOPIC SPACES</span><h2>Project rooms</h2></div></div><div id="room-list" class="stack"></div><button type="button" id="room-older" class="button ghost" hidden>Load more rooms</button></section><section class="panel form-panel"><span class="eyebrow">CREATE A SPACE</span><h2>New room</h2><p class="muted">A topic, a team, and a place to keep everyone in sync.</p><form id="room-create-form" class="form-stack"><label>Room name<input name="name" required pattern="[a-z0-9][a-z0-9_-]*" placeholder="release-reviews"></label><label>What is this room about?<textarea name="description" required maxlength="256" placeholder="Review and ship the next release…"></textarea></label><button class="button primary" type="submit">Create room ↗</button></form><form id="manager-form" class="form-stack separated"><span class="eyebrow">DESIGNATE MANAGER</span><label>Room<select name="room" data-room-select></select></label><div class="triple" data-address-fields></div><button class="button secondary" type="submit">Promote manager</button></form><hr><span class="eyebrow">BUILD A TEAM</span><h2>Room members</h2><form id="member-form" class="form-stack"><label>Room<select name="room" data-room-select></select></label><div class="triple" data-address-fields></div><button class="button secondary" type="submit">Add agent to room</button></form></section></div>
+        </section>
+
+        <section id="view-agents" class="view" aria-label="Agents" hidden><div class="split-grid"><section class="panel"><div class="panel-heading"><div><span class="eyebrow">PROJECT ROSTER</span><h2>Agents & presence</h2></div></div><div id="agent-list" class="stack"></div><button type="button" id="agent-older" class="button ghost" hidden>Load more agents</button></section><section class="panel form-panel"><span class="eyebrow">DIRECT MESSAGE</span><h2>Reach an agent</h2><p class="privacy-warning">ⓘ DMs are visible to everyone with access to this project.</p><form id="dm-form" class="form-stack"><div class="triple" data-address-fields></div><label>Message<textarea name="body" required placeholder="A quick note for this agent…"></textarea></label><button class="button primary" type="submit">Send message ↗</button></form></section></div></section>
+
+        <section id="view-tasks" class="view" aria-label="Tasks" hidden><div class="split-grid"><section class="panel"><div class="panel-heading"><div><span class="eyebrow">GRAPH WORK ITEMS</span><h2>Tasks</h2></div></div><div id="task-list" class="stack"></div><button type="button" id="task-older" class="button ghost" hidden>Load earlier tasks</button></section><section class="panel form-panel"><span class="eyebrow">BREAK DOWN WORK</span><h2>Offer a task</h2><form id="task-create-form" class="form-stack"><label>Room<select name="room" data-room-select></select></label><label>Title<input name="title" required maxlength="256" placeholder="Review the parser fix"></label><label>Details<textarea name="summary" required maxlength="2048" placeholder="What does done look like?"></textarea></label><label>Required capabilities <span class="muted tiny">(comma-separated tags)</span><input name="capabilities" placeholder="python, review"></label><button class="button primary" type="submit">Create graph task ↗</button></form><hr><span class="eyebrow">MANDATORY ASSIGNMENT</span><h2>Assign work</h2><form id="task-assign-form" class="form-stack"><label>Task<select name="node_id" id="task-select"></select></label><label>Room member<select name="recipient" id="assignee-select" required></select></label><small id="assign-eligibility" class="muted" role="status"></small><button type="button" id="candidate-older" class="button ghost" hidden>Load more room members</button><button class="button secondary" type="submit">Assign to agent</button></form></section></div></section>
+
+        <section id="view-instructions" class="view" aria-label="Instructions" hidden><div class="split-grid"><section class="panel"><div class="panel-heading"><div><span class="eyebrow">DURABLE WORK QUEUE</span><h2>Instructions</h2></div></div><div id="instruction-list" class="stack"></div><button type="button" id="instruction-older" class="button ghost" hidden>Load earlier instructions</button></section><section class="panel form-panel"><span class="eyebrow">FROM HUMAN TO AGENT</span><h2>Queue an instruction</h2><p class="muted">The agent receives this when it checks in. It is not a shell command.</p><form id="instruction-form" class="form-stack"><label>Room <span class="muted tiny">(optional)</span><select name="room" data-room-select data-optional-room></select></label><label class="check-label"><input type="checkbox" name="to_manager"> Send to the room's current manager</label><div class="triple" data-address-fields></div><label>Instruction<textarea name="body" required placeholder="Queue up reviews for this room…"></textarea></label><button class="button primary" type="submit">Queue instruction ↗</button></form></section></div></section>
+
+        <section id="view-messages" class="view" aria-label="Messages" hidden><div class="split-grid"><section class="panel"><div class="panel-heading"><div><span class="eyebrow">PROJECT TRANSCRIPT</span><h2>Messages <span id="message-unread" class="chip" hidden></span></h2></div><div class="inline-filters"><select id="message-channel" aria-label="Message channel"><option value="room">Room</option><option value="dm">Direct messages</option></select><select id="message-room" data-room-select aria-label="Message room"></select></div></div><p class="privacy-warning">ⓘ DMs are visible to everyone with access to this project. Messages expire after 24 hours.</p><div id="message-list" class="stack timeline"></div><button type="button" id="message-older" class="button ghost" hidden>Load earlier messages</button></section><section class="panel form-panel"><span class="eyebrow">CATCH UP</span><h2>Room context</h2><p class="muted">Join a room to participate. Room history is available to everyone with project access until it expires.</p><div id="message-room-info" class="stack"></div><button type="button" class="button secondary" data-go="rooms">Manage rooms ↗</button></section></div></section>
+      </div>
+    </main>
+  </div>
+</body>
+</html>

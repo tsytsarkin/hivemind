@@ -13,8 +13,8 @@ from pathlib import Path
 from typing import Any
 
 from . import bus_ws
-from .chat import StableAddress, stable_identity
-from .db import Invalid
+from .chat import ChatStore, StableAddress, stable_identity
+from .db import Database, Invalid
 from .identity import Identity, IdentityStore
 
 
@@ -85,6 +85,11 @@ class CanonicalHub:
             return any(parts[:3] == stable and (session_id is None or parts[3] == session_id)
                        for parts in self._sessions)
 
+    def online_addresses(self) -> set[StableAddress]:
+        """One stable address per attached listener, without scanning stored idle sessions."""
+        with self._guard:
+            return {parts[:3] for parts in self._sessions}
+
     async def notify(self, stable: StableAddress, frame: dict) -> int:
         """Best-effort live push; callers have already persisted the message."""
         if "body" in frame:
@@ -120,7 +125,8 @@ def hub_for(project_dir: Path) -> CanonicalHub:
 
 
 async def websocket_endpoint(ws: Any, project_name: str, project_dir: Path, *,
-                             require_auth: bool = True, identities: IdentityStore) -> None:
+                             require_auth: bool = True, identities: IdentityStore,
+                             db: Database) -> None:
     """Recheck project ACL while connected, and refuse invalid credentials before accept."""
     hub = hub_for(project_dir)
     verified = hub.verify_key(ws.query_params.get("key", ""))
@@ -135,6 +141,8 @@ async def websocket_endpoint(ws: Any, project_name: str, project_dir: Path, *,
     if not authorized():
         await ws.close(code=4401)
         return
+    presence = ChatStore(db)
+    await asyncio.to_thread(presence.touch, parts[:3], parts[3])
     await ws.accept()
     await hub.attach(parts, ws, credential_hash=fingerprint, identities=identities)
     await ws.send_text(json.dumps({"v": 2, "type": "hello", "peer": "-".join(parts),
@@ -147,6 +155,9 @@ async def websocket_endpoint(ws: Any, project_name: str, project_dir: Path, *,
                 if not authorized():
                     await ws.close(code=4401)
                     break
+                # A still-connected, reauthorized listener is active even when chat is quiet.
+                # Refresh before expiry cleanup so online agents never disappear at 24 hours.
+                await asyncio.to_thread(presence.touch, parts[:3], parts[3])
             try:
                 await asyncio.wait_for(ws.receive_text(),
                                        timeout=min(bus_ws.HEARTBEAT,

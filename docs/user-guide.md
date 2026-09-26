@@ -1,5 +1,11 @@
 # Using Hivemind with Claude Code
 
+The 1.5.0 server includes a separate-port [project web console](web-console.md) for accessible
+projects. Log in with your existing user/device token to see room and DM transcripts, build
+teams, assign graph tasks and queue durable human instructions. DMs are visible to all project
+users in this UI. For agent-side workflows and reconnect catch-up, see
+[Collaboration](collaboration.md).
+
 A practical guide for the person sitting at the keyboard: how to connect a session to a Hivemind
 server — with or without installing anything — and what to do in the first five minutes.
 

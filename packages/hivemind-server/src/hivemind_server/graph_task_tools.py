@@ -65,8 +65,7 @@ def attach(mcp, identities) -> None:
     @mcp.tool(annotations=WRITE, description="As the current room manager, assign an eligible room member a graph task; offline agents discover it when they check in. Reassignment fences the previous claim.")
     @_envelope
     def graph_task_assign(node_id: str, to_user: str, to_device: str, to_client: str,
-                          client: str, session_id: str,
-                          expected_revision: Optional[int] = None) -> dict:
+                          client: str, session_id: str, expected_revision: int) -> dict:
         p, who = _context(client, session_id)
         target = _address((to_user, to_device, to_client))
         if not identities.has_device(to_user, to_device) or not can_access(
@@ -81,6 +80,15 @@ def attach(mcp, identities) -> None:
         p, who = _context(client, session_id)
         pending = assignments.mine(p.db, who)
         return {"assignments": pending, "count": len(pending)}
+
+    @mcp.tool(annotations=WRITE, description="As the current room manager, cancel a waiting or active mandatory assignment and fence the old claim.")
+    @_envelope
+    def graph_task_assignment_clear(node_id: str, expected_revision: int,
+                                    client: str, session_id: str) -> dict:
+        p, who = _context(client, session_id)
+        return assignments.clear(p.db, "graph-task-assignment-clear", node_id,
+                                 "manager_cancelled", expected_revision=expected_revision,
+                                 manager_actor=who)
 
     @mcp.tool(annotations=WRITE, description="Set a graph task's required self-advertised capability tags; ineligible holders and assignees are immediately fenced.")
     @_envelope

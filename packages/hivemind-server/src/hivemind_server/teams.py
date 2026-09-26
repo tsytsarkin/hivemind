@@ -61,6 +61,14 @@ def remove_member(db: Database, room: str, target: StableAddress,
                (row["token_digest"] is not None and row["last_beat_at"] +
                 row["expires_after_seconds"] > time.time()) for row in held):
             raise Conflict("member has a waiting or active assignment; reassign it first")
+        live_claim = tx.cur.execute(
+            "SELECT 1 FROM graph_task_claim c JOIN graph_task t ON t.node_id=c.node_id "
+            "WHERE t.room_id=? AND c.holder_user=? AND c.holder_device=? AND "
+            "c.holder_client=? AND c.token_digest IS NOT NULL AND "
+            "c.last_beat_at+c.expires_after_seconds>? LIMIT 1",
+            (room_id, *stable, time.time())).fetchone()
+        if live_claim is not None:
+            raise Conflict("member has a live room claim; release or reassign it first")
         previous, revision = _current(tx.cur, room_id)
         tx.cur.execute("DELETE FROM chat_subscription WHERE room_id=? AND user=? AND device=? "
                        "AND client=?", (room_id, *stable))

@@ -1,5 +1,14 @@
 # Deploying Hivemind
 
+Hivemind 1.5.0 starts an optional second listener for the
+[project web console](../docs/web-console.md), enabled by default on `127.0.0.1:8788`.
+Set `[web_ui] enabled = false` in `<data-dir>/hivemind.toml` to close the UI socket; changing
+`HIVEMIND_HOST` for MCP does **not** widen the UI bind automatically. For remote browser access,
+keep the listener on loopback and forward it through SSH or an authenticated HTTPS reverse
+proxy. The UI takes existing user tokens and shows all DMs within each accessible project;
+do not expose its login over unencrypted remote HTTP. With `HIVEMIND_REQUIRE_AUTH=0` the UI
+never starts, even if `[web_ui] enabled = true`.
+
 Dependencies are tracked three ways so any machine can reproduce the environment:
 
 - **`uv.lock`** (repo root) — source of truth, a universal lock across Python 3.9–3.14. Used by

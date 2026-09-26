@@ -8,7 +8,7 @@ description: >-
   standalone tool or reuse one another agent built; coordinate state across agents/machines; publish a procedure you worked out or record a dead-end that wasted time (and check for both before starting).
   Hivemind REPLACES local memory: read it before any work and persist all work into it. Domain-agnostic — call schema_get and guide_get first to learn this project's vocabulary.
 metadata:
-  version: "1.4.0"
+  version: "1.5.0"
 ---
 
 # Hivemind
@@ -143,7 +143,8 @@ heartbeat.
 
 **Optional graph tasks, not chat task records:** Explicitly create a room if others need to join;
 `graph_task_offer(room, title, summary, client, session_id, project=<p>)` creates a persistent
-`work_item` linked to it (project must have an active `work_item` schema).
+graph node linked to it. Projects without a task-compatible `work_item` use the server's reserved
+`hivemind_collab_task` schema instead.
 `graph_task_enable(node_id, client, session_id, room=<existing-room>|null, project=<p>)`
 adds the task marker to any existing node. `graph_task_activity(node_id, client, session_id,
 interval_seconds=300, expires_after_seconds=3600, project=<p>)` is non-exclusive and makes no
@@ -162,6 +163,43 @@ chat retention. `graph_task_get(node_id, client, session_id, project=<p>)` repor
 expiry another agent may claim; the old token is fenced. Keep claim tokens out of graph props,
 room posts and shared logs. Post work requests/results freely in the room; task state is graph
 data, not a chat task record.
+
+## Agent teams and human instructions (1.5.0)
+
+When starting or reconnecting in a project, fetch `agent_instruction_inbox(client="codex",
+session_id=<sid>, project=<p>)` and `graph_task_my_assignments(client="codex",
+session_id=<sid>, project=<p>)` alongside chat history. Human instructions are durable,
+project-local work requests: they do not expire after 24 hours and never authorize arbitrary
+shell execution. Only your stable `(user, device, client)` address can fetch or update one. Page
+with `after_id`/`next_cursor`; use `agent_instruction_update(id, expected_state="queued",
+new_state="acknowledged", client, session_id, project=<p>)`, then `in_progress`, then `completed`
+or `failed` with an optional `result`. You can finish directly from acknowledged. State updates
+are compare-and-swap; avoid replaying already started work after a reconnect.
+
+Set your real project-local skill tags using `agent_capabilities_set(client="codex",
+session_id=<sid>, capabilities=["review", "python"], project=<p>)`. This **replaces** the prior
+list, and a removed tag immediately fences ineligible claims/assignments. Inspect tags through
+`agent_capabilities_get`. Task offering/enabling accepts `required_capabilities=[...]`; you
+cannot claim a task unless your advertised tags cover all requirements. Declarations are
+self-reported rather than independently certified by the server.
+
+Rooms are explicitly created; `team_room_member_add(room, to_user, to_device, to_client, client,
+session_id, project=<p>)` adds a known agent to a room. `team_room_get(room, client, session_id,
+project=<p>)` gives its members, manager and revision. A subscribed room member can become its
+manager with `team_manager_self_promote(room, expected_revision, client, session_id,
+project=<p>)` when requested by the user; the server does not demand a second human approval.
+There is at most one manager per room; a promotion transfers still-queued manager-directed human
+instructions atomically but leaves already acknowledged work with its first recipient.
+Any project participant may create graph tasks. A room manager can make a **mandatory**
+assignment with `graph_task_assign(node_id, to_user, to_device, to_client, client, session_id,
+expected_revision=<task-assignment-revision>, project=<p>)` and cancel one using
+`graph_task_assignment_clear`. An offline assignment waits without a timer; the assignee
+discovers it with `graph_task_my_assignments`, calls `graph_task_claim` when ready, and only
+then begins its configured heartbeat/expiry. Other agents cannot claim the reservation. Expiry,
+reassignment and capability loss fence stale claim tokens. The separate-port web UI lets any
+project user manage rooms, assign work and issue durable instructions. It also shows all that
+project's DMs; agent-facing MCP inboxes remain sender/recipient private. The UI is enabled by
+default and can be disabled in `hivemind.toml`.
 
 ## Legacy ephemeral agent bus (compatibility only)
 

@@ -40,6 +40,18 @@ def test_offline_assignment_reserves_task_without_starting_heartbeat(db):
         "effective_status"] == "complete"
 
 
+def test_assigned_agent_releasing_live_claim_keeps_mandatory_reservation(db):
+    from hivemind_server import assignments
+
+    nid = _task(db)
+    assignments.assign(db, "manager", nid, OWNER)
+    lease = graph_tasks.claim(db, "owner", nid, OWNER)
+    graph_tasks.release(db, "owner", nid, lease["claim_token"], OWNER)
+    assert assignments.view(db, nid)["state"] == "assigned_waiting"
+    with pytest.raises(Conflict, match="assigned"):
+        graph_tasks.claim(db, "peer", nid, PEER)
+
+
 def test_ineligible_agent_can_neither_be_assigned_nor_claim(db):
     from hivemind_server import assignments
 
@@ -85,6 +97,20 @@ def test_reassignment_fences_live_holder_and_expiry_releases_reservation(db):
     assert assignments.view(db, node_id, now=t + 3600)["state"] == "available"
     graph_tasks.reap_expired(db, now=t + 3600)
     assert assignments.view(db, node_id)["state"] == "available"
+
+
+def test_stale_clear_cannot_cancel_newer_assignment(db):
+    from hivemind_server import assignments
+
+    nid = _task(db)
+    first = assignments.assign(db, "manager", nid, OWNER)
+    changed = assignments.assign(db, "manager", nid, PEER,
+                                 expected_revision=first["revision"])
+    with pytest.raises(Conflict, match="revision"):
+        assignments.clear(db, "manager", nid, "cancelled",
+                          expected_revision=first["revision"])
+    assert assignments.view(db, nid)["revision"] == changed["revision"]
+    assert assignments.view(db, nid)["assignee"] == PEER
 
 
 def test_member_with_waiting_assignment_cannot_be_silently_removed(db):

@@ -1,4 +1,4 @@
-# Durable collaboration and graph tasks (1.4.0)
+# Durable collaboration, agent teams and instructions (1.5.0)
 
 Hivemind has two distinct messaging transports. The `chat_*` tools store project-scoped DMs and
 room posts for **24 hours**, whether or not a recipient is connected. The older `bus_*` tools are
@@ -83,9 +83,10 @@ pretend status posts, and idle subscribers owe none.
 
 Tasks are graph state, not special chat messages. Create a room explicitly if multiple agents
 need to join; then `graph_task_offer(room, title, summary, client, session_id, project)` creates
-one permanent, versioned `work_item` node with an `unclaimed` status and a link to the existing
-room. This requires an **active** `work_item` node schema admitting `title`, `summary`, `status`
-and `room_id` (propose/add that schema if absent). Alternatively,
+one permanent, versioned graph task node with an `unclaimed` status and a link to the existing
+room. When an active `work_item` schema accepts all task states and fields, Hivemind uses it;
+otherwise it provisions a reserved `hivemind_collab_task` type without changing a project's
+custom schema. Alternatively,
 `graph_task_enable(node_id, client, session_id, room=<existing-room>|null, project)` marks any
 existing graph node as a task, even if that node's schema cannot have a `status` prop. In that
 case the marker and attributed event log carry effective `unclaimed`/`in_progress` separately
@@ -124,3 +125,58 @@ post progress without `task_node_id`; a claim heartbeat is **not** a room progre
 
 The legacy WebSocket and MCP tools remain described in [The agent bus](bus.md); security and
 project visibility details are in [Security](security.md).
+
+## 1.5.0 room teams and mandatory assignments
+
+Rooms are explicit topic spaces; creating one never subscribes another agent automatically.
+`team_room_member_add(room, to_user, to_device, to_client, client, session_id, project)` adds a
+known, project-authorized agent. `team_room_get(room, client, session_id, project)` shows the
+member addresses, current manager and manager revision. A subscribed agent may appoint itself
+manager with `team_manager_self_promote(room, expected_revision, client, session_id, project)`.
+This atomically replaces the old manager and records an audit event. The browser console can
+also designate any room member as manager. Manager is a coordination role, not a new project ACL;
+any project user can still create tasks.
+
+Agents replace their own per-project, self-reported capability tags with
+`agent_capabilities_set(client, session_id, capabilities=["python", "review"], project)`;
+`agent_capabilities_get(user, device, agent_client, client, session_id, project)` reads them.
+`graph_task_offer` and `graph_task_enable` accept `required_capabilities=[...]`, and
+`graph_task_requirements_set(node_id, required_capabilities, client, session_id, project)` can
+change them. The claim/assignment transaction requires **every** tag. Losing a tag immediately
+releases ineligible assignments and fences current claims; the server does not independently
+verify an agent's competence.
+
+The current room manager assigns an eligible room member with `graph_task_assign(node_id,
+to_user, to_device, to_client, client, session_id, expected_revision, project)`. This is
+**mandatory reserved work**, not an offer: the assignee cannot decline and another agent cannot
+claim it. Reconnecting agents call `graph_task_my_assignments(client, session_id, project)` to
+discover waiting work. Assignment starts **no timer**; `graph_task_claim` starts the exclusive
+lease only when the assignee actually checks in and claims. Reassignment fences any prior
+holder; manager cancellation uses `graph_task_assignment_clear`. On expiry the task becomes
+available again and stale tokens can no longer renew or complete. Assignment metadata, required
+tags, claim events and manager changes live in each project's SQLite DB, while graph task nodes
+and completed statuses persist in the graph rather than in ephemeral chat.
+
+## Durable human instruction queue
+
+The separate [web console](web-console.md) can queue an instruction to a stable agent address
+or the current manager of a room. The instruction is not a shell command and does **not** expire
+with 24-hour chat messages. Every agent checks `agent_instruction_inbox(client, session_id,
+after_id, limit, project)` on session start and reconnect; only the addressed agent can read
+or update it through MCP. Update by compare-and-swap:
+
+```text
+agent_instruction_update(id, expected_state="queued", new_state="acknowledged",
+                         client="codex", session_id="sid-1", project="nik.private")
+agent_instruction_update(id, expected_state="acknowledged", new_state="in_progress", ...)
+agent_instruction_update(id, expected_state="in_progress", new_state="completed",
+                         result="Reviewed the patch", ...)
+```
+
+An agent can finish or fail straight from `acknowledged`. A human can cancel queued work or
+explicitly retry failed/stalled work; already-started work is never replayed automatically.
+When a room's manager changes, *only* still-queued instructions addressed to the manager move
+to the new manager in the same database transaction. Direct instructions and acknowledged work
+do not move. The browser can see author, recipient, status and agent-reported result across its
+accessible project; a reported outcome is not proof of an external side effect. Unresolved work
+persists, with project quota errors instead of silent eviction.

@@ -43,6 +43,18 @@ def test_only_room_members_may_promote_and_removing_manager_vacates_role(db):
     assert teams.manager(db, "reviews")["manager"] is None
 
 
+def test_leaving_is_blocked_while_holding_any_live_room_claim(db):
+    from hivemind_server import graph_tasks, teams
+
+    ChatStore(db).create_room("reviews", "Review work", OWNER)
+    teams.add_member(db, "reviews", OWNER, OWNER)
+    node_id = graph_tasks.offer(db, "setup", "reviews", "Review fix", "Check diff")["node_id"]
+    graph_tasks.claim(db, "setup", node_id, OWNER)
+    with pytest.raises(Conflict, match="assignment|claim"):
+        teams.remove_member(db, "reviews", OWNER, OWNER)
+    assert OWNER in ChatStore(db).subscribers("reviews")
+
+
 @pytest.mark.anyio
 async def test_mcp_promotes_only_authenticated_room_member(env):
     app, project, _ = env
@@ -87,3 +99,41 @@ async def test_mcp_exposes_room_manager_revision_and_member_addresses(env):
         result = _call(response)
     assert result["manager"] is None and result["revision"] == 0
     assert result["members"] == [list(OWNER)]
+
+
+@pytest.mark.anyio
+async def test_mcp_adds_known_project_member_to_explicit_room(env):
+    app, project, _ = env
+    identities = IdentityStore(app.state.cfg.identities_path)
+    nik = identities.mint("nik", "mac")
+    identities.mint("ana", "laptop")
+    ChatStore(project.db).create_room("reviews", "Review work", OWNER)
+    async with Lifespan(app), httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                               base_url="http://t", timeout=30) as client:
+        response = await _post(client, "", nik, "tools/call", {
+            "name": "team_room_member_add", "arguments": {"project": project.name,
+                "room": "reviews", "to_user": "ana", "to_device": "laptop", "to_client": "claude",
+                "client": "codex", "session_id": "sid-nik"}})
+        assert "Unknown tool" not in response.text
+        assert _call(response)["ok"] is True
+    assert ChatStore(project.db).subscribers("reviews") == [PEER]
+
+
+@pytest.mark.anyio
+async def test_self_leave_cannot_bypass_live_assignment_or_abandon_manager(env):
+    from hivemind_server import assignments, graph_tasks, teams
+    app, project, _ = env
+    token = IdentityStore(app.state.cfg.identities_path).mint("nik", "mac")
+    ChatStore(project.db).create_room("reviews", "Review work", OWNER)
+    teams.add_member(project.db, "reviews", OWNER, OWNER)
+    teams.promote(project.db, "reviews", OWNER, OWNER, expected_revision=0)
+    task_id = graph_tasks.offer(project.db, "setup", "reviews", "Review fix", "Check diff")["node_id"]
+    assignments.assign(project.db, "setup", task_id, OWNER)
+    async with Lifespan(app), httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                               base_url="http://t", timeout=30) as client:
+        response = await _post(client, "", token, "tools/call", {
+            "name": "chat_room_leave", "arguments": {"project": project.name,
+                "name": "reviews", "client": "codex", "session_id": "sid-nik"}})
+        assert _call(response)["ok"] is False
+    assert teams.manager(project.db, "reviews")["manager"] == OWNER
+    assert OWNER in ChatStore(project.db).subscribers("reviews")

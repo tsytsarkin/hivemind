@@ -13,6 +13,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import socket
 from typing import Optional, Union
 
 import uvicorn
@@ -307,7 +308,7 @@ def build_app(cfg: Optional[Config] = None) -> Starlette:
             async def endpoint(ws):
                 from . import chat_ws as _c
                 await _c.websocket_endpoint(ws, p.name, p.dir, require_auth=require_auth,
-                                            identities=identities)
+                                            identities=identities, db=p.db)
             return endpoint
         # The ws route comes FIRST: Starlette takes the first matching route, and
         # Mount("/p/<name>") would otherwise swallow this path into the MCP app, which has no
@@ -422,6 +423,20 @@ def build_app(cfg: Optional[Config] = None) -> Starlette:
     return app
 
 
+def ui_listener_app(cfg: Config, mcp_app: Starlette):
+    """A disabled or unauthenticated deployment never opens a human-console socket."""
+    if not cfg.ui_enabled or not cfg.require_auth:
+        return None
+    from .ui_app import build_ui_app
+    return build_ui_app(cfg, mcp_app.state.registry, mcp_app.state.identities)
+
+
+def _open_listener(host: str, port: int) -> socket.socket:
+    """Bind before starting either server so port conflicts cannot leave a half-live deployment."""
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    return socket.create_server((host, port), family=family)
+
+
 def main() -> None:
     cfg = config()
     cfg.ensure_dirs()
@@ -434,7 +449,36 @@ def main() -> None:
     print(f"[hivemind] listening on http://{cfg.host}:{cfg.port}  "
           f"(MCP: /mcp with project=<name>, or /p/<project>/mcp)  "
           f"auth={'on' if cfg.require_auth else 'OFF'}")
-    uvicorn.run(app, host=cfg.host, port=cfg.port, log_level="info")
+    ui = ui_listener_app(cfg, app)
+    if ui is None:
+        if cfg.ui_enabled and not cfg.require_auth:
+            print("[hivemind] web UI disabled because token authentication is off")
+        uvicorn.run(app, host=cfg.host, port=cfg.port, log_level="info")
+        return
+    import asyncio
+
+    async def serve_both(mcp_socket, ui_socket):
+        mcp_server = uvicorn.Server(uvicorn.Config(app, log_level="info"))
+        ui_server = uvicorn.Server(uvicorn.Config(ui, log_level="info"))
+        print(f"[hivemind] web UI listening on http://{cfg.ui_host}:{cfg.ui_port}")
+        running = [asyncio.create_task(mcp_server.serve(sockets=[mcp_socket])),
+                   asyncio.create_task(ui_server.serve(sockets=[ui_socket]))]
+        try:
+            done, _ = await asyncio.wait(running, return_when=asyncio.FIRST_COMPLETED)
+            mcp_server.should_exit = ui_server.should_exit = True
+            await asyncio.gather(*running)
+            for task in done:
+                task.result()
+        finally:
+            mcp_server.should_exit = ui_server.should_exit = True
+            for task in running:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*running, return_exceptions=True)
+
+    with _open_listener(cfg.host, cfg.port) as mcp_socket, \
+            _open_listener(cfg.ui_host, cfg.ui_port) as ui_socket:
+        asyncio.run(serve_both(mcp_socket, ui_socket))
 
 
 if __name__ == "__main__":

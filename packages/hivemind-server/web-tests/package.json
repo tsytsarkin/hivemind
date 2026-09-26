@@ -1,0 +1,7 @@
+{
+  "name": "hivemind-console-smoke",
+  "private": true,
+  "version": "1.5.0",
+  "scripts": {"test": "python3 bootstrap.py"},
+  "devDependencies": {"@playwright/test": "^1.55.0"}
+}

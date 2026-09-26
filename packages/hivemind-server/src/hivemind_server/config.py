@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import tomllib
 from pathlib import Path
 
 
@@ -28,6 +29,30 @@ class Config:
         hosts = _env("HIVEMIND_ALLOWED_HOSTS", "*")
         self.allowed_hosts = [h.strip() for h in hosts.split(",") if h.strip()]
         self.require_auth = _env("HIVEMIND_REQUIRE_AUTH", "1") not in ("0", "false", "no")
+        cfg_path = Path(_env("HIVEMIND_CONFIG_FILE", str(self.data_dir / "hivemind.toml")))
+        settings = tomllib.loads(cfg_path.read_text()).get("web_ui", {}) if cfg_path.exists() else {}
+        if not isinstance(settings, dict):
+            raise ValueError("[web_ui] must be a TOML table")
+        enabled = settings.get("enabled", True)
+        host = settings.get("host", "127.0.0.1")
+        port = settings.get("port", 8788)
+        if type(enabled) is not bool or type(host) is not str or not host.strip() or \
+                type(port) is not int or not 1 <= port <= 65535:
+            raise ValueError("invalid [web_ui] enabled, host or port")
+        if "HIVEMIND_UI_ENABLED" in os.environ:
+            value = os.environ["HIVEMIND_UI_ENABLED"].lower()
+            if value not in ("1", "0", "true", "false", "yes", "no"):
+                raise ValueError("HIVEMIND_UI_ENABLED must be true or false")
+            enabled = value in ("1", "true", "yes")
+        host = _env("HIVEMIND_UI_HOST", host)
+        port = int(_env("HIVEMIND_UI_PORT", str(port)))
+        if not host.strip() or not 1 <= port <= 65535:
+            raise ValueError("invalid UI host or port")
+        self.ui_enabled, self.ui_host, self.ui_port = enabled, host, port
+        if enabled and port == self.port and (host == self.host or
+                                              host in ("0.0.0.0", "::") or
+                                              self.host in ("0.0.0.0", "::")):
+            raise ValueError("web UI port conflicts with the MCP listener port")
 
     @property
     def db_path(self) -> Path:

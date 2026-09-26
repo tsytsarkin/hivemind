@@ -47,6 +47,24 @@ def list_project(db: Database, *, limit: int = 100) -> list[dict]:
             for r in rows]
 
 
+def list_addresses(db: Database, addresses: set[StableAddress]) -> list[dict]:
+    """Read only visible roster/room members, not every self-advertiser in a project."""
+    if not addresses:
+        return []
+    result = []
+    stable = sorted(_address(who) for who in addresses)
+    with db.read() as cur:
+        for offset in range(0, len(stable), 100):
+            batch = stable[offset:offset + 100]
+            keys = ",".join("(?,?,?)" for _ in batch)
+            rows = cur.execute("SELECT * FROM agent_capability WHERE (user,device,client) "
+                               f"IN ({keys})", tuple(part for who in batch for part in who))
+            result.extend({"address": (r["user"], r["device"], r["client"]),
+                           "capabilities": json.loads(r["tags_json"]),
+                           "updated_at": r["updated_at"]} for r in rows)
+    return result
+
+
 def replace(db: Database, who: StableAddress, tags: list[str]) -> dict:
     stable = _address(who)
     normalized = normalize(tags)

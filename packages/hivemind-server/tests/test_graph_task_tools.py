@@ -108,7 +108,7 @@ async def test_manager_assigns_through_mcp_and_assignee_discovers_waiting_work(e
     app, project, _ = env
     nik = _token(app, "nik", "mac")
     ana = _token(app, "ana", "laptop")
-    from hivemind_server import capabilities, graph_tasks, teams
+    from hivemind_server import assignments, capabilities, graph_tasks, teams
 
     room = ChatStore(project.db).create_room("review-work", "Review work",
                                               ("nik", "mac", "codex"))
@@ -124,6 +124,13 @@ async def test_manager_assigns_through_mcp_and_assignee_discovers_waiting_work(e
 
     async with Lifespan(app), httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
                                                base_url="http://t", timeout=30) as client:
+        missing_revision = await _post(client, "", nik, "tools/call", {
+            "name": "graph_task_assign",
+            "arguments": {"project": project.name, "node_id": node_id,
+                          "to_user": "ana", "to_device": "laptop", "to_client": "claude",
+                          "client": "codex", "session_id": "nik-1"}})
+        assert "expected_revision" in missing_revision.text
+        assert assignments.view(project.db, node_id)["state"] == "available"
         denied_response = await _post(client, "", ana, "tools/call", {
             "name": "graph_task_assign",
             "arguments": {"project": project.name, "node_id": node_id,
@@ -192,3 +199,31 @@ async def test_manager_cannot_assign_room_member_after_their_private_project_acc
                           "client": "codex", "session_id": "nik-1", "expected_revision": 0}})
         assert "Unknown tool" not in response.text
         assert _call(response)["ok"] is False
+
+
+@pytest.mark.anyio
+async def test_only_manager_can_cancel_an_offline_task_assignment(env):
+    app, project, _ = env
+    nik, ana = _token(app, "nik", "mac"), _token(app, "ana", "laptop")
+    from hivemind_server import assignments, graph_tasks, teams
+
+    owner, peer = ("nik", "mac", "codex"), ("ana", "laptop", "claude")
+    ChatStore(project.db).create_room("review-work", "Review work", owner)
+    teams.add_member(project.db, "review-work", owner, owner)
+    teams.add_member(project.db, "review-work", peer, owner)
+    teams.promote(project.db, "review-work", owner, owner, expected_revision=0)
+    node_id = graph_tasks.offer(project.db, "setup", "review-work", "Audit code",
+                                "Review the patch")["node_id"]
+    assignments.assign(project.db, "setup", node_id, peer)
+    async with Lifespan(app), httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                               base_url="http://t", timeout=30) as client:
+        refused = await _post(client, "", ana, "tools/call", {
+            "name": "graph_task_assignment_clear", "arguments": {"project": project.name,
+               "node_id": node_id, "expected_revision": 1,
+               "client": "claude", "session_id": "ana-1"}})
+        assert "Unknown tool" not in refused.text
+        assert _call(refused)["ok"] is False
+        released = await _tool(client, nik, project.name, "graph_task_assignment_clear",
+                               node_id=node_id, expected_revision=1,
+                               client="codex", session_id="nik-1")
+    assert released["state"] == "available" and assignments.mine(project.db, peer) == []

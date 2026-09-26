@@ -310,8 +310,9 @@ def _end(db: Database, agent_id: str, node_id: str, claim_token: str,
                        "holder_device=NULL,holder_client=NULL WHERE node_id=? AND generation=?",
                        (node_id, lease["generation"]))
         _event(tx, node_id, kind, lease["generation"], stable, t)
-        from . import assignments
-        assignments._clear_assignment_tx(tx, node_id, kind, t)
+        if kind == "complete":
+            from . import assignments
+            assignments._clear_assignment_tx(tx, node_id, kind, t)
     return read(db, node_id, now=t)
 
 

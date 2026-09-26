@@ -1,5 +1,25 @@
 # Security notes (trusted-team tier)
 
+## Human web console (1.5.0)
+
+The optional, default-on console has its **own** listener at localhost:8788 and accepts only
+server-level user/device tokens. It does not open when token authentication is disabled. An
+opaque, HttpOnly, SameSite cookie is backed by a server-side session containing a *fingerprint*
+of the bearer, not the bearer itself; revocation takes effect on the next request. Writes require
+the separate CSRF token and reject a cross-origin `Origin`. Authenticated routes check the
+same project ACL as MCP on **every** request, and inaccessible/private names have the same 404
+as absent projects. Read/writes use only that project's DB. If exposed beyond loopback, use a
+trusted HTTPS proxy, restrict clients, and never send login tokens over unencrypted remote HTTP.
+
+The human console intentionally exposes **all retained DMs in its selected project** to *every*
+user with project access. This is not a server-global administrator bypass and does not widen the
+agent MCP mailbox: a third-party agent still cannot read another agent's DM. Instructions are
+not shell commands or remotely executed actions; recipients self-report acknowledgements and
+outcomes. Capability tags are self-advertised, not independently attested. Room manager state
+is a workflow label and grants no additional graph/project ACL. The server cannot distinguish
+two clients using the same user/device credential: mint different device tokens where that
+boundary matters.
+
 ## Who a caller is
 
 A token names a **person**, not a machine. `hivemind-admin mint-token --user nik --device mac-studio
