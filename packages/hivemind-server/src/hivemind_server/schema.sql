@@ -3,6 +3,28 @@
 --
 -- SENTINEL for "current" (open) tx_to = 9223372036854775807 (max signed int64).
 
+-- Agent collaboration metadata. Keep names distinct from the removed v1 bus_* tables:
+-- db.py drops those old tables during startup on existing deployments.
+CREATE TABLE IF NOT EXISTS chat_room (
+  room_id       TEXT PRIMARY KEY,
+  name          TEXT NOT NULL UNIQUE,
+  description   TEXT NOT NULL,
+  creator_user  TEXT NOT NULL,
+  creator_device TEXT NOT NULL,
+  creator_client TEXT NOT NULL,
+  created_at    TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS chat_subscription (
+  room_id       TEXT NOT NULL REFERENCES chat_room(room_id),
+  user          TEXT NOT NULL,
+  device        TEXT NOT NULL,
+  client        TEXT NOT NULL,
+  joined_at     TEXT NOT NULL,
+  PRIMARY KEY (room_id, user, device, client)
+);
+CREATE INDEX IF NOT EXISTS ix_chat_subscription_address
+  ON chat_subscription(user, device, client);
+
 -- ── provenance ────────────────────────────────────────────────────────────────
 -- One row per write. tx_id is the monotonic "as-of" coordinate for the revision axis.
 CREATE TABLE IF NOT EXISTS tx (
