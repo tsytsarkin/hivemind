@@ -183,11 +183,59 @@ def read(db: Database, node_id: str, *, now: Optional[float] = None) -> dict:
         return _read(cur, node_id, time.time() if now is None else float(now))
 
 
+def _authorize_requirements(tx, task, node_id: str, actor: StableAddress, t: float) -> None:
+    """Who may change a task's required capabilities.
+
+    A task in a room with a manager is the manager's to change — the rule assignments.assign and
+    .clear already apply. Otherwise the test is simply "does this take work away from somebody
+    else": a room need not have a manager (creating one does not install any, and a room-less
+    marker has none to install), so requiring one there would block the owner of an unmanaged
+    task from adjusting it at all. What must never be allowed is the case the check exists for —
+    any project member demanding a tag the current holder lacks, which runs invalidate_for_task
+    and revokes their live claim and the assignment with it.
+    """
+    from . import teams
+    room_id = task["room_id"]
+    if room_id is not None:
+        manager = teams._current(tx.cur, room_id)[0]
+        if manager is not None:
+            if manager != actor:
+                raise Conflict("only the current room manager can change this task's "
+                               "requirements")
+            return
+    affected = set()
+    claim = tx.cur.execute("SELECT holder_user,holder_device,holder_client,token_digest,"
+                           "last_beat_at,expires_after_seconds FROM graph_task_claim "
+                           "WHERE node_id=?", (node_id,)).fetchone()
+    if (claim is not None and claim["token_digest"] is not None
+            and claim["last_beat_at"] + claim["expires_after_seconds"] > t):
+        affected.add((claim["holder_user"], claim["holder_device"], claim["holder_client"]))
+    row = tx.cur.execute("SELECT assignee_user,assignee_device,assignee_client FROM "
+                         "graph_task_assignment WHERE node_id=?", (node_id,)).fetchone()
+    if row is not None and row["assignee_user"] is not None:
+        affected.add((row["assignee_user"], row["assignee_device"], row["assignee_client"]))
+    if affected - {actor}:
+        raise Conflict("only the room manager, the claim holder or the assignee can change this "
+                       "task's requirements")
+
+
 def set_requirements(db: Database, agent_id: str, node_id: str,
-                     names: list[str]) -> dict:
+                     names: list[str], *, actor: Optional[StableAddress] = None,
+                     now: Optional[float] = None) -> dict:
+    """Replace a task's required capability tags.
+
+    `actor` authorizes the change, and omitting it means an internal caller that has already
+    decided — the same convention as assignments.assign's `manager_actor`. It is not optional for
+    anything reachable from a client: this call runs invalidate_for_task, which revokes a live
+    claim and the manager's assignment the moment the holder stops matching, so without a check
+    any project member could strip another agent's in-progress work by demanding a tag nobody has.
+    """
     required = capabilities.normalize(names, limit=32)
     with db.write(agent_id, "update graph task capability requirements") as tx:
-        _marker(tx.cur, node_id)
+        task = _marker(tx.cur, node_id)
+        if actor is not None:
+            _authorize_requirements(tx, task, node_id, _address(actor),
+                                    time.time() if now is None else float(now))
         tx.cur.execute("UPDATE graph_task SET required_capabilities_json=?,updated_tx=? "
                        "WHERE node_id=?", (json.dumps(required), tx.tx_id, node_id))
         from . import assignments

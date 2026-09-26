@@ -514,3 +514,40 @@ def test_a_second_process_opening_the_same_database_does_not_abort_startup(tmp_p
     monkeypatch.setattr(db, "conn", lambda: Racer())
     db.apply_schema()                                  # must not raise
     assert fired, "the competing write never happened; the test proved nothing"
+
+
+def test_requirements_cannot_be_used_to_strip_another_agents_claim(db):
+    """set_requirements runs invalidate_for_task, which revokes a live claim and the assignment
+    the moment the holder stops matching. With no authorization, any project member could demand
+    a tag nobody has and take someone else's in-progress work away."""
+    from hivemind_server import capabilities, graph_tasks
+    nid = _task(db)
+    capabilities.replace(db, OWNER, ["review"])
+    graph_tasks.claim(db, "nik", nid, OWNER, now=1000)
+    assert graph_tasks.read(db, nid, now=1001)["effective_status"] == "in_progress"
+    with pytest.raises(Conflict):
+        graph_tasks.set_requirements(db, "peer", nid, ["python"], actor=PEER,
+                                     now=1001)
+    assert graph_tasks.read(db, nid, now=1002)["effective_status"] == "in_progress", \
+        "a denied requirements change must not have fenced the holder on its way out"
+    # the holder may still change their own task, and an internal caller (actor=None) is trusted
+    graph_tasks.set_requirements(db, "nik", nid, ["review"], actor=OWNER, now=1002)
+    graph_tasks.set_requirements(db, "setup", nid, ["review"])
+
+
+def test_a_forward_page_reports_whether_newer_rows_remain(db):
+    """`more` was asked as `id < last` in both directions, so a forward page answered about rows
+    OLDER than its newest — true after the first page, and never about the unseen ones."""
+    from hivemind_server import instructions
+    who = OWNER
+    for n in range(5):
+        instructions.enqueue(db, "nik", who, f"step {n}", f"key-{n}")
+    first = instructions.list_project(db, limit=2)                      # newest-first
+    assert len(first["instructions"]) == 2 and first["older_cursor"]
+    oldest_id = instructions.list_project(db, limit=5)["instructions"][-1]["id"]
+    page = instructions.list_project(db, after_id=oldest_id, limit=2)   # forward
+    assert len(page["instructions"]) == 2
+    ids = [i["id"] for i in page["instructions"]]
+    assert ids == sorted(ids), "a forward page is ascending"
+    assert page["next_cursor"] == ids[-1], "continue forward from the newest row read"
+    assert page["older_cursor"] == ids[0], "walk back from the oldest row read"

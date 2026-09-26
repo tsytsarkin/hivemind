@@ -476,9 +476,22 @@ def main() -> None:
                     task.cancel()
             await asyncio.gather(*running, return_exceptions=True)
 
-    with _open_listener(cfg.host, cfg.port) as mcp_socket, \
-            _open_listener(cfg.ui_host, cfg.ui_port) as ui_socket:
-        asyncio.run(serve_both(mcp_socket, ui_socket))
+    # The MCP socket is bound first and its failure is still fatal — that is the service. The UI
+    # is optional, so a port conflict on it must not take MCP down with it: with ui_enabled
+    # defaulting to on, any deployment already using 8788 for something else would otherwise fail
+    # to start at all after upgrading, losing the primary function to a secondary one.
+    with _open_listener(cfg.host, cfg.port) as mcp_socket:
+        try:
+            ui_socket = _open_listener(cfg.ui_host, cfg.ui_port)
+        except OSError as error:
+            print(f"[hivemind] web UI NOT started: cannot bind {cfg.ui_host}:{cfg.ui_port} "
+                  f"({error}). Set [web_ui] port, or enabled=false, in hivemind.toml. "
+                  f"MCP is unaffected and starting now.")
+            mcp_only = uvicorn.Server(uvicorn.Config(app, log_level="info"))
+            mcp_only.run(sockets=[mcp_socket])
+            return
+        with ui_socket:
+            asyncio.run(serve_both(mcp_socket, ui_socket))
 
 
 if __name__ == "__main__":

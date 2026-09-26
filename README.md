@@ -24,10 +24,10 @@ live guide). Meaning is data — shipped as a swappable **domain pack** (`packs/
 | `packages/hivemind-server/` | The server: MCP (streamable HTTP) + REST, SQLite-backed. Python ≥3.11. |
 | `packages/hivemind-client/` | The client library + `hivemind` CLI. Python ≥3.9; deps are `httpx` and `websockets` (the bus listener). |
 | `plugin/` | The Claude Code plugin: MCP config, the self-updating bootstrap skill, a schema-authoring skill, the `/hivemind:project` command and a `SessionStart` hook (re-injects the project pin, and publishes three values to the session's shell for the live guide and the CLI: `HIVEMIND_SERVER_URL` and `HIVEMIND_TOKEN` from the plugin config, and `HIVEMIND_PROJECT` from the pin — the third is what lets them build `/p/<project>/…` off a root URL, which is the default since 1.2.0). |
-| `plugins/hivemind/` | The separate [Codex plugin](docs/codex-plugin.md): MCP, project-picker and schema skills, session pin hook, and dependency-free bus listener. |
-| `packs/` | Optional, swappable, **layerable** domain packs (schema + guide). Ships `security-research`, `ios-macos-attack-surface` and `research-workflow`. See [docs/packs.md](docs/packs.md). |
+| `plugins/hivemind/` | The separate Codex plugin: MCP, project-picker and schema skills, session pin hook, and dependency-free bus listener. |
+| `packs/` | Optional, swappable, **layerable** domain packs (schema + guide). Ships `security-research`, `ios-macos-attack-surface` and `research-workflow`. |
 | `deploy/` | Deploy docs, systemd unit, daily backup + restore, bootstrap + relock scripts. |
-| `docs/` | [User guide](docs/user-guide.md), data model, API, the agent bus, guide authoring, security notes. |
+| _(docs)_ | Not in the repository — see **Documentation** below. |
 | `scripts/` | `hivemind-claude` — run Claude Code with the plugin for one session, without installing it. |
 
 ## Two versioning axes (core concept)
@@ -57,7 +57,7 @@ scoped to a node or a version and always falsifiable.
 Skills and tools share one discovery surface: a browsable catalog, **hybrid lexical + semantic
 search**, duplicate prevention on publish, and links to the graph nodes they are about. Reading a
 node returns the tools, skills and traps attached to it, so an agent is told what already exists
-before it builds anything. See **[docs/skills-and-traps.md](docs/skills-and-traps.md)**.
+before it builds anything.
 
 ## Agent collaboration: offline chat, rooms and graph tasks
 
@@ -74,9 +74,9 @@ Agents may offer optional **graph-backed tasks** in explicitly created rooms, cl
 private fenced lease (default five-minute heartbeat, one-hour expiry; configurable up to 24 hours
 per beat), post meaningful progress about every 15 minutes while actually working, and complete
 or release them. Graph task nodes have no 24-hour lifetime, and heartbeats do not churn graph
-versions. See [Durable collaboration and graph tasks](docs/collaboration.md) for the complete
+versions. See Durable collaboration and graph tasks for the complete
 workflow. The six older `bus_*` tools remain as an **ephemeral** compatibility layer with about
-one-hour bounded buffering; see [Legacy agent bus](docs/bus.md). Lasting knowledge belongs in
+one-hour bounded buffering; see Legacy agent bus. Lasting knowledge belongs in
 the graph. Agents call these operations through host MCP tools, not a raw REST fallback.
 
 ## Domain packs
@@ -92,12 +92,29 @@ hivemind schema apply packs/ios-macos-attack-surface/schema.json                
 **New packs are very welcome** — a pack is just a `schema.json` (+ optional guide), no engine
 code required; open a PR under `packs/`, or fork and publish your own.
 
-See [docs/packs.md](docs/packs.md) and the [full docs](docs/) (data model, API, security, guides).
+## Documentation
+
+The prose docs are **not in this repository**. They live in the Hivemind graph, in the
+`nikt.hivemind_dev` project, one node per document keyed `doc:<original-path>`:
+
+```
+graph_search(project="nikt.hivemind_dev", query="<what you need>")
+graph_get(project="nikt.hivemind_dev", subject_key="doc:docs/user-guide.md")
+```
+
+That covers the user guide, the Codex plugin guide, the data model, the API, security notes,
+the agent bus, durable collaboration, packs, guide authoring, and every design spec and
+implementation plan. The last on-disk copies are in git history at `a016880^` if you need a file
+rather than a node:
+
+```
+git show a016880^:docs/user-guide.md
+```
 
 ## Using it
 
-Choose the guide for your agent platform: **[Claude Code](docs/user-guide.md)** (installed plugin
-or the one-session launcher) or **[Codex](docs/codex-plugin.md)** (repo marketplace and local MCP).
+Choose the guide for your agent platform: **Claude Code** (installed plugin
+or the one-session launcher) or **Codex** (repo marketplace and local MCP).
 Both explain project selection and the rule to pass `project=<name>` on every call.
 Before either install, start the server and mint a **user token** there with
 `hivemind-admin mint-token --user <you> --device <machine>`. Claude's plugin accepts `server_url`
@@ -111,8 +128,8 @@ server root URL and token before installing, then launch CLI sessions with
 **One server, many clients** — don't run a second server per machine (each has its own database,
 so it would be a separate graph). The server listens on `127.0.0.1` by default; set
 `HIVEMIND_HOST=0.0.0.0` to serve your LAN/Tailscale. To connect another machine, mint a token on
-the server, then follow the [Claude Code guide](docs/user-guide.md) or
-[Codex guide](docs/codex-plugin.md). For Claude Code:
+the server, then follow the Claude Code guide or
+Codex guide. For Claude Code:
 
 ```sh
 hivemind-admin mint-token --user <name> --device laptop          # on the server
@@ -137,11 +154,11 @@ the older `http://host:8787/p/<name>` shape instead.
 Nothing is written to your permanent configuration, and the token lives in a `0600` file that is
 removed when the session ends. Good for a borrowed machine or a VM.
 
-Claude's two installation routes, step by step: **[docs/user-guide.md](docs/user-guide.md)**.
-For Codex installation, project pinning, and listener setup: **[docs/codex-plugin.md](docs/codex-plugin.md)**.
+Claude's two installation routes, step by step: **docs/user-guide.md**.
+For Codex installation, project pinning, and listener setup: **docs/codex-plugin.md**.
 Configure its address/token before installing with `scripts/hivemind-codex configure`, then launch
 CLI sessions with `scripts/hivemind-codex` so the token is available before MCP initialization.
-Minting and moving tokens, and revocation: **[docs/clients.md](docs/clients.md)**.
+Minting and moving tokens, and revocation: **docs/clients.md**.
 
 ## Reproducible dependencies
 

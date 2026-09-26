@@ -243,19 +243,32 @@ def list_project(db: Database, *, after_id: Optional[str] = None,
                  before_id: Optional[str] = None, limit: int = 100) -> dict:
     if type(limit) is not int or not 1 <= limit <= 100:
         raise Invalid("limit must be 1–100")
-    if before_id is not None and (not isinstance(before_id, str) or len(before_id) > 64):
-        raise Invalid("invalid before_id cursor")
+    for name, cursor in (("before_id", before_id), ("after_id", after_id)):
+        if cursor is not None and (not isinstance(cursor, str) or len(cursor) > 64):
+            raise Invalid(f"invalid {name} cursor")
     with db.read() as cur:
-        if after_id is not None and before_id is None:
+        forward = after_id is not None and before_id is None
+        if forward:
             rows = cur.execute("SELECT * FROM agent_instruction WHERE id>? ORDER BY id LIMIT ?",
                                (after_id, limit)).fetchall()
         else:
             rows = cur.execute("SELECT * FROM agent_instruction WHERE id<? ORDER BY id DESC LIMIT ?",
                                (before_id or "Z", limit)).fetchall()
-        more = bool(rows and cur.execute(
-            "SELECT 1 FROM agent_instruction WHERE id<? LIMIT 1",
-            (rows[-1]["id"],)).fetchone())
         items = [_public(row, last_seen=_last_seen(cur, row)) for row in rows]
+        # Continue in the direction just read: the last row of the page is the next cursor either
+        # way — the page's oldest when descending, its newest when going forward.
+        next_cursor = items[-1]["id"] if items else None
+        if not items:
+            older_cursor = None
+        elif forward:
+            # Walking back from a forward page starts at its OLDEST row. "Is there more?" was
+            # asked as `id < rows[-1]` in both branches, i.e. descending semantics, so a forward
+            # page reported whether anything older than its newest row existed — true after the
+            # first page, and never an answer about the rows the caller had not seen.
+            older_cursor = items[0]["id"]
+        else:
+            more = bool(cur.execute("SELECT 1 FROM agent_instruction WHERE id<? LIMIT 1",
+                                    (items[-1]["id"],)).fetchone())
+            older_cursor = items[-1]["id"] if more else None
     return {"instructions": items, "count": len(items),
-            "next_cursor": items[-1]["id"] if items else None,
-            "older_cursor": items[-1]["id"] if more else None}
+            "next_cursor": next_cursor, "older_cursor": older_cursor}

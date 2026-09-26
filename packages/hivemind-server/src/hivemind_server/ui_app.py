@@ -59,6 +59,12 @@ def build_ui_app(cfg, registry, identities: IdentityStore) -> Starlette:
             return _json({"error": "invalid origin"}, 403)
         ip = req.client.host if req.client else "unknown"
         now = time.time()
+        # Sweep every IP, not just the one attempting. Pruning only `ip` meant an address that
+        # tried once and left kept its entry for the life of the process, so scanning traffic
+        # grew this map without bound. The window is 60s, so a full pass is cheap and self-
+        # limiting; the dict only ever holds addresses that failed within the last minute.
+        for seen in [k for k, times in failures.items() if not any(now - t < 60 for t in times)]:
+            del failures[seen]
         failures[ip] = [t for t in failures.get(ip, []) if now - t < 60]
         if len(failures[ip]) >= 10:
             return _json({"error": "too many login attempts"}, 429)
@@ -99,6 +105,11 @@ def build_ui_app(cfg, registry, identities: IdentityStore) -> Starlette:
         if error:
             return error
         current = sessions.lookup(req.cookies.get(COOKIE), identities)
+        if current is None:
+            # The second lookup can disagree with the first: the session may have crossed its
+            # idle/absolute TTL, or the credential may have been revoked, in between. Indexing
+            # None here turned that race into a 500 instead of the 401 it actually is.
+            return _json({"error": "login required"}, 401)
         return _json({"user": who.user, "device": who.device, "csrf_token": current[1]})
 
     async def shell(_req: Request):

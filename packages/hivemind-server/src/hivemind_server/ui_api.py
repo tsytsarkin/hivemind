@@ -135,7 +135,12 @@ async def handle(req, p, who, identities: IdentityStore):
                 items = []
                 for row in rows:
                     nid = row["node_id"]
-                    props = graph.get_node(db, node_id=nid)["current"]["props"]
+                    # `current` is None for a node with no live head version, and indexing that
+                    # raised TypeError -> 422 for the WHOLE page. With the console refreshing
+                    # tasks every 20 seconds, one degenerate row made the Tasks view permanently
+                    # unusable rather than showing that row without a title.
+                    current = graph.get_node(db, node_id=nid)["current"] or {}
+                    props = current.get("props") or {}
                     items.append({**assignments.view(db, nid), **graph_tasks.read(db, nid),
                                   "title": props.get("title"), "summary": props.get("summary")})
                 return _answer({"tasks": items,
@@ -174,9 +179,16 @@ async def handle(req, p, who, identities: IdentityStore):
                     data.get("title"), data.get("summary"),
                     required_capabilities=data.get("required_capabilities")), 201)
             if len(path) == 3 and path[0] == "tasks" and path[2] == "assign":
+                # Required, not `data.get(...)`: assign() only compares the revision when it is
+                # not None, so a body that simply omitted the key performed an UNFENCED assign
+                # and clobbered a concurrent manager's reassignment. /clear and /rooms/{r}/manager
+                # already reject a missing revision; this endpoint was the odd one out.
+                revision = data.get("expected_revision")
+                if type(revision) is not int or revision < 0:
+                    raise Invalid("expected_revision must be the current assignment revision")
                 return _answer(assignments.assign(db, who.user, path[1], _recipient(
                     data.get("address"), identities, p),
-                    expected_revision=data.get("expected_revision"),
+                    expected_revision=revision,
                     confirm_displace=data.get("confirm_displace") is True))
             if len(path) == 3 and path[0] == "tasks" and path[2] == "clear":
                 return _answer(assignments.clear(db, who.user, path[1], "browser_unassign",

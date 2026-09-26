@@ -1,4 +1,10 @@
 const $ = id => document.getElementById(id);
+// $ takes an ID, q takes a selector. Three call sites passed a selector to $, which returns null
+// for one: the first addEventListener on it threw out of init() before a single form, nav button,
+// refresh timer or session resume was bound, so the whole console was inert and login fell back to
+// a native form submit. test_ui_assets.py only greps this file for substrings and the Playwright
+// spec needs npm and a live server, so nothing in the pytest suite noticed.
+const q = selector => document.querySelector(selector);
 const S = {csrf:null,project:null,epoch:0,conversationEpoch:0,view:"overview",rooms:[],roomOlder:null,agents:[],caps:[],tasks:[],candidates:[],candidateTask:null,candidateOlder:null,candidateRequest:0,candidateMemberCount:0,instructions:[],olderCursor:null,taskOlder:null,instructionOlder:null,agentOlder:null,latestDisplayedSeq:null,hasHiddenUnseen:false};
 const headings = {
   overview:["Overview","YOUR WORKSPACE, AT A GLANCE","The conversations and work moving through your project."],
@@ -42,7 +48,7 @@ function resetProjectState(){
   S.latestDisplayedSeq=null;S.hasHiddenUnseen=false;S.conversationEpoch++;
   for(const node of document.querySelectorAll("[data-room-select]"))node.replaceChildren();
   for(const draft of document.querySelectorAll("#main form"))draft.reset();
-  const recipientFields=$('#instruction-form [data-address-fields]');
+  const recipientFields=q('#instruction-form [data-address-fields]');
   recipientFields.hidden=false;
   for(const input of recipientFields.querySelectorAll("input"))input.required=true;
   for(const id of ["task-select","assignee-select"])
@@ -348,8 +354,8 @@ function init(){
       input.name="address_"+part;input.required=true;
       input.placeholder={user:"ana",device:"laptop",client:"claude"}[part];wrapper.append(input);group.append(wrapper);
     }
-  const managerOnly=$('#instruction-form [name="to_manager"]');
-  const recipientFields=$('#instruction-form [data-address-fields]');
+  const managerOnly=q('#instruction-form [name="to_manager"]');
+  const recipientFields=q('#instruction-form [data-address-fields]');
   managerOnly.addEventListener("change",()=>{
     recipientFields.hidden=managerOnly.checked;
     for(const input of recipientFields.querySelectorAll("input"))input.required=!managerOnly.checked;
