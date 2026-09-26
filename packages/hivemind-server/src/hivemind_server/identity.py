@@ -88,6 +88,12 @@ class IdentityStore(JsonFileStore):
     def has_user(self, user: str) -> bool:
         return user in self.users()
 
+    def has_device(self, user: str, device: str) -> bool:
+        """An offline mailbox may be named before joining, but not on an invented device."""
+        self.refresh_if_changed()
+        return any(info.get("user") == user and info.get("device") == device
+                   for info in self._tokens.values())
+
 
 def resolve(token: Optional[str], store: IdentityStore, project: Any) -> Optional[Identity]:
     """Server-level identity first; fall back to a project's own legacy token store.

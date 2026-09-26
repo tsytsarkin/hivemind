@@ -362,4 +362,6 @@ def build_mcp(registry, identities, *, instructions: str = INSTRUCTIONS) -> MCPS
     from . import bus_ws_tools    # agent bus: WebSocket push, deliberately outside the graph
     from .config import config as _config
     bus_ws_tools.attach(mcp, _config())
+    from . import chat_tools      # durable DMs, public project rooms and canonical sessions
+    chat_tools.attach(mcp, _config(), identities)
     return real                   # mount the real server; the proxy only wraps registration

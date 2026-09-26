@@ -303,10 +303,16 @@ def build_app(cfg: Optional[Config] = None) -> Starlette:
                 from . import bus_ws as _b
                 await _b.websocket_endpoint(ws, p.name, p.dir, require_auth=require_auth)
             return endpoint
+        def _chat_route(p=project, require_auth=cfg.require_auth):
+            async def endpoint(ws):
+                from . import chat_ws as _c
+                await _c.websocket_endpoint(ws, p.name, p.dir, require_auth=require_auth)
+            return endpoint
         # The ws route comes FIRST: Starlette takes the first matching route, and
         # Mount("/p/<name>") would otherwise swallow this path into the MCP app, which has no
         # websocket handler and so refuses the connection.
         return [WebSocketRoute(f"/p/{project.name}/bus/ws", _ws_route()),
+                WebSocketRoute(f"/p/{project.name}/chat/ws", _chat_route()),
                 Mount(f"/p/{project.name}", app=asgi)]
 
     mounts = []
@@ -355,10 +361,31 @@ def build_app(cfg: Optional[Config] = None) -> Starlette:
         import asyncio as _asyncio
 
         from . import bus_ws as _bus_ws
+        from .chat import ChatStore
         # WebSocket sends issued from MCP tool threads are scheduled onto this loop.
         _bus_ws.set_loop(_asyncio.get_running_loop())
+
+        async def clean_chat() -> None:
+            for current in registry.all():
+                try:
+                    await _asyncio.to_thread(ChatStore(current.db).cleanup)
+                except Exception:
+                    log.exception("chat retention cleanup failed for project %r", current.name)
+
+        async def housekeeping() -> None:
+            while True:
+                await _asyncio.sleep(3600)
+                await clean_chat()
+
         async with mcp.session_manager.run():
-            yield
+            await clean_chat()
+            cleanup_task = _asyncio.create_task(housekeeping())
+            try:
+                yield
+            finally:
+                cleanup_task.cancel()
+                with contextlib.suppress(_asyncio.CancelledError):
+                    await cleanup_task
 
     routes = [Route("/", index), Route("/healthz", healthz),
               Route("/projects", list_projects), *mounts]

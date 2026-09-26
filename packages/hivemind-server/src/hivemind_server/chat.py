@@ -131,6 +131,13 @@ class ChatStore:
             return cur.execute("SELECT 1 FROM chat_subscription WHERE room_id=? AND user=? "
                                "AND device=? AND client=?", (room_id, *who)).fetchone() is not None
 
+    def subscribers(self, name: str) -> list[StableAddress]:
+        with self.db.read() as cur:
+            room_id = self._lookup_room(cur, name)
+            rows = cur.execute("SELECT user,device,client FROM chat_subscription "
+                               "WHERE room_id=? ORDER BY user,device,client", (room_id,)).fetchall()
+        return [(r["user"], r["device"], r["client"]) for r in rows]
+
     @staticmethod
     def _target_key(channel: str, target: StableAddress | str) -> str:
         return json.dumps([channel, *target] if channel == "dm" else [channel, target],
@@ -145,13 +152,13 @@ class ChatStore:
                 "body": row["body"], "created_at": row["created_at"],
                 "expires_at": row["created_at"] + MESSAGE_TTL}
 
-    def _purge(self, cur, now: float) -> None:
+    def _purge(self, cur, now: float) -> int:
         """Track discarded ranges even when the last message in a conversation is deleted."""
         old = cur.execute("SELECT target_key, MAX(seq) AS last_seq, COUNT(*) AS n, "
                           "SUM(body_bytes + ?) AS bytes FROM chat_message WHERE created_at<=? "
                           "GROUP BY target_key", (MESSAGE_OVERHEAD, now - MESSAGE_TTL)).fetchall()
         if not old:
-            return
+            return 0
         for row in old:
             cur.execute("INSERT INTO chat_expiration_watermark VALUES(?,?) "
                         "ON CONFLICT(target_key) DO UPDATE SET "
@@ -161,6 +168,16 @@ class ChatStore:
         cur.execute("UPDATE chat_usage SET counted_bytes=counted_bytes-?, "
                     "message_count=message_count-? WHERE id=1",
                     (sum(r["bytes"] for r in old), sum(r["n"] for r in old)))
+        return sum(r["n"] for r in old)
+
+    def cleanup(self, *, now: Optional[float] = None) -> int:
+        """Bound disk usage and presence, without expiring mailboxes or room subscriptions."""
+        t = time.time() if now is None else float(now)
+        with self.db.write_light() as cur:
+            removed = self._purge(cur, t)
+            cur.execute("DELETE FROM chat_session WHERE last_activity_at<=?",
+                        (t - MESSAGE_TTL,))
+        return removed
 
     def send(self, channel: str, target: StableAddress | str, sender: StableAddress,
              body: str, idempotency_key: str, *, now: Optional[float] = None,
@@ -306,6 +323,7 @@ class ChatStore:
 
     @staticmethod
     def _touch(cur, who: StableAddress, session: str, now: float) -> None:
+        cur.execute("DELETE FROM chat_session WHERE last_activity_at<=?", (now - MESSAGE_TTL,))
         cur.execute("INSERT INTO chat_session VALUES(?,?,?,?,?) "
                     "ON CONFLICT(user,device,client,session_id) DO UPDATE SET "
                     "last_activity_at=excluded.last_activity_at", (*who, session, now))

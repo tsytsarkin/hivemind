@@ -21,6 +21,16 @@ def test_room_is_explicit_and_stays_joinable_after_restart(db):
     assert not restarted.subscribed("search-bugs", ("nikt", "mac", "claude"))
 
 
+def test_room_subscription_roster_changes_on_leave(db):
+    from hivemind_server.chat import ChatStore
+    store = ChatStore(db)
+    store.create_room("search-bugs", "Parser crashes", ("nikt", "mac", "codex"))
+    store.join("search-bugs", ("peer", "mac", "claude"))
+    assert store.subscribers("search-bugs") == [("peer", "mac", "claude")]
+    store.leave("search-bugs", ("peer", "mac", "claude"))
+    assert store.subscribers("search-bugs") == []
+
+
 def test_duplicate_room_name_and_missing_room_are_errors(db):
     from hivemind_server.chat import ChatStore
     store = ChatStore(db)
@@ -137,3 +147,15 @@ def test_presence_expires_without_deleting_room_subscription(db):
     assert [p["session_id"] for p in store.agents(now=T0 + 86_399)] == ["session-1"]
     assert store.agents(now=T0 + 86_400) == []
     assert store.subscribed("search-bugs", RECEIVER)
+
+
+def test_housekeeping_physically_purges_expired_chat_and_stale_sessions(db):
+    from hivemind_server.chat import ChatStore
+    store = ChatStore(db)
+    store.send("dm", RECEIVER, SENDER, "expired", "retry-1", now=T0)
+    store.touch(RECEIVER, "old-session", now=T0)
+    assert store.cleanup(now=T0 + 86_400) == 1
+    with db.read() as cur:
+        assert cur.execute("SELECT COUNT(*) FROM chat_message").fetchone()[0] == 0
+        assert cur.execute("SELECT COUNT(*) FROM chat_session").fetchone()[0] == 0
+    assert store.inbox(RECEIVER, 0, now=T0 + 86_400)["gap"] is True
