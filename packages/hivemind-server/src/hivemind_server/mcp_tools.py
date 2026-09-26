@@ -369,7 +369,7 @@ def build_mcp(registry, identities, *, instructions: str = INSTRUCTIONS) -> MCPS
     from . import chat_tools      # durable DMs, public project rooms and canonical sessions
     chat_tools.attach(mcp, _config(), identities)
     from . import graph_task_tools  # graph-backed optional work, fenced lease sidecars
-    graph_task_tools.attach(mcp)
+    graph_task_tools.attach(mcp, identities)
     from . import capability_tools  # project-local self-advertised agent capabilities
     capability_tools.attach(mcp)
     from . import team_tools  # project rooms, membership and manager handoffs

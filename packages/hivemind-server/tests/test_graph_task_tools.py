@@ -101,3 +101,94 @@ async def test_mcp_offer_in_schema_less_project_records_capability_requirements(
                               session_id="sid-1", required_capabilities=["review"])
     assert offered["ok"] is True
     assert offered["task"]["required_capabilities"] == ["review"]
+
+
+@pytest.mark.anyio
+async def test_manager_assigns_through_mcp_and_assignee_discovers_waiting_work(env):
+    app, project, _ = env
+    nik = _token(app, "nik", "mac")
+    ana = _token(app, "ana", "laptop")
+    from hivemind_server import capabilities, graph_tasks, teams
+
+    room = ChatStore(project.db).create_room("review-work", "Review work",
+                                              ("nik", "mac", "codex"))
+    owner = ("nik", "mac", "codex")
+    peer = ("ana", "laptop", "claude")
+    teams.add_member(project.db, "review-work", owner, owner)
+    teams.add_member(project.db, "review-work", peer, owner)
+    teams.promote(project.db, "review-work", owner, owner, expected_revision=0)
+    capabilities.replace(project.db, peer, ["review"])
+    node_id = graph_tasks.offer(project.db, "setup", "review-work", "Audit code",
+                                "Review the patch", required_capabilities=["review"])["node_id"]
+    assert room["room_id"] == graph_tasks.read(project.db, node_id)["room_id"]
+
+    async with Lifespan(app), httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                               base_url="http://t", timeout=30) as client:
+        denied_response = await _post(client, "", ana, "tools/call", {
+            "name": "graph_task_assign",
+            "arguments": {"project": project.name, "node_id": node_id,
+                          "to_user": "ana", "to_device": "laptop", "to_client": "claude",
+                          "client": "claude", "session_id": "ana-1", "expected_revision": 0}})
+        assert "Unknown tool" not in denied_response.text
+        assert _call(denied_response)["ok"] is False
+        assigned = await _tool(client, nik, project.name, "graph_task_assign", node_id=node_id,
+                               to_user="ana", to_device="laptop", to_client="claude",
+                               client="codex", session_id="nik-1", expected_revision=0)
+        mine = await _tool(client, ana, project.name, "graph_task_my_assignments",
+                           client="claude", session_id="ana-2")
+    assert assigned["ok"] is True and assigned["state"] == "assigned_waiting"
+    assert [task["node_id"] for task in mine["assignments"]] == [node_id]
+
+
+@pytest.mark.anyio
+async def test_mcp_can_change_task_requirements_and_release_ineligible_assignment(env):
+    app, project, _ = env
+    nik = _token(app, "nik", "mac")
+    from hivemind_server import assignments, capabilities, graph_tasks, teams
+
+    owner = ("nik", "mac", "codex")
+    ChatStore(project.db).create_room("review-work", "Review work", owner)
+    teams.add_member(project.db, "review-work", owner, owner)
+    capabilities.replace(project.db, owner, ["review"])
+    node_id = graph_tasks.offer(project.db, "setup", "review-work", "Audit code",
+                                "Review the patch", required_capabilities=["review"])["node_id"]
+    assignments.assign(project.db, "setup", node_id, owner)
+    async with Lifespan(app), httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                               base_url="http://t", timeout=30) as client:
+        response = await _post(client, "", nik, "tools/call", {
+            "name": "graph_task_requirements_set",
+            "arguments": {"project": project.name, "node_id": node_id,
+                          "required_capabilities": ["python"], "client": "codex",
+                          "session_id": "nik-1"}})
+        assert "Unknown tool" not in response.text
+        result = _call(response)
+    assert result["ok"] is True
+    assert assignments.view(project.db, node_id)["state"] == "available"
+
+
+@pytest.mark.anyio
+async def test_manager_cannot_assign_room_member_after_their_private_project_access_is_revoked(env):
+    app, project, _ = env
+    nik = _token(app, "nik", "mac")
+    _token(app, "ana", "laptop")
+    from hivemind_server import graph_tasks, teams
+
+    owner, peer = ("nik", "mac", "codex"), ("ana", "laptop", "claude")
+    ChatStore(project.db).create_room("review-work", "Review work", owner)
+    teams.add_member(project.db, "review-work", owner, owner)
+    teams.add_member(project.db, "review-work", peer, owner)
+    teams.promote(project.db, "review-work", owner, owner, expected_revision=0)
+    node_id = graph_tasks.offer(project.db, "setup", "review-work", "Audit code",
+                                "Review the patch")["node_id"]
+    meta = project.meta
+    meta.visibility, meta.owner = "private", "nik"
+    projects_meta.save(project.dir, meta)
+    async with Lifespan(app), httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                               base_url="http://t", timeout=30) as client:
+        response = await _post(client, "", nik, "tools/call", {
+            "name": "graph_task_assign",
+            "arguments": {"project": project.name, "node_id": node_id,
+                          "to_user": "ana", "to_device": "laptop", "to_client": "claude",
+                          "client": "codex", "session_id": "nik-1", "expected_revision": 0}})
+        assert "Unknown tool" not in response.text
+        assert _call(response)["ok"] is False

@@ -1,6 +1,8 @@
 """Audited memberships and one fenced manager per project room."""
 from __future__ import annotations
 
+import time
+
 from .chat import ChatStore, StableAddress, _address
 from .db import Conflict, Database, Invalid, now_iso
 from .ids import ulid
@@ -49,6 +51,16 @@ def remove_member(db: Database, room: str, target: StableAddress,
     stable = _address(target)
     with db.write("room-membership", "remove room member") as tx:
         room_id = _room(tx.cur, db, room)
+        held = tx.cur.execute(
+            "SELECT t.status,c.token_digest,c.last_beat_at,c.expires_after_seconds "
+            "FROM graph_task_assignment a JOIN graph_task t ON t.node_id=a.node_id "
+            "LEFT JOIN graph_task_claim c ON c.node_id=a.node_id "
+            "WHERE a.room_id=? AND a.assignee_user=? AND a.assignee_device=? "
+            "AND a.assignee_client=?", (room_id, *stable)).fetchall()
+        if any(row["status"] == "unclaimed" or
+               (row["token_digest"] is not None and row["last_beat_at"] +
+                row["expires_after_seconds"] > time.time()) for row in held):
+            raise Conflict("member has a waiting or active assignment; reassign it first")
         previous, revision = _current(tx.cur, room_id)
         tx.cur.execute("DELETE FROM chat_subscription WHERE room_id=? AND user=? AND device=? "
                        "AND client=?", (room_id, *stable))

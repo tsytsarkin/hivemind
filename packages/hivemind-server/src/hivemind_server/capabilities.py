@@ -40,11 +40,13 @@ def replace(db: Database, who: StableAddress, tags: list[str]) -> dict:
     stable = _address(who)
     normalized = normalize(tags)
     t = time.time()
-    with db.write_light() as cur:
-        cur.execute("INSERT INTO agent_capability(user,device,client,tags_json,updated_at) "
-                    "VALUES(?,?,?,?,?) ON CONFLICT(user,device,client) DO UPDATE SET "
-                    "tags_json=excluded.tags_json,updated_at=excluded.updated_at",
-                    (*stable, json.dumps(normalized, separators=(",", ":")), t))
+    with db.write("agent-capabilities", "replace self-advertised capabilities") as tx:
+        tx.cur.execute("INSERT INTO agent_capability(user,device,client,tags_json,updated_at) "
+                       "VALUES(?,?,?,?,?) ON CONFLICT(user,device,client) DO UPDATE SET "
+                       "tags_json=excluded.tags_json,updated_at=excluded.updated_at",
+                       (*stable, json.dumps(normalized, separators=(",", ":")), t))
+        from . import assignments
+        assignments.invalidate_for_agent(tx, stable)
     return {"address": stable, "capabilities": normalized, "updated_at": t}
 
 

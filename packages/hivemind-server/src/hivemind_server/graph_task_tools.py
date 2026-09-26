@@ -3,13 +3,15 @@ from __future__ import annotations
 
 from typing import Optional
 
-from . import graph, graph_tasks
-from .chat import ChatStore, StableAddress, stable_identity
+from . import assignments, graph, graph_tasks
+from .chat import ChatStore, StableAddress, _address, stable_identity
+from .db import Invalid
 from .envelope import WRITE, current_project, envelope as _envelope
-from .identity import current_identity
+from .identity import Identity, current_identity
+from .projects_meta import can_access
 
 
-def attach(mcp) -> None:
+def attach(mcp, identities) -> None:
     def _context(client: str, session_id: str) -> tuple[object, StableAddress]:
         user, device, actual_client, session = stable_identity(
             current_identity(), client, session_id)
@@ -59,6 +61,34 @@ def attach(mcp) -> None:
         return graph_tasks.claim(p.db, "graph-task-claim", node_id, who,
                                  interval_seconds=interval_seconds,
                                  expires_after_seconds=expires_after_seconds)
+
+    @mcp.tool(annotations=WRITE, description="As the current room manager, assign an eligible room member a graph task; offline agents discover it when they check in. Reassignment fences the previous claim.")
+    @_envelope
+    def graph_task_assign(node_id: str, to_user: str, to_device: str, to_client: str,
+                          client: str, session_id: str,
+                          expected_revision: Optional[int] = None) -> dict:
+        p, who = _context(client, session_id)
+        target = _address((to_user, to_device, to_client))
+        if not identities.has_device(to_user, to_device) or not can_access(
+                Identity(to_user, to_device), p.meta):
+            raise Invalid("assignee user/device does not exist or lacks project access")
+        return assignments.assign(p.db, "graph-task-assign", node_id, target,
+                                  expected_revision=expected_revision, manager_actor=who)
+
+    @mcp.tool(annotations=WRITE, description="Find your waiting mandatory graph task assignments after reconnecting; does not claim them or start their heartbeat.")
+    @_envelope
+    def graph_task_my_assignments(client: str, session_id: str) -> dict:
+        p, who = _context(client, session_id)
+        pending = assignments.mine(p.db, who)
+        return {"assignments": pending, "count": len(pending)}
+
+    @mcp.tool(annotations=WRITE, description="Set a graph task's required self-advertised capability tags; ineligible holders and assignees are immediately fenced.")
+    @_envelope
+    def graph_task_requirements_set(node_id: str, required_capabilities: list[str],
+                                    client: str, session_id: str) -> dict:
+        p, _ = _context(client, session_id)
+        return graph_tasks.set_requirements(p.db, "graph-task-requirements", node_id,
+                                            required_capabilities)
 
     @mcp.tool(annotations=WRITE, description="Renew the current claimant's expiring claim with its private token; graph node version does not change.")
     @_envelope

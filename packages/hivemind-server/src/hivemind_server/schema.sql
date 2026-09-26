@@ -435,6 +435,27 @@ CREATE TABLE IF NOT EXISTS graph_task_claim (
   claimed_at REAL NOT NULL, last_beat_at REAL NOT NULL,
   interval_seconds INTEGER NOT NULL, expires_after_seconds INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS graph_task_assignment (
+  node_id TEXT PRIMARY KEY REFERENCES graph_task(node_id),
+  room_id TEXT NOT NULL REFERENCES chat_room(room_id),
+  assignee_user TEXT, assignee_device TEXT, assignee_client TEXT,
+  revision INTEGER NOT NULL,
+  assigned_at REAL
+);
+CREATE INDEX IF NOT EXISTS ix_graph_task_assignment_assignee
+  ON graph_task_assignment(assignee_user,assignee_device,assignee_client);
+CREATE TABLE IF NOT EXISTS graph_task_assignment_event (
+  event_id TEXT PRIMARY KEY,
+  node_id TEXT NOT NULL REFERENCES graph_task(node_id),
+  action TEXT NOT NULL,
+  assignee_user TEXT, assignee_device TEXT, assignee_client TEXT,
+  previous_user TEXT, previous_device TEXT, previous_client TEXT,
+  revision INTEGER NOT NULL,
+  happened_at REAL NOT NULL,
+  tx_id INTEGER NOT NULL REFERENCES tx(tx_id)
+);
+CREATE INDEX IF NOT EXISTS ix_graph_task_assignment_event_node
+  ON graph_task_assignment_event(node_id,tx_id);
 CREATE TABLE IF NOT EXISTS graph_task_event (
   event_id TEXT PRIMARY KEY,
   node_id TEXT NOT NULL REFERENCES graph_task(node_id),

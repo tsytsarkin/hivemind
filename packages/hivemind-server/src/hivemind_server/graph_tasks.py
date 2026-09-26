@@ -183,6 +183,19 @@ def read(db: Database, node_id: str, *, now: Optional[float] = None) -> dict:
         return _read(cur, node_id, time.time() if now is None else float(now))
 
 
+def set_requirements(db: Database, agent_id: str, node_id: str,
+                     names: list[str]) -> dict:
+    required = capabilities.normalize(names, limit=32)
+    with db.write(agent_id, "update graph task capability requirements") as tx:
+        _marker(tx.cur, node_id)
+        tx.cur.execute("UPDATE graph_task SET required_capabilities_json=?,updated_tx=? "
+                       "WHERE node_id=?", (json.dumps(required), tx.tx_id, node_id))
+        from . import assignments
+        assignments.invalidate_for_task(tx, node_id)
+        _event(tx, node_id, "requirements", 0, None, time.time())
+    return read(db, node_id)
+
+
 def activity(db: Database, node_id: str, who: StableAddress, *,
              interval_seconds: int = DEFAULT_INTERVAL,
              expires_after_seconds: int = DEFAULT_EXPIRY,
@@ -234,6 +247,13 @@ def claim(db: Database, agent_id: str, node_id: str, who: StableAddress, *,
         if current and current["token_digest"] and \
                 current["last_beat_at"] + current["expires_after_seconds"] > t:
             raise Conflict("task already claimed; wait for expiry or request a release")
+        from . import assignments
+        if current and current["token_digest"]:
+            assignments._clear_assignment_tx(tx, node_id, "expired", t)
+        reserved = assignments._assignee(assignments._row(tx.cur, node_id))
+        if reserved is not None and reserved != stable:
+            raise Conflict("task is assigned to another agent")
+        eligible(tx.cur, node_id, stable)
         generation = 1 + (current["generation"] if current else 0)
         tx.cur.execute("INSERT INTO graph_task_claim VALUES(?,?,?,?,?,?,?,?,?,?) "
                        "ON CONFLICT(node_id) DO UPDATE SET holder_user=excluded.holder_user,"
@@ -290,6 +310,8 @@ def _end(db: Database, agent_id: str, node_id: str, claim_token: str,
                        "holder_device=NULL,holder_client=NULL WHERE node_id=? AND generation=?",
                        (node_id, lease["generation"]))
         _event(tx, node_id, kind, lease["generation"], stable, t)
+        from . import assignments
+        assignments._clear_assignment_tx(tx, node_id, kind, t)
     return read(db, node_id, now=t)
 
 
@@ -321,4 +343,6 @@ def reap_expired(db: Database, *, now: Optional[float] = None) -> int:
                            "holder_device=NULL,holder_client=NULL WHERE node_id=? AND generation=?",
                            (row["node_id"], row["generation"]))
             _event(tx, row["node_id"], "expired", row["generation"], None, t)
+            from . import assignments
+            assignments._clear_assignment_tx(tx, row["node_id"], "expired", t)
     return len(expired)
