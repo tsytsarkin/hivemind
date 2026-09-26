@@ -92,11 +92,15 @@ Do this now, in order. **Do not choose a project for the user.**
    from context, and a dropped choice plus a defaulted write is how private work reaches a shared
    graph.
 
-6. **Join the bus immediately.** The post-tool hook should join as `claude-<session-id>` after the
-   pin is saved. Call the MCP `bus_peers(project=<name>)` tool and confirm that label is online.
-   If it is absent, run `python3 "$HOME/.hivemind/bus-autojoin.py" --platform claude --mode ensure`
-   (if the helper is absent, first load the plugin's knowledge-graph skill), then check
-   `bus_peers` again.
+6. **Join the bus immediately.** The post-tool hook joins after the pin is saved — durable chat
+   first, falling back to the legacy bus. Confirm with the MCP tool that matches the one it got:
+   `chat_agents(client="claude", session_id=<sid>, project=<name>)` for durable chat, and
+   `bus_peers(project=<name>)` only for the legacy fallback, whose label is
+   `claude-<session-id>`. The two are **separate registries**: a canonical chat session does not
+   appear in `bus_peers`, so checking only that one reports a joined session as offline.
+   If it is absent from both, run
+   `python3 "$HOME/.hivemind/bus-autojoin.py" --platform claude --mode ensure`
+   (if the helper is absent, first load the plugin's knowledge-graph skill), then check again.
    If registration fails, report its error; do not imply this agent is available for peer messages.
    A restored pin on session start needs the same check.
 

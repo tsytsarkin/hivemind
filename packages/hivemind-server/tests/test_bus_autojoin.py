@@ -318,3 +318,73 @@ def test_the_launcher_explains_a_missing_codex_instead_of_a_traceback(tmp_path):
     assert r.returncode == 1, (r.returncode, r.stdout, r.stderr)
     assert "Traceback" not in r.stderr, r.stderr
     assert "codex" in r.stderr.lower() and "path" in r.stderr.lower(), r.stderr
+
+
+# ── a server that predates durable chat must still get a listener ─────────────────────────────
+def _legacy_rpc(calls):
+    """An `Unknown tool` answer, byte for byte as a live 1.1.0 server gave it."""
+    def rpc(endpoint, token, name, arguments):
+        calls.append(name)
+        if name == "chat_connect":
+            # {"isError": true, "content": [{"text": "Unknown tool: chat_connect"}]} — _rpc reaches
+            # json.loads on that text, so the caller sees ValueError, not a reply without a key.
+            raise ValueError("Expecting value: line 1 column 1 (char 0)")
+        return {"ws_url": "ws://127.0.0.1:8787/p/demo/bus/ws", "listen_key": "hk1.x",
+                "project": "demo"}
+    return rpc
+
+
+def test_a_server_without_chat_connect_still_joins_the_legacy_bus(mod, tmp_path, monkeypatch):
+    """The fallback only ran when chat_connect RETURNED a reply lacking a listen_key. A server that
+    does not have the tool does not do that — so the exception escaped, bus_connect was never
+    called, and the session got no listener at all. Measured against a live 1.1.0 server, whose
+    only symptom was "cannot reach the MCP bus or start its listener"."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("HIVEMIND_SERVER_URL", "http://127.0.0.1:8787")
+    monkeypatch.setenv("HIVEMIND_TOKEN", "t")
+    calls = []
+    monkeypatch.setattr(mod, "_rpc", _legacy_rpc(calls))
+    spawned = []
+    monkeypatch.setattr(mod.subprocess, "Popen",
+                        lambda *a, **k: spawned.append(a) or type("P", (), {"pid": 4242})())
+    _pin_and_state(tmp_path, "sess-legacy", "demo", {})
+    result = mod.run({"session_id": "sess-legacy"}, "claude", "ensure")
+    assert calls == ["chat_connect", "bus_connect"], calls
+    assert "joined" in result and "not joined" not in result, result
+    assert spawned, "a listener must actually be started"
+
+
+def test_a_failed_join_names_the_step_and_the_error(mod, tmp_path, monkeypatch):
+    """One sentence for three operations and five exception types is what turned a missing tool
+    into an apparent routing fault. The token must not appear: this goes into an agent's context."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("HIVEMIND_SERVER_URL", "http://127.0.0.1:8787")
+    monkeypatch.setenv("HIVEMIND_TOKEN", "super-secret-token")
+
+    def boom(endpoint, token, name, arguments):
+        raise OSError("connection refused")
+    monkeypatch.setattr(mod, "_rpc", boom)
+    _pin_and_state(tmp_path, "sess-boom", "demo", {})
+    result = mod.run({"session_id": "sess-boom"}, "claude", "ensure")
+    assert "bus_connect" in result and "OSError" in result and "connection refused" in result
+    assert "super-secret-token" not in result
+
+
+def test_a_session_id_starting_with_an_underscore_still_yields_a_valid_slug(mod):
+    """The server requires ^[a-z0-9] for the first character. The slug stripped `-` but not `_`,
+    so such an id was rejected by chat_connect, _rpc turned ok:false into {}, and the session fell
+    back to the EPHEMERAL bus with no durable mailbox — a silent loss of offline messages."""
+    import re
+    server_rule = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+    for host in ("_thread-1", "__weird__", "-leading-dash", "_", "-", "Ünicode-Ω", "ok-already"):
+        slug = mod._chat_session(host)
+        assert server_rule.fullmatch(slug), (host, slug)
+
+
+def test_the_client_package_version_matches_its_metadata():
+    import tomllib
+    root = ROOT / "packages" / "hivemind-client"
+    declared = tomllib.loads((root / "pyproject.toml").read_text())["project"]["version"]
+    source = (root / "src" / "hivemind" / "__init__.py").read_text()
+    assert f'__version__ = "{declared}"' in source, \
+        f"pyproject says {declared} but __version__ disagrees; the installed package reports both"

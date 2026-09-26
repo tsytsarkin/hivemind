@@ -155,6 +155,17 @@ class Database:
                 from . import schemas as _schemas
                 con.execute("BEGIN IMMEDIATE")
                 try:
+                    # Re-checked INSIDE the transaction; the test above is only a fast path. Two
+                    # processes opening the same project DB (a restart overlapping the outgoing
+                    # server, or a second Database() elsewhere) both saw no marker. The loser of
+                    # BEGIN IMMEDIATE then repeated the scan and its INSERT hit the primary key,
+                    # and because apply_schema runs from Database.__init__ that exception aborted
+                    # STARTUP rather than one query. ON CONFLICT covers the same race between the
+                    # re-check and the insert.
+                    if con.execute("SELECT 1 FROM meta WHERE key=?",
+                                   (marker,)).fetchone() is not None:
+                        con.execute("COMMIT")
+                        return
                     rows = con.execute(
                         "SELECT t.node_id,t.status,n.node_type,v.props FROM graph_task t "
                         "JOIN node n ON n.node_id=t.node_id "
@@ -174,7 +185,8 @@ class Database:
                         cur.execute("UPDATE graph_task SET status_mode='versioned' WHERE node_id=?",
                                     (row["node_id"],))
                     cur.close()
-                    con.execute("INSERT INTO meta(key,value) VALUES(?,?)", (marker, "1"))
+                    con.execute("INSERT INTO meta(key,value) VALUES(?,?) "
+                                "ON CONFLICT(key) DO NOTHING", (marker, "1"))
                     con.execute("COMMIT")
                 except Exception:
                     con.execute("ROLLBACK")

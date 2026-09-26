@@ -363,3 +363,92 @@ def test_new_task_progress_checks_lease_at_write_time(db, monkeypatch):
     with pytest.raises(Invalid, match="live claim"):
         store.send("room", "parser", OWNER, "New lexer work", "retry-new",
                    kind="progress", task_node_id=nid)
+
+
+def test_a_roomless_task_is_never_reported_as_overdue(db):
+    """progress_overdue was computed unconditionally while `progress` was only read for a task
+    WITH a room. A room-less marker is a supported shape and can never receive a progress post —
+    ChatStore.send refuses a task-correlated post whose room is not the task's — so every claimed
+    room-less task went permanently overdue 15 minutes after the claim, however diligently its
+    holder heartbeat. Peers read that as an abandoned claim."""
+    from hivemind_server import graph_tasks
+    nid = _task(db)                                   # enable() with room=None
+    claimed = graph_tasks.claim(db, "nik", nid, OWNER, now=1000)
+    assert graph_tasks.read(db, nid, now=1000)["claim"]["progress_overdue"] is False
+    graph_tasks.heartbeat(db, nid, claimed["claim_token"], OWNER, now=1900)
+    late = graph_tasks.read(db, nid, now=2500)        # 25 minutes after the claim
+    assert late["claim"]["progress_overdue"] is False, \
+        "a task with no room owes no room progress, so it can never be overdue"
+
+
+def test_marking_a_started_node_does_not_advertise_it_as_unclaimed(db):
+    """enable() asserted "unclaimed" whatever the node's own props said. Marking a work_item that
+    was already in_progress or complete produced a marker disagreeing with the node version, and
+    the claim guard reads the MARKER — so a finished task could still be claimed, and only
+    graph_task_complete failed later with an unrelated message about a versioned status field."""
+    from hivemind_server import graph_tasks, schemas
+    with db.write("setup") as tx:
+        schemas.define_type(tx.cur, tx, "node", "work_item",
+                            {"type": "object", "properties": {"title": {"type": "string"},
+                             "status": {"enum": ["unclaimed", "in_progress", "complete"]}},
+                             "required": ["title", "status"]}, status="active")
+    done = graph.upsert_node(db, "nik", "work_item",
+                             {"title": "already shipped", "status": "complete"})["node_id"]
+    marked = graph_tasks.enable(db, "nik", done)
+    assert marked["status"] == "complete", marked
+    assert marked["effective_status"] == "complete"
+    with pytest.raises(Conflict):
+        graph_tasks.claim(db, "nik", done, OWNER, now=1000)
+    # and an untouched node still starts where it always did
+    fresh = graph.upsert_node(db, "nik", "work_item",
+                              {"title": "todo", "status": "unclaimed"})["node_id"]
+    assert graph_tasks.enable(db, "nik", fresh)["status"] == "unclaimed"
+
+
+def test_a_second_process_opening_the_same_database_does_not_abort_startup(tmp_path, monkeypatch):
+    """The migration marker was checked OUTSIDE its BEGIN IMMEDIATE. Two processes opening one
+    project DB both saw no marker; the loser blocked, then its bare INSERT hit the primary key and
+    raised out of apply_schema — which runs from Database.__init__, so the server died at STARTUP
+    rather than losing one query.
+
+    Driven deterministically rather than by racing threads: a thread race reproduced this only
+    about one run in three, which is the wrong kind of test to leave behind. The competing writer
+    commits the marker in the exact window — after this process has read it as absent, before it
+    inserts — by hooking the BEGIN that opens the transaction.
+    """
+    import sqlite3
+    from hivemind_server.db import Database
+    marker = "graph_task_status_mode_migrated_v1"
+    path = tmp_path / "race.db"
+    Database(path)                                     # first open: schema + marker
+    scrub = sqlite3.connect(path)
+    scrub.execute("DELETE FROM meta WHERE key=?", (marker,))
+    scrub.commit()
+    scrub.close()
+
+    db = Database.__new__(Database)                    # build without running apply_schema
+    Database.__init__(db, path)
+    real_conn = db.conn()
+    fired = []
+
+    class Racer:
+        """Delegates to the real connection, but lets a competitor win once, mid-window."""
+        def execute(self, sql, *args):
+            if sql.startswith("BEGIN IMMEDIATE") and not fired:
+                fired.append(True)
+                other = sqlite3.connect(path)
+                other.execute("INSERT INTO meta(key,value) VALUES(?,?)", (marker, "1"))
+                other.commit()
+                other.close()
+            return real_conn.execute(sql, *args)
+
+        def __getattr__(self, name):
+            return getattr(real_conn, name)
+
+    scrub = sqlite3.connect(path)
+    scrub.execute("DELETE FROM meta WHERE key=?", (marker,))
+    scrub.commit()
+    scrub.close()
+    monkeypatch.setattr(db, "conn", lambda: Racer())
+    db.apply_schema()                                  # must not raise
+    assert fired, "the competing write never happened; the test proved nothing"

@@ -7,7 +7,7 @@ description: >-
   define or extend a project's vocabulary. Covers the two versioning axes and the generic edge
   traits that give a relationship its behaviour.
 metadata:
-  version: "1.3.0"
+  version: "1.4.0"
 ---
 
 # Designing a Hivemind schema

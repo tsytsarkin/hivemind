@@ -14,6 +14,9 @@ from . import schemas
 
 DEFAULT_INTERVAL = 300
 DEFAULT_EXPIRY = 3600
+# The three task states. A node whose props carry one of these is describing task status in its
+# own versioned props; anything else (or nothing) means the marker owns status on its own.
+TASK_STATES = ("unclaimed", "in_progress", "complete")
 
 
 def _timing(interval_seconds: int, expires_after_seconds: int) -> None:
@@ -49,7 +52,15 @@ def enable(db: Database, agent_id: str, node_id: str, room_id: Optional[str] = N
         if props is None:
             raise Invalid("task graph node has no current version")
         current_props = json.loads(props["props"])
-        versioned = current_props.get("status") == "unclaimed"
+        # Seed the marker from the node's OWN status; do not assert "unclaimed" over it. Marking a
+        # work_item already in_progress or complete used to write a sidecar saying "unclaimed",
+        # after which graph_task_get showed the marker and the props disagreeing, and
+        # graph_task_claim handed out a claim on a finished task — its guard reads this column, not
+        # the props, so only graph_task_complete failed later, with an unrelated message about a
+        # versioned status field. Any state is accepted here, not just "unclaimed": a node already
+        # under way is still a task, and refusing to mark it would be a second surprise.
+        marked = current_props.get("status")
+        versioned = marked in TASK_STATES
         if versioned:
             for state in ("in_progress", "complete"):
                 try:
@@ -59,8 +70,8 @@ def enable(db: Database, agent_id: str, node_id: str, room_id: Optional[str] = N
                     versioned = False
                     break
         cur.execute("INSERT INTO graph_task VALUES(?,?,?,?,?,?)",
-                    (node_id, room_id, "unclaimed", tx.tx_id, tx.tx_id,
-                     "versioned" if versioned else "sidecar"))
+                    (node_id, room_id, marked if marked in TASK_STATES else "unclaimed",
+                     tx.tx_id, tx.tx_id, "versioned" if versioned else "sidecar"))
     return read(db, node_id)
 
 
@@ -126,7 +137,15 @@ def _read(cur, node_id: str, t: float) -> dict:
                         "expires_at": claim["last_beat_at"] + claim["expires_after_seconds"],
                         "interval_seconds": claim["interval_seconds"],
                         "last_progress_at": progress,
-                        "progress_overdue": t >= (progress or claim["claimed_at"]) + 900}
+                        # Only a ROOM task can be overdue. A room-less marker is a supported shape
+                        # (graph_task_enable takes room=None) and ChatStore.send refuses a
+                        # task-correlated post whose room is not the task's, so such a task can
+                        # never receive progress — computing this unconditionally pinned it true
+                        # 15 minutes after any claim, forever, and no heartbeat could clear it.
+                        # Peers read that as an abandoned claim. The obligation itself is
+                        # room-scoped: only agents doing active room work owe status updates.
+                        "progress_overdue": task["room_id"] is not None
+                        and t >= (progress or claim["claimed_at"]) + 900}
     return out
 
 

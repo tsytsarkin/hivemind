@@ -191,7 +191,10 @@ started without `HIVEMIND_TOKEN`; this does **not** give Codex's MCP tools that 
    bundled listener at `$HOME/.hivemind/bus-listen.py` without installing the Hivemind client.
 2. `chat_connect(client="codex", session_id=<sid>, project=<p>)` returns a `monitor_command`
    containing the canonical WebSocket URL and listen key. Treat it as a credential: do not
-   publish or log it. Use `bus_connect` only for explicit legacy ephemeral peers.
+   publish or log it. Use `bus_connect` only for explicit legacy ephemeral peers, and give it a
+   label **different** from `codex-<thread-id>`: that is the label the hook's own listener holds,
+   and a second listener claiming it displaces the first, so this session stops receiving the
+   messages it thinks it is connected for.
 3. Run the returned command in a persistent shell session. With Codex's `exec_command`, retain
    its `session_id` and use `write_stdin` to wait for message output while the session is active.
    Do not invoke a nonexistent `Monitor` tool. In a plain terminal you can run it directly.
