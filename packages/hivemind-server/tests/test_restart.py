@@ -9,10 +9,13 @@ the script is supposed to ask for whichever one the host actually has.
 
 Two safety rules shape every test here:
 
-  * `pkill` is stubbed to a no-op on PATH. The real script kills by process name, and a suite that
-    did that for real would take down a live server the moment someone ran pytest on the deploy
-    host. The kill that *is* platform-specific — finding and signalling whoever holds the port — is
-    exercised for real, against an ephemeral port nothing else is using.
+  * `pkill` and `pgrep` are both stubbed on PATH — `pkill` to a no-op, `pgrep` to "no matches". The
+    real script finds servers by process name with one and signals them with the other, and a suite
+    that did either for real would take down a live server the moment someone ran pytest on the
+    deploy host. `pgrep` matters as much as `pkill` now that discovery drives a SIGKILL escalation:
+    a test that wants a process found overrides the stub with one that reports its own fixture's
+    PID and nothing else. The kill that *is* platform-specific — finding and signalling whoever
+    holds the port — is exercised for real, against an ephemeral port nothing else is using.
   * HOME and PATH point away from the developer's machine, because the script prefers `uv` when it
     is installed. Left alone, these tests would exercise a different branch on your laptop than in
     CI, which is the kind of coverage that is worse than none.
@@ -55,6 +58,27 @@ srv.serve_forever()
 """
 
 DIES_ON_STARTUP = "#!/bin/sh\necho \"ImportError: no module named 'whatever'\" >&2\nexit 1\n"
+
+# A server wedged in graceful shutdown: it has already released the listening socket and now ignores
+# SIGTERM forever, which is what uvicorn does while it waits for a bus WebSocket that never closes.
+# It holds no port, so only process-level discovery can find it.
+#
+# The fork is so the suite is NOT its parent: a SIGKILLed child of the test process lingers as a
+# zombie, and both `_gone_within` and the stub `pgrep` below read a zombie as alive. Orphaned, it is
+# reaped by init the moment it dies.
+WEDGED_SHUTDOWN = """#!@PYTHON@
+import os, signal, sys, time
+if os.fork():
+    sys.exit(0)
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+with open(os.environ["WEDGE_PIDFILE"], "w") as fh:
+    fh.write(str(os.getpid()))
+time.sleep(600)
+"""
+
+# Reports one PID, and only while it is genuinely alive — a static `echo` would keep naming it after
+# the script had killed it, and the script would then correctly complain that SIGKILL had not worked.
+PGREP_REPORTING = "#!/bin/sh\nkill -0 @PID@ 2>/dev/null && echo @PID@\nexit 0\n"
 
 
 def _free_port():
@@ -107,6 +131,7 @@ class Checkout:
         self.stub_bin = root / "stub-bin"
         self.stub_bin.mkdir()
         self._stub("pkill", "#!/bin/sh\nexit 0\n")  # see the module docstring
+        self._stub("pgrep", "#!/bin/sh\nexit 1\n")  # "no matches", like the real one
 
     def _stub(self, name, body):
         p = self.stub_bin / name
@@ -205,6 +230,45 @@ def test_restarting_over_a_live_instance_replaces_it(checkout):
     # that makes pgrep report "running" while nothing is listening. Poll rather than sleep a fixed
     # interval: the old process is reaped by init once its shell exits, and that timing is not ours.
     assert _gone_within(first, 10), f"pid {first} still around; it was supposed to be killed"
+
+
+def test_a_shutdown_that_wedges_is_killed_even_though_it_freed_the_port(checkout):
+    """The leak this script existed to prevent and then caused for months. uvicorn closes the
+    listening socket the instant it takes SIGTERM and only afterwards drains open connections, so a
+    bus WebSocket — which never closes on its own — parks the process in graceful shutdown forever.
+    The port comes free, so an escalation gated on the port never fires: measured on the deploy host,
+    two servers ~3 days old, holding 15 and 22 handles on the live 8.4 GB database and still serving
+    their already-connected peers code that no restart would ever replace, while every run of this
+    script reported success. Discovery has to be by process, and the SIGKILL has to reach a process
+    that holds no port at all."""
+    pidfile = checkout.root / "wedge.pid"
+    wedged = checkout.root / "wedged.py"
+    wedged.write_text(WEDGED_SHUTDOWN.replace("@PYTHON@", sys.executable))
+    wedged.chmod(0o755)
+    # Returns as soon as the forking parent exits; the orphan writes the pidfile.
+    subprocess.run([sys.executable, str(wedged)], check=True, timeout=30,
+                   env=dict(os.environ, WEDGE_PIDFILE=str(pidfile)))
+    for _ in range(100):
+        if pidfile.exists() and pidfile.read_text().strip():
+            break
+        time.sleep(0.1)
+    pid = int(pidfile.read_text().strip())
+    assert not _gone_within(pid, 0.5), "the wedged fixture died before the test began"
+
+    checkout._stub("pgrep", PGREP_REPORTING.replace("@PID@", str(pid)))
+    checkout.install_launcher()
+    try:
+        r = checkout.run()
+        assert r.returncode == 0, f"{r.stdout}\n{r.stderr}"
+        assert "escalating to SIGKILL" in r.stdout, r.stdout
+        assert _gone_within(pid, 10), (
+            f"pid {pid} survived: it freed the port, so nothing escalated to SIGKILL")
+        assert "still alive after SIGKILL" not in r.stderr, r.stderr
+    finally:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
 
 
 def test_a_server_that_dies_on_startup_exits_nonzero_with_the_reason(checkout):
