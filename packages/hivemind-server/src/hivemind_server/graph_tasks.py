@@ -10,6 +10,7 @@ from typing import Optional
 from .chat import StableAddress, _address
 from .db import Conflict, Database, Invalid, NotFound, SENTINEL
 from .ids import ulid
+from . import schemas
 
 DEFAULT_INTERVAL = 300
 DEFAULT_EXPIRY = 3600
@@ -33,7 +34,7 @@ def _marker(cur, node_id: str):
 def enable(db: Database, agent_id: str, node_id: str, room_id: Optional[str] = None) -> dict:
     with db.write(agent_id, "enable graph task marker") as tx:
         cur = tx.cur
-        row = cur.execute("SELECT redirect_to FROM node WHERE node_id=?", (node_id,)).fetchone()
+        row = cur.execute("SELECT redirect_to,node_type FROM node WHERE node_id=?", (node_id,)).fetchone()
         if row is None:
             raise NotFound("graph node does not exist")
         if row["redirect_to"] is not None:
@@ -45,10 +46,21 @@ def enable(db: Database, agent_id: str, node_id: str, room_id: Optional[str] = N
             raise Conflict("node already marked as a task")
         props = cur.execute("SELECT props FROM node_version WHERE node_id=? AND tx_to=?",
                             (node_id, SENTINEL)).fetchone()
-        if props is None or json.loads(props["props"]).get("status", "unclaimed") != "unclaimed":
-            raise Invalid("task graph status must start unclaimed")
-        cur.execute("INSERT INTO graph_task VALUES(?,?,?,?,?)",
-                    (node_id, room_id, "unclaimed", tx.tx_id, tx.tx_id))
+        if props is None:
+            raise Invalid("task graph node has no current version")
+        current_props = json.loads(props["props"])
+        versioned = current_props.get("status") == "unclaimed"
+        if versioned:
+            for state in ("in_progress", "complete"):
+                try:
+                    schemas.validate_props(cur, "node", row["node_type"],
+                                           {**current_props, "status": state})
+                except Invalid:
+                    versioned = False
+                    break
+        cur.execute("INSERT INTO graph_task VALUES(?,?,?,?,?,?)",
+                    (node_id, room_id, "unclaimed", tx.tx_id, tx.tx_id,
+                     "versioned" if versioned else "sidecar"))
     return read(db, node_id)
 
 
@@ -69,12 +81,14 @@ def offer(db: Database, agent_id: str, room_name: str,
         props = {"title": title.strip(), "summary": summary.strip(),
                  "status": "unclaimed", "room_id": room_id}
         try:
+            for state in ("in_progress", "complete"):
+                schemas.validate_props(tx.cur, "node", "work_item", {**props, "status": state})
             node = _create_node_tx(tx, "work_item", props)
         except Invalid as exc:
             raise Invalid("work_item schema must permit title, summary, status and room_id; "
                           "propose an additive schema update") from exc
-        tx.cur.execute("INSERT INTO graph_task VALUES(?,?,?,?,?)",
-                       (node["node_id"], room_id, "unclaimed", tx.tx_id, tx.tx_id))
+        tx.cur.execute("INSERT INTO graph_task VALUES(?,?,?,?,?,?)",
+                       (node["node_id"], room_id, "unclaimed", tx.tx_id, tx.tx_id, "versioned"))
         _event(tx, node["node_id"], "offer", 0, None, time.time())
     return get_node(db, node_id=node["node_id"])
 
@@ -91,12 +105,13 @@ def _read(cur, node_id: str, t: float) -> dict:
     progress = None
     if live and task["room_id"] is not None:
         found = cur.execute("SELECT MAX(created_at) AS last_progress FROM chat_message "
-                            "WHERE room_id=? AND sender_user=? AND sender_device=? AND "
+                            "WHERE room_id=? AND task_node_id=? AND sender_user=? AND sender_device=? AND "
                             "sender_client=? AND message_kind='progress' AND created_at>=?",
-                            (task["room_id"], claim["holder_user"], claim["holder_device"],
+                            (task["room_id"], node_id, claim["holder_user"], claim["holder_device"],
                              claim["holder_client"], claim["claimed_at"])).fetchone()
         progress = found["last_progress"] if found else None
     out = {"node_id": node_id, "room_id": task["room_id"], "status": task["status"],
+            "status_mode": task["status_mode"],
             "effective_status": ("unclaimed" if task["status"] == "in_progress" and not live
                                  else task["status"]),
             "active_agents": [{"address": (r["user"], r["device"], r["client"]),
@@ -126,17 +141,19 @@ def activity(db: Database, node_id: str, who: StableAddress, *,
              now: Optional[float] = None) -> dict:
     stable = _address(who)
     _timing(interval_seconds, expires_after_seconds)
-    t = time.time() if now is None else float(now)
     with db.write_light() as cur:
+        t = time.time() if now is None else float(now)
         _marker(cur, node_id)
         cur.execute("INSERT INTO graph_task_activity VALUES(?,?,?,?,?,?,?) "
                     "ON CONFLICT(node_id,user,device,client) DO UPDATE SET "
-                    "last_beat_at=excluded.last_beat_at, "
+                    "last_beat_at=MAX(graph_task_activity.last_beat_at,excluded.last_beat_at), "
                     "interval_seconds=excluded.interval_seconds, "
                     "expires_after_seconds=excluded.expires_after_seconds",
                     (node_id, *stable, t, interval_seconds, expires_after_seconds))
-    return {"node_id": node_id, "address": stable, "last_beat_at": t,
-            "expires_at": t + expires_after_seconds}
+        accepted = cur.execute("SELECT last_beat_at FROM graph_task_activity WHERE node_id=? "
+                               "AND user=? AND device=? AND client=?", (node_id, *stable)).fetchone()[0]
+    return {"node_id": node_id, "address": stable, "last_beat_at": accepted,
+            "expires_at": accepted + expires_after_seconds}
 
 
 def _event(tx, node_id: str, kind: str, generation: int,
@@ -158,10 +175,10 @@ def claim(db: Database, agent_id: str, node_id: str, who: StableAddress, *,
           now: Optional[float] = None) -> dict:
     stable = _address(who)
     _timing(interval_seconds, expires_after_seconds)
-    t = time.time() if now is None else float(now)
     token = secrets.token_urlsafe(32)
     digest = hashlib.sha256(token.encode()).hexdigest()
     with db.write(agent_id, "claim graph task") as tx:
+        t = time.time() if now is None else float(now)
         task = _marker(tx.cur, node_id)
         if task["status"] == "complete":
             raise Conflict("completed task cannot be claimed")
@@ -201,21 +218,24 @@ def _valid_claim(cur, node_id: str, token: str, stable: StableAddress, t: float)
 def heartbeat(db: Database, node_id: str, claim_token: str, who: StableAddress, *,
               now: Optional[float] = None) -> dict:
     stable = _address(who)
-    t = time.time() if now is None else float(now)
     with db.write_light() as cur:
+        t = time.time() if now is None else float(now)
         lease = _valid_claim(cur, node_id, claim_token, stable, t)
+        accepted = max(t, lease["last_beat_at"])
         cur.execute("UPDATE graph_task_claim SET last_beat_at=? WHERE node_id=? "
-                    "AND generation=?", (t, node_id, lease["generation"]))
+                    "AND generation=?", (accepted, node_id, lease["generation"]))
     return {"node_id": node_id, "generation": lease["generation"],
-            "expires_at": t + lease["expires_after_seconds"]}
+            "expires_at": accepted + lease["expires_after_seconds"]}
 
 
 def _end(db: Database, agent_id: str, node_id: str, claim_token: str,
          who: StableAddress, kind: str, now: Optional[float]) -> dict:
     stable = _address(who)
-    t = time.time() if now is None else float(now)
     with db.write(agent_id, kind + " graph task claim") as tx:
+        t = time.time() if now is None else float(now)
         lease = _valid_claim(tx.cur, node_id, claim_token, stable, t)
+        if kind == "complete" and _marker(tx.cur, node_id)["status_mode"] != "versioned":
+            raise Invalid("completion requires a node schema with a versioned status field")
         status = "complete" if kind == "complete" else "unclaimed"
         _transition(tx, node_id, status)
         tx.cur.execute("UPDATE graph_task_claim SET token_digest=NULL,holder_user=NULL,"
@@ -243,6 +263,7 @@ def reap_expired(db: Database, *, now: Optional[float] = None) -> int:
     if not due:
         return 0
     with db.write("task-reaper", "reap expired graph task claims") as tx:
+        t = time.time() if now is None else float(now)
         expired = tx.cur.execute("SELECT node_id,generation FROM graph_task_claim "
                                  "WHERE token_digest IS NOT NULL AND "
                                  "last_beat_at+expires_after_seconds<=?", (t,)).fetchall()

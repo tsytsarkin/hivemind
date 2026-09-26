@@ -149,7 +149,7 @@ def attach(mcp, cfg, identities) -> None:
         who, session = _addressed(client, session_id)
         store = _store()
         result = store.inbox(who, after_seq, limit)
-        result["last_read_seq"] = store.read_cursor(who, "dm")
+        result.update(store.read_marker(who, "dm"))
         _touch(store, who, session)
         return result
 
@@ -164,14 +164,16 @@ def attach(mcp, cfg, identities) -> None:
 
     @mcp.tool(annotations=WRITE,
               description="Post a freeform text or informational progress update to an EXISTING room; "
-                          "progress needs no acknowledgement from other agents.")
+                          "progress needs no acknowledgement. Set task_node_id for a live "
+                          "claim's nonempty progress so unrelated tasks stay overdue.")
     @_envelope
     def chat_room_post(name: str, client: str, session_id: str, body: str,
-                       idempotency_key: str, kind: str = "text") -> dict:
+                       idempotency_key: str, kind: str = "text",
+                       task_node_id: Optional[str] = None) -> dict:
         who, session = _addressed(client, session_id)
         store = _store()
         message = store.send("room", name, who, body, idempotency_key,
-                             kind=kind, session_id=session)
+                             kind=kind, session_id=session, task_node_id=task_node_id)
         delivered = 0
         try:
             for recipient in store.subscribers(name):
@@ -192,7 +194,7 @@ def attach(mcp, cfg, identities) -> None:
         who, session = _addressed(client, session_id)
         store = _store()
         result = store.history(name, after_seq, limit)
-        result["last_read_seq"] = store.read_cursor(who, name, channel="room")
+        result.update(store.read_marker(who, name, channel="room"))
         _touch(store, who, session)
         return result
 

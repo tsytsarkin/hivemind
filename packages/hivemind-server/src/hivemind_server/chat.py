@@ -165,7 +165,8 @@ class ChatStore:
     @staticmethod
     def _public(row) -> dict:
         return {"id": row["message_id"], "seq": row["seq"], "channel": row["channel"],
-                "room_id": row["room_id"], "sender": (row["sender_user"],
+                "room_id": row["room_id"], "task_node_id": row["task_node_id"],
+                "sender": (row["sender_user"],
                 row["sender_device"], row["sender_client"]),
                 "sender_session": row["sender_session"], "kind": row["message_kind"],
                 "body": row["body"], "created_at": row["created_at"],
@@ -200,7 +201,8 @@ class ChatStore:
 
     def send(self, channel: str, target: StableAddress | str, sender: StableAddress,
              body: str, idempotency_key: str, *, now: Optional[float] = None,
-             kind: str = "text", session_id: Optional[str] = None) -> dict:
+             kind: str = "text", session_id: Optional[str] = None,
+             task_node_id: Optional[str] = None) -> dict:
         who = _address(sender)
         if channel not in ("dm", "room"):
             raise Invalid("channel must be dm or room")
@@ -208,12 +210,17 @@ class ChatStore:
             raise Invalid("message kind must be text or progress")
         if not isinstance(body, str) or len(body.encode("utf-8")) > MAX_BODY_BYTES:
             raise Invalid("body exceeds 256 KiB UTF-8")
+        if kind == "progress" and not body.strip():
+            raise Invalid("progress must describe actual work, not be empty")
+        if task_node_id is not None and (channel != "room" or kind != "progress" or
+                                          not isinstance(task_node_id, str) or not task_node_id):
+            raise Invalid("task_node_id is only valid for room progress posts")
         if not isinstance(idempotency_key, str) or not _RETRY.fullmatch(idempotency_key):
             raise Invalid("idempotency_key must be a 1–64 character ASCII key")
         if session_id is not None and not _SESSION.fullmatch(session_id):
             raise Invalid("invalid sender session_id")
-        t = time.time() if now is None else float(now)
         with self.db.write_light() as cur:
+            t = time.time() if now is None else float(now)
             self._purge(cur, t)
             if channel == "dm":
                 addressed = _address(target)
@@ -229,11 +236,24 @@ class ChatStore:
                 "AND sender_client=? AND target_key=? AND retry_key=?",
                 (*who, target_key, idempotency_key)).fetchone()
             if duplicate:
-                if duplicate["body"] != body or duplicate["message_kind"] != kind:
+                if (duplicate["body"] != body or duplicate["message_kind"] != kind or
+                        duplicate["task_node_id"] != task_node_id):
                     raise Conflict("idempotency_key already used for different content")
                 if session_id is not None:
                     self._touch(cur, who, session_id, t)
                 return {**self._public(duplicate), "duplicate": True}
+            if task_node_id is not None:
+                related = cur.execute("SELECT t.room_id,c.holder_user,c.holder_device,"
+                                      "c.holder_client,c.token_digest,c.last_beat_at,"
+                                      "c.expires_after_seconds FROM graph_task t "
+                                      "JOIN graph_task_claim c ON c.node_id=t.node_id "
+                                      "WHERE t.node_id=?", (task_node_id,)).fetchone()
+                if (related is None or related["room_id"] != room_id or
+                        related["token_digest"] is None or
+                        (related["holder_user"], related["holder_device"],
+                         related["holder_client"]) != who or
+                        related["last_beat_at"] + related["expires_after_seconds"] <= t):
+                    raise Invalid("task progress requires a live claim in this room by its sender")
             byte_count = len(body.encode("utf-8"))
             cur.execute("INSERT INTO chat_usage VALUES(1,0,0) ON CONFLICT(id) DO NOTHING")
             usage = cur.execute("SELECT counted_bytes, message_count FROM chat_usage WHERE id=1").fetchone()
@@ -243,10 +263,11 @@ class ChatStore:
             message_id = ulid()
             cur.execute("INSERT INTO chat_message(message_id,channel,room_id,target_user,"
                         "target_device,target_client,sender_user,sender_device,sender_client,"
-                        "sender_session,target_key,body,body_bytes,message_kind,retry_key,created_at) "
-                        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        "sender_session,target_key,body,body_bytes,message_kind,task_node_id,"
+                        "retry_key,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                         (message_id, channel, room_id, *(addressed or (None, None, None)),
-                         *who, session_id, target_key, body, byte_count, kind, idempotency_key, t))
+                         *who, session_id, target_key, body, byte_count, kind, task_node_id,
+                         idempotency_key, t))
             seq = cur.lastrowid
             cur.execute("UPDATE chat_usage SET counted_bytes=counted_bytes+?, "
                         "message_count=message_count+1 WHERE id=1",
@@ -255,6 +276,7 @@ class ChatStore:
                 self._touch(cur, who, session_id, t)
         return {"id": message_id, "seq": seq, "channel": channel, "room_id": room_id,
                 "sender": who, "sender_session": session_id, "kind": kind, "body": body,
+                "task_node_id": task_node_id,
                 "created_at": t, "expires_at": t + MESSAGE_TTL, "duplicate": False}
 
     @staticmethod
@@ -330,31 +352,42 @@ class ChatStore:
         t = time.time() if now is None else float(now)
         with self.db.write_light() as cur:
             clause, key, args = self._cursor_key(cur, target, who, channel)
-            row = cur.execute(f"SELECT 1 FROM chat_message WHERE {clause} "
+            row = cur.execute(f"SELECT message_id FROM chat_message WHERE {clause} "
                               "AND seq=? AND created_at>?", (*args, seq, t - MESSAGE_TTL)).fetchone()
             if row is None:
                 raise Invalid("read cursor must name an accessible unexpired message")
-            cur.execute("INSERT INTO chat_cursor VALUES(?,?,?,?,?,?) ON CONFLICT(user,device,client,target_key) "
-                        "DO UPDATE SET seq=MAX(seq,excluded.seq),updated_at=excluded.updated_at",
-                        (*who, key, seq, t))
-            stored = cur.execute("SELECT seq FROM chat_cursor WHERE user=? AND device=? "
-                                 "AND client=? AND target_key=?", (*who, key)).fetchone()["seq"]
-        return {"up_to_seq": stored, "target": target}
+            cur.execute("INSERT INTO chat_cursor(user,device,client,target_key,seq,updated_at,message_id) "
+                        "VALUES(?,?,?,?,?,?,?) ON CONFLICT(user,device,client,target_key) "
+                        "DO UPDATE SET seq=MAX(chat_cursor.seq,excluded.seq),"
+                        "updated_at=excluded.updated_at,"
+                        "message_id=CASE WHEN excluded.seq>=chat_cursor.seq "
+                        "THEN excluded.message_id ELSE chat_cursor.message_id END",
+                        (*who, key, seq, t, row["message_id"]))
+            stored = cur.execute("SELECT seq,message_id FROM chat_cursor WHERE user=? "
+                                 "AND device=? AND client=? AND target_key=?",
+                                 (*who, key)).fetchone()
+        return {"up_to_seq": stored["seq"], "last_read_message_id": stored["message_id"],
+                "target": target}
 
-    def read_cursor(self, stable: StableAddress, target: str, *, channel: str = "dm") -> int:
+    def read_marker(self, stable: StableAddress, target: str, *, channel: str = "dm") -> dict:
         who = _address(stable)
         with self.db.read() as cur:
             _, key, _ = self._cursor_key(cur, target, who, channel)
-            row = cur.execute("SELECT seq FROM chat_cursor WHERE user=? AND device=? "
+            row = cur.execute("SELECT seq,message_id FROM chat_cursor WHERE user=? AND device=? "
                               "AND client=? AND target_key=?", (*who, key)).fetchone()
-        return row["seq"] if row else 0
+        return {"last_read_seq": row["seq"] if row else 0,
+                "last_read_message_id": row["message_id"] if row else None}
+
+    def read_cursor(self, stable: StableAddress, target: str, *, channel: str = "dm") -> int:
+        return self.read_marker(stable, target, channel=channel)["last_read_seq"]
 
     @staticmethod
     def _touch(cur, who: StableAddress, session: str, now: float) -> None:
         cur.execute("DELETE FROM chat_session WHERE last_activity_at<=?", (now - MESSAGE_TTL,))
         cur.execute("INSERT INTO chat_session VALUES(?,?,?,?,?) "
                     "ON CONFLICT(user,device,client,session_id) DO UPDATE SET "
-                    "last_activity_at=excluded.last_activity_at", (*who, session, now))
+                    "last_activity_at=MAX(chat_session.last_activity_at,excluded.last_activity_at)",
+                    (*who, session, now))
 
     def touch(self, stable: StableAddress, session: str,
               *, now: Optional[float] = None) -> None:

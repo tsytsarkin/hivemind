@@ -30,6 +30,14 @@ def test_task_marker_accepts_arbitrary_schema_and_nonexclusive_activity(db):
     assert graph_tasks.read(Database(db.path), nid)["effective_status"] == "unclaimed"
 
 
+def test_nonexclusive_activity_never_moves_backwards(db):
+    from hivemind_server import graph_tasks
+    nid = _task(db)
+    graph_tasks.activity(db, nid, OWNER, now=1200)
+    graph_tasks.activity(db, nid, OWNER, now=1100)
+    assert graph_tasks.read(db, nid, now=1201)["active_agents"][0]["last_beat_at"] == 1200
+
+
 def test_marked_task_heartbeat_does_not_require_status_field_in_node_schema(db):
     from hivemind_server import graph_tasks
     node = graph.upsert_node(db, "nik", "finding", {"title": "inspect parser"})
@@ -45,6 +53,19 @@ def _task(db):
     node = graph.upsert_node(db, "nik", "finding", {"title": "inspect parser"})
     graph_tasks.enable(db, "nik", node["node_id"])
     return node["node_id"]
+
+
+def _versioned_task(db):
+    from hivemind_server import graph_tasks, schemas
+    with db.write("setup") as tx:
+        schemas.define_type(tx.cur, tx, "node", "work_item",
+                            {"type": "object", "properties": {"title": {"type": "string"},
+                             "status": {"enum": ["unclaimed", "in_progress", "complete"]}},
+                             "required": ["title", "status"]}, status="active")
+    nid = graph.upsert_node(db, "nik", "work_item", {"title": "audit parser",
+                                                       "status": "unclaimed"})["node_id"]
+    graph_tasks.enable(db, "nik", nid)
+    return nid
 
 
 def test_claim_heartbeat_does_not_version_node_or_stamp_tx(db):
@@ -67,7 +88,7 @@ def test_claim_heartbeat_does_not_version_node_or_stamp_tx(db):
 
 def test_expiry_and_takeover_fence_old_token_and_preserve_graph_status(db):
     from hivemind_server import graph_tasks
-    nid = _task(db)
+    nid = _versioned_task(db)
     old = graph_tasks.claim(db, "nik", nid, OWNER, now=1000)
     assert graph_tasks.read(db, nid, now=4599)["effective_status"] == "in_progress"
     assert graph_tasks.read(db, nid, now=4600)["effective_status"] == "unclaimed"
@@ -159,6 +180,86 @@ def test_parallel_claimers_have_one_winner(db):
     assert sorted(outcomes) == ["claimed", "lost"]
 
 
+def test_statusless_task_can_claim_but_cannot_complete_without_versioned_status(db):
+    from hivemind_server import graph_tasks
+    nid = _task(db)
+    claimed = graph_tasks.claim(db, "nik", nid, OWNER, now=1000)
+    with pytest.raises(Invalid, match="versioned status"):
+        graph_tasks.complete(db, "nik", nid, claimed["claim_token"], OWNER, now=1100)
+    assert graph_tasks.read(db, nid, now=1100)["effective_status"] == "in_progress"
+    graph_tasks.release(db, "nik", nid, claimed["claim_token"], OWNER, now=1101)
+
+
+def test_existing_unrelated_or_restricted_status_uses_sidecar_not_invalid_graph_props(db):
+    from hivemind_server import graph_tasks, schemas
+    with db.write("setup") as tx:
+        schemas.define_type(tx.cur, tx, "node", "restricted",
+                            {"type": "object", "properties": {"status": {"enum": ["open"]}},
+                             "required": ["status"], "additionalProperties": False}, status="active")
+    nid = graph.upsert_node(db, "nik", "restricted", {"status": "open"})["node_id"]
+    graph_tasks.enable(db, "nik", nid)
+    claimed = graph_tasks.claim(db, "nik", nid, OWNER, now=1000)
+    assert claimed["status_mode"] == "sidecar"
+    assert claimed["effective_status"] == "in_progress"
+    assert graph.get_node(db, node_id=nid)["current"]["props"] == {"status": "open"}
+
+
+def test_schema_that_only_accepts_unclaimed_can_still_use_sidecar_claim(db):
+    from hivemind_server import graph_tasks, schemas
+    with db.write("setup") as tx:
+        schemas.define_type(tx.cur, tx, "node", "narrow",
+                            {"type": "object", "properties": {"status": {"enum": ["unclaimed"]}},
+                             "required": ["status"], "additionalProperties": False}, status="active")
+    nid = graph.upsert_node(db, "nik", "narrow", {"status": "unclaimed"})["node_id"]
+    assert graph_tasks.enable(db, "nik", nid)["status_mode"] == "sidecar"
+    claim = graph_tasks.claim(db, "nik", nid, OWNER, now=1000)
+    assert claim["effective_status"] == "in_progress"
+    assert graph.get_node(db, node_id=nid)["current"]["props"] == {"status": "unclaimed"}
+
+
+def test_existing_claims_upgrade_to_versioned_status_without_losing_completion(db):
+    from hivemind_server import graph_tasks
+    nid = _versioned_task(db)
+    claim = graph_tasks.claim(db, "nik", nid, OWNER, now=1000)
+    # Simulate the already-written 1.4.0 task table from the branch before status_mode existed.
+    db.conn().execute("ALTER TABLE graph_task DROP COLUMN status_mode")
+    db.conn().execute("DELETE FROM meta WHERE key='graph_task_status_mode_migrated_v1'")
+    upgraded = Database(db.path)
+    assert graph_tasks.read(upgraded, nid, now=1100)["status_mode"] == "versioned"
+    graph_tasks.complete(upgraded, "nik", nid, claim["claim_token"], OWNER, now=1100)
+    assert graph.get_node(upgraded, node_id=nid)["current"]["props"]["status"] == "complete"
+
+
+def test_heartbeat_clock_never_regresses_or_renews_after_write_lock_expiry(db, monkeypatch):
+    import contextlib
+    from hivemind_server import graph_tasks
+    nid = _task(db)
+    claim = graph_tasks.claim(db, "nik", nid, OWNER, now=1000)
+    first = graph_tasks.heartbeat(db, nid, claim["claim_token"], OWNER, now=1200)
+    second = graph_tasks.heartbeat(db, nid, claim["claim_token"], OWNER, now=1100)
+    assert second["expires_at"] == first["expires_at"]
+
+    class Clock:
+        current = 4799
+
+        @classmethod
+        def time(cls):
+            return cls.current
+
+    monkeypatch.setattr(graph_tasks, "time", Clock)
+    original = db.write_light
+
+    @contextlib.contextmanager
+    def lock_delayed():
+        Clock.current = 4800  # expiry after previous last accepted beat 1200 + 3600
+        with original() as cur:
+            yield cur
+
+    monkeypatch.setattr(db, "write_light", lock_delayed)
+    with pytest.raises(Conflict):
+        graph_tasks.heartbeat(db, nid, claim["claim_token"], OWNER)
+
+
 def test_offering_graph_task_requires_explicit_room_and_schema(db):
     from hivemind_server import graph_tasks
     from hivemind_server.chat import ChatStore
@@ -188,3 +289,77 @@ def test_offered_graph_task_keeps_versioned_status_after_chat_history_expires(db
     ChatStore(db).cleanup(now=1000 + 86400)
     assert graph.get_node(db, node_id=task["node_id"])["current"]["props"]["status"] == "complete"
     assert graph_tasks.read(Database(db.path), task["node_id"])["effective_status"] == "complete"
+
+
+def test_progress_must_be_meaningful_and_correlated_with_its_claimed_task(db):
+    from hivemind_server import graph_tasks, schemas
+    from hivemind_server.chat import ChatStore
+    with db.write("setup") as tx:
+        schemas.define_type(tx.cur, tx, "node", "work_item",
+                            {"type": "object", "additionalProperties": True}, status="active")
+    store = ChatStore(db)
+    store.create_room("parser", "Parser work", OWNER)
+    first = graph_tasks.offer(db, "nik", "parser", "Check lexer", "audit tokenizer")["node_id"]
+    second = graph_tasks.offer(db, "nik", "parser", "Check parser", "audit parse tree")["node_id"]
+    graph_tasks.claim(db, "nik", first, OWNER, now=1000)
+    graph_tasks.claim(db, "nik", second, OWNER, now=1000)
+    with pytest.raises(Invalid, match="progress"):
+        store.send("room", "parser", OWNER, "   ", "empty", kind="progress",
+                   task_node_id=first, now=1900)
+    store.send("room", "parser", OWNER, "Lexer checks underway", "lexer-1",
+               kind="progress", task_node_id=first, now=1900)
+    assert graph_tasks.read(db, first, now=1901)["claim"]["progress_overdue"] is False
+    assert graph_tasks.read(db, second, now=1901)["claim"]["progress_overdue"] is True
+
+
+def test_accepted_task_progress_retry_survives_claim_expiry(db):
+    from hivemind_server import graph_tasks, schemas
+    from hivemind_server.chat import ChatStore
+    with db.write("setup") as tx:
+        schemas.define_type(tx.cur, tx, "node", "work_item",
+                            {"type": "object", "additionalProperties": True}, status="active")
+    store = ChatStore(db)
+    store.create_room("parser", "Parser work", OWNER)
+    nid = graph_tasks.offer(db, "nik", "parser", "Check lexer", "audit tokenizer")["node_id"]
+    graph_tasks.claim(db, "nik", nid, OWNER, now=1000)
+    original = store.send("room", "parser", OWNER, "Lexer checks underway", "retry-1",
+                          kind="progress", task_node_id=nid, now=1000)
+    duplicate = store.send("room", "parser", OWNER, "Lexer checks underway", "retry-1",
+                           kind="progress", task_node_id=nid, now=4600)
+    assert duplicate["duplicate"] is True and duplicate["id"] == original["id"]
+    with pytest.raises(Conflict):
+        store.send("room", "parser", OWNER, "Different text", "retry-1",
+                   kind="progress", task_node_id=nid, now=4601)
+
+
+def test_new_task_progress_checks_lease_at_write_time(db, monkeypatch):
+    import contextlib
+    from hivemind_server import chat, graph_tasks, schemas
+    with db.write("setup") as tx:
+        schemas.define_type(tx.cur, tx, "node", "work_item",
+                            {"type": "object", "additionalProperties": True}, status="active")
+    store = chat.ChatStore(db)
+    store.create_room("parser", "Parser work", OWNER)
+    nid = graph_tasks.offer(db, "nik", "parser", "Check lexer", "audit tokenizer")["node_id"]
+    graph_tasks.claim(db, "nik", nid, OWNER, now=1000)
+
+    class Clock:
+        current = 4599
+
+        @classmethod
+        def time(cls):
+            return cls.current
+
+    monkeypatch.setattr(chat, "time", Clock)
+    original = db.write_light
+
+    @contextlib.contextmanager
+    def delayed():
+        Clock.current = 4600
+        with original() as cur:
+            yield cur
+
+    monkeypatch.setattr(db, "write_light", delayed)
+    with pytest.raises(Invalid, match="live claim"):
+        store.send("room", "parser", OWNER, "New lexer work", "retry-new",
+                   kind="progress", task_node_id=nid)

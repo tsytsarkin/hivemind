@@ -198,9 +198,12 @@ def upsert_node(db: Database, agent_id: str, node_type: str, props: dict, *,
         head = _current_node_version(cur, nid)
         if head is None:
             raise Invalid(f"node {nid} has no current version (corrupt)")
-        if cur.execute("SELECT 1 FROM graph_task WHERE node_id=?", (nid,)).fetchone():
+        task_marker = cur.execute("SELECT status_mode FROM graph_task WHERE node_id=?",
+                                  (nid,)).fetchone()
+        if task_marker:
             previous_props = json.loads(head["props"])
-            if any(props.get(k) != previous_props.get(k) for k in ("status", "room_id")):
+            protected = ("status", "room_id") if task_marker["status_mode"] == "versioned" else ("room_id",)
+            if any(props.get(k) != previous_props.get(k) for k in protected):
                 raise Invalid("marked task status and room_id can change only through task tools")
         if expected_head is not None and head["version_id"] != expected_head:
             raise Conflict(
@@ -238,9 +241,16 @@ def _task_transition(tx: Tx, node_id: str, status: str) -> None:
     head = _current_node_version(cur, node_id)
     if node is None or head is None:
         raise NotFound("task graph node does not exist")
+    marker = cur.execute("SELECT status_mode FROM graph_task WHERE node_id=?", (node_id,)).fetchone()
+    if marker is None:
+        raise NotFound("node is not marked as a task")
+    if marker["status_mode"] == "sidecar":
+        return
     props = json.loads(head["props"])
-    if "status" not in props or props["status"] == status:
-        return  # statusless schema: the task marker and attributed events own this status
+    if "status" not in props:
+        raise Invalid("versioned task is missing a graph status")
+    if props["status"] == status:
+        return
     props["status"] = status
     schema_ver = schemas.validate_props(cur, "node", node["node_type"], props)
     cur.execute("UPDATE node_version SET tx_to=? WHERE version_id=?", (tx.tx_id, head["version_id"]))

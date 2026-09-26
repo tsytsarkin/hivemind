@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS chat_message (
   body           TEXT NOT NULL,
   body_bytes     INTEGER NOT NULL,
   message_kind   TEXT NOT NULL CHECK (message_kind IN ('text', 'progress')),
+  task_node_id   TEXT REFERENCES node(node_id),
   retry_key      TEXT NOT NULL,
   created_at     REAL NOT NULL,
   UNIQUE (sender_user, sender_device, sender_client, target_key, retry_key)
@@ -50,6 +51,8 @@ CREATE INDEX IF NOT EXISTS ix_chat_message_target
 CREATE INDEX IF NOT EXISTS ix_chat_message_room
   ON chat_message(room_id, seq);
 CREATE INDEX IF NOT EXISTS ix_chat_message_expiry ON chat_message(created_at);
+CREATE INDEX IF NOT EXISTS ix_chat_message_task_progress
+  ON chat_message(task_node_id, created_at) WHERE task_node_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS chat_cursor (
   user           TEXT NOT NULL,
@@ -58,6 +61,7 @@ CREATE TABLE IF NOT EXISTS chat_cursor (
   target_key     TEXT NOT NULL,
   seq            INTEGER NOT NULL,
   updated_at     REAL NOT NULL,
+  message_id     TEXT,
   PRIMARY KEY (user, device, client, target_key)
 );
 CREATE TABLE IF NOT EXISTS chat_expiration_watermark (
@@ -378,7 +382,9 @@ CREATE TABLE IF NOT EXISTS graph_task (
   status TEXT NOT NULL DEFAULT 'unclaimed'
     CHECK(status IN ('unclaimed', 'in_progress', 'complete')),
   created_tx INTEGER NOT NULL REFERENCES tx(tx_id),
-  updated_tx INTEGER NOT NULL REFERENCES tx(tx_id)
+  updated_tx INTEGER NOT NULL REFERENCES tx(tx_id),
+  status_mode TEXT NOT NULL DEFAULT 'sidecar'
+    CHECK(status_mode IN ('sidecar', 'versioned'))
 );
 CREATE TABLE IF NOT EXISTS graph_task_activity (
   node_id TEXT NOT NULL REFERENCES graph_task(node_id),

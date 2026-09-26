@@ -116,6 +116,9 @@ class Database:
         ("trap", "author_user", "TEXT"),
         ("tool_version", "author_user", "TEXT"),
         ("guide_proposal", "author_user", "TEXT"),
+        ("graph_task", "status_mode", "TEXT NOT NULL DEFAULT 'sidecar'"),
+        ("chat_message", "task_node_id", "TEXT REFERENCES node(node_id)"),
+        ("chat_cursor", "message_id", "TEXT"),
     )
 
     # Tables from a removed feature. Dropped on startup so a database that predates the removal
@@ -142,6 +145,40 @@ class Database:
                 if cols and column not in cols:
                     con.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
             con.executescript(_SCHEMA_PATH.read_text())
+            # Before status_mode existed, marked work_item nodes already versioned their
+            # statuses. The new column defaults to sidecar so generic markers remain safe;
+            # classify the old rows once, atomically, before any claim can be used. A meta
+            # marker makes this crash-retryable if the process exits between schema DDL and
+            # migration: DDL is autocommitted but these row changes and their marker are one tx.
+            marker = "graph_task_status_mode_migrated_v1"
+            if con.execute("SELECT 1 FROM meta WHERE key=?", (marker,)).fetchone() is None:
+                from . import schemas as _schemas
+                con.execute("BEGIN IMMEDIATE")
+                try:
+                    rows = con.execute(
+                        "SELECT t.node_id,t.status,n.node_type,v.props FROM graph_task t "
+                        "JOIN node n ON n.node_id=t.node_id "
+                        "JOIN node_version v ON v.node_id=t.node_id AND v.tx_to=? "
+                        "WHERE t.status_mode='sidecar'", (SENTINEL,)).fetchall()
+                    cur = con.cursor()
+                    for row in rows:
+                        props = json.loads(row["props"])
+                        if props.get("status") != row["status"]:
+                            continue
+                        try:
+                            for status in ("unclaimed", "in_progress", "complete"):
+                                _schemas.validate_props(cur, "node", row["node_type"],
+                                                        {**props, "status": status})
+                        except Invalid:
+                            continue
+                        cur.execute("UPDATE graph_task SET status_mode='versioned' WHERE node_id=?",
+                                    (row["node_id"],))
+                    cur.close()
+                    con.execute("INSERT INTO meta(key,value) VALUES(?,?)", (marker, "1"))
+                    con.execute("COMMIT")
+                except Exception:
+                    con.execute("ROLLBACK")
+                    raise
 
     # ── reads (autocommit; WAL lets readers run concurrently with the writer) ────
     @contextmanager

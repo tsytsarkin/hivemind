@@ -51,7 +51,7 @@ async def test_offer_claim_progress_and_complete_via_authenticated_mcp(env):
         assert beat["ok"] is True
         progress = await _tool(client, nik, project.name, "chat_room_post", name="parser",
                                client="codex", session_id="sid-2", body="checking parser",
-                               kind="progress", idempotency_key="p1")
+                               kind="progress", task_node_id=nid, idempotency_key="p1")
         assert progress["ok"] is True
         fetched = await _tool(client, ana, project.name, "graph_task_get", node_id=nid,
                               client="claude", session_id="sid-2")

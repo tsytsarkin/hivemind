@@ -159,6 +159,17 @@ def test_mark_read_returns_persisted_monotonic_cursor(db):
     assert store.mark_read(RECEIVER, "dm", earlier["seq"], now=T0 + 3)["up_to_seq"] == later["seq"]
 
 
+def test_private_last_read_message_id_survives_message_expiration(db):
+    from hivemind_server.chat import ChatStore
+    store = ChatStore(db)
+    sent = store.send("dm", RECEIVER, SENDER, "review this", "review-1", now=T0)
+    out = store.mark_read(RECEIVER, "dm", sent["seq"], now=T0 + 1)
+    assert out["last_read_message_id"] == sent["id"]
+    store.cleanup(now=T0 + 86_400)
+    assert store.read_marker(RECEIVER, "dm") == {"last_read_seq": sent["seq"],
+                                                  "last_read_message_id": sent["id"]}
+
+
 def test_presence_expires_without_deleting_room_subscription(db):
     from hivemind_server.chat import ChatStore
     store = ChatStore(db)
@@ -168,6 +179,14 @@ def test_presence_expires_without_deleting_room_subscription(db):
     assert [p["session_id"] for p in store.agents(now=T0 + 86_399)] == ["session-1"]
     assert store.agents(now=T0 + 86_400) == []
     assert store.subscribed("search-bugs", RECEIVER)
+
+
+def test_last_seen_does_not_regress_when_two_sessions_touch_out_of_order(db):
+    from hivemind_server.chat import ChatStore
+    store = ChatStore(db)
+    store.touch(RECEIVER, "session-1", now=T0 + 100)
+    store.touch(RECEIVER, "session-1", now=T0)
+    assert store.agents(now=T0 + 101)[0]["last_activity_at"] == T0 + 100
 
 
 def test_housekeeping_physically_purges_expired_chat_and_stale_sessions(db):
