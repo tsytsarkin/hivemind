@@ -415,8 +415,12 @@ class ChatStore:
         who = _address(stable)
         if not isinstance(session, str) or not _SESSION.fullmatch(session):
             raise Invalid("invalid session_id")
-        if not isinstance(status, str) or not 1 <= len(status.strip()) <= 300 or any(
-                ord(c) < 32 or ord(c) == 127 for c in status):
+        # Both checks measure what will be STORED. Scanning the unstripped string rejected an
+        # otherwise valid status that merely ended in a newline — the usual shape of a generated
+        # one-liner — while the length check had already been forgiving about exactly that.
+        trimmed = status.strip() if isinstance(status, str) else ""
+        if not isinstance(status, str) or not 1 <= len(trimmed) <= 300 or any(
+                ord(c) < 32 or ord(c) == 127 for c in trimmed):
             raise Invalid("status must be a single-line description of 1–300 characters")
         if model is not None and (not isinstance(model, str) or not 1 <= len(model) <= 128
                                   or any(ord(c) < 33 or ord(c) > 126 for c in model)):

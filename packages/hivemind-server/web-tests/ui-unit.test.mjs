@@ -5,6 +5,8 @@ import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
 
 const source = readFileSync(fileURLToPath(new URL('../src/hivemind_server/ui_assets/app.js', import.meta.url)), 'utf8');
+const shell = readFileSync(fileURLToPath(new URL('../src/hivemind_server/ui_assets/index.html', import.meta.url)), 'utf8');
+const KNOWN_IDS = new Set([...shell.matchAll(/\bid="([^"]+)"/g)].map(m => m[1]));
 
 function app(fetch) {
   const ids = new Map();
@@ -21,10 +23,21 @@ function app(fetch) {
     hasAttribute() { return false; }
     querySelector() { return new Element('button'); }
   }
+  // Only ids the real shell defines resolve; everything else is null, exactly as a browser
+  // behaves. Auto-creating an element for ANY id meant `$` could never return null here, so this
+  // harness could not see the bug it exists to prevent — a CSS selector passed to
+  // getElementById, which threw out of init() and left the whole console inert. Verified by
+  // reintroducing that bug: with auto-creation all ten tests still passed.
   const document = {createElement: tag => new Element(tag),
-    getElementById: id => {if (!ids.has(id)) ids.set(id, new Element()); return ids.get(id);},
-    querySelector: () => new Element(), querySelectorAll: () => []};
+    getElementById: id => {
+      if (!KNOWN_IDS.has(id)) return null;
+      if (!ids.has(id)) ids.set(id, new Element());
+      return ids.get(id);
+    },
+    querySelector: () => new Element(), querySelectorAll: () => [],
+    addEventListener: () => {}};
   const context = vm.createContext({document, fetch, console, Date, URLSearchParams,
+    setInterval: () => 0, clearInterval: () => {},
     window: {}, crypto: {randomUUID: () => 'once'}});
   vm.runInContext(source.replace(/\binit\(\);\s*$/, ''), context);
   return {ids, context, run: code => vm.runInContext(code, context)};
@@ -187,4 +200,15 @@ test('stale agent updates are labelled as stale rather than current work', () =>
       work_status:'Auditing',work_updated_at:Date.now()/1000-31*60}]}];
     S.rooms=[]; renderAgents();`);
   assert.match(ids.get('agent-list').children[0].textContent, /Auditing.*stale/);
+});
+
+
+test('init() binds the console without throwing', () => {
+  // The harness strips the trailing `init();` so each test can drive one render in isolation —
+  // which also meant NOTHING here ever executed the binding pass. That is where the console
+  // died once: a CSS selector handed to getElementById returned null and the first
+  // addEventListener on it threw, aborting init() before any form, nav button, refresh timer or
+  // session resume was wired, with every individual render still passing. Run it once, for real.
+  const {run} = app(async () => ({projects: []}));
+  assert.doesNotThrow(() => run('init()'));
 });

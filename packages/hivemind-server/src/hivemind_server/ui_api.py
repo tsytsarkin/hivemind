@@ -136,9 +136,15 @@ async def handle(req, p, who, identities: IdentityStore):
                 limit = _page(req)
                 page = task_listing.page(db, status=req.query_params.get("status", "all"),
                     before_id=req.query_params.get("before_id"), limit=limit, with_counts=True)
-                page["tasks"] = [{**assignments.view(db, item["node_id"]),
-                                  **graph_tasks.read(db, item["node_id"]), **item}
-                                 for item in page["tasks"]]
+                # The enrichment below costs two further read transactions PER TASK on top of
+                # the get_node already inside task_listing.page. brief=1 skips it for callers
+                # that only need what the listing returns (node_id, room, state, title,
+                # summary) — the console's assignment dropdown, which it re-fetches on every
+                # 20-second tick alongside the filtered list.
+                if req.query_params.get("brief") != "1":
+                    page["tasks"] = [{**assignments.view(db, item["node_id"]),
+                                      **graph_tasks.read(db, item["node_id"]), **item}
+                                     for item in page["tasks"]]
                 return _answer(page)
             if path == ["instructions"]:
                 return _answer(instructions.list_project(db,
@@ -162,7 +168,8 @@ async def handle(req, p, who, identities: IdentityStore):
             if path == ["messages", "room"]:
                 room = data.get("room")
                 sent = ui_chat.send_human_room(db, who, room, data.get("body"),
-                                               data.get("idempotency_key"))
+                                               data.get("idempotency_key"),
+                                               project_dir=p.dir)
                 delivered = await ui_chat.notify_human_room(p.dir, db, p.meta, identities,
                                                              room, sent)
                 return _answer({**sent, "notified_live": delivered > 0,
@@ -273,7 +280,8 @@ async def handle(req, p, who, identities: IdentityStore):
             if path == ["dm"]:
                 recipient = _recipient(data.get("address"), identities, p)
                 sent = ui_chat.send_human_dm(db, who, identities, recipient,
-                    data.get("body"), data.get("idempotency_key"), project_meta=p.meta)
+                    data.get("body"), data.get("idempotency_key"), project_meta=p.meta,
+                    project_dir=p.dir)
                 live = await ui_chat.notify_human_dm(p.dir, recipient, sent)
                 return _answer({**sent, "notified_live": live}, 201)
     except Conflict as exc:

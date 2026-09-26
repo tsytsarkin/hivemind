@@ -260,6 +260,12 @@ discovers it with `graph_task_my_assignments`, calls `graph_task_claim` when rea
 then begins its configured heartbeat/expiry. Other agents cannot claim the reservation. Expiry,
 reassignment and capability loss fence stale claim tokens.
 
+`graph_task_requirements_set(node_id, required_capabilities, client, session_id, project=<p>)`
+replaces a task's required tags. It fences immediately: a holder or assignee who no longer
+matches loses the claim and the reservation, so it is not a labelling convenience. A room's
+manager may call it; otherwise only someone who takes nothing away from anyone else — the
+current claim holder, the assignee, or anybody when the task is unheld.
+
 When you are the current room manager, page `graph_task_room_status(room, client="codex",
 session_id=<sid>, limit=25, before_id=<older_cursor>, project=<p>)` to inspect all of the
 room's available, waiting, active, and completed work, with counts, assignees, leases, and

@@ -111,20 +111,31 @@ def mark_console_read(db: Database, reader: StableAddress, *, channel: str,
 
 
 def send_human_dm(db: Database, who: Identity, identities: IdentityStore,
-                  to: StableAddress, body: str, retry_key: str, *, project_meta=None) -> dict:
+                  to: StableAddress, body: str, retry_key: str, *, project_meta=None,
+                  project_dir: Path) -> dict:
     recipient = _address(to)
     if not identities.has_device(recipient[0], recipient[1]) or (project_meta is not None and
             not can_access(Identity(recipient[0], recipient[1]), project_meta)):
         raise Invalid("recipient user/device does not exist or lacks project access")
-    return ChatStore(db).send("dm", recipient, (who.user, who.device, "human"), body,
-                              retry_key, sender_origin="human_ui")
+    return ChatStore.for_project(db, project_dir).send(
+        "dm", recipient, (who.user, who.device, "human"), body, retry_key,
+        sender_origin="human_ui")
 
 
 def send_human_room(db: Database, who: Identity, room: str,
-                    body: str, retry_key: str) -> dict:
-    """The human sender comes from the verified UI session, never the posted JSON."""
-    return ChatStore(db).send("room", room, (who.user, who.device, "human"), body,
-                              retry_key, sender_origin="human_ui")
+                    body: str, retry_key: str, *, project_dir: Path) -> dict:
+    """The human sender comes from the verified UI session, never the posted JSON.
+
+    for_project, not ChatStore(db): the operator's chat_limits.json has to apply to a console
+    post exactly as it does to an agent's. Built without it, these two paths used the global
+    defaults while still incrementing the SHARED chat_usage counter, so a console could push the
+    project past a configured ceiling and every agent post — which does read the limits — then
+    failed with "project chat quota exceeded". for_project also fails closed on a corrupt limits
+    file, which this path silently ignored.
+    """
+    return ChatStore.for_project(db, project_dir).send(
+        "room", room, (who.user, who.device, "human"), body, retry_key,
+        sender_origin="human_ui")
 
 
 async def notify_human_room(project_dir: Path, db: Database, project_meta,

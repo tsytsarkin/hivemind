@@ -272,6 +272,12 @@ There is **no** heartbeat or expiry before that claim; the claimed lease has the
 5-minute/1-hour defaults and a 24-hour maximum expiry. Only the assignee can claim reserved work;
 expiry, reassignment, and losing a required capability fence stale tokens.
 
+`graph_task_requirements_set(node_id, required_capabilities, client, session_id, project=<p>)`
+replaces a task's required tags. It fences immediately: a holder or assignee who no longer
+matches loses the claim and the reservation, so it is not a labelling convenience. A room's
+manager may call it; otherwise only someone who takes nothing away from anyone else — the
+current claim holder, the assignee, or anybody when the task is unheld.
+
 While you are the current room manager, page `graph_task_room_status(room, client="claude",
 session_id=<sid>, limit=25, before_id=<older_cursor>, project=<p>)` across the entire room on
 startup, on relevant task/room messages, and during active turns. Its counts and per-task

@@ -5,7 +5,7 @@ const $ = id => document.getElementById(id);
 // a native form submit. test_ui_assets.py only greps this file for substrings and the Playwright
 // spec needs npm and a live server, so nothing in the pytest suite noticed.
 const q = selector => document.querySelector(selector);
-const S = {csrf:null,project:null,epoch:0,conversationEpoch:0,view:"overview",rooms:[],roomOlder:null,agents:[],caps:[],catalog:[],catalogOlder:null,roomAgentTags:null,roomAgentKey:null,roomAgentUpdatedAt:null,roomConfigUpdatedAt:null,roomConfigParallel:20,roomConfigAuto:true,roomConfigDraft:null,roomChoiceDraft:null,tasks:[],taskCounts:null,assignmentTasks:[],assignmentOlder:null,expandedTasks:new Set(),expandedMessages:new Set(),candidates:[],candidateTask:null,candidateOlder:null,candidateRequest:0,candidateMemberCount:0,instructions:[],olderCursor:null,taskOlder:null,instructionOlder:null,agentOlder:null,latestDisplayedSeq:null,hasHiddenUnseen:false};
+const S = {csrf:null,project:null,epoch:0,conversationEpoch:0,view:"overview",rooms:[],roomOlder:null,agents:[],caps:[],catalog:[],catalogOlder:null,catalogPaged:false,roomAgentTags:null,roomAgentKey:null,roomAgentUpdatedAt:null,roomConfigUpdatedAt:null,roomConfigParallel:20,roomConfigAuto:true,roomConfigDraft:null,roomChoiceDraft:null,tasks:[],taskCounts:null,assignmentTasks:[],assignmentOlder:null,expandedTasks:new Set(),expandedMessages:new Set(),candidates:[],candidateTask:null,candidateOlder:null,candidateRequest:0,candidateMemberCount:0,instructions:[],olderCursor:null,taskOlder:null,instructionOlder:null,agentOlder:null,latestDisplayedSeq:null,hasHiddenUnseen:false};
 const headings = {
   overview:["Overview","YOUR WORKSPACE, AT A GLANCE","The conversations and work moving through your project."],
   rooms:["Rooms","CONVERSATIONS BY TOPIC","Create focused spaces and put together the right team."],
@@ -74,7 +74,7 @@ async function api(path,opts={}) {
 const url=tail=>"/api/projects/"+encodeURIComponent(S.project)+"/"+tail;
 function resetProjectState(){
   S.rooms=[];S.roomOlder=null;S.agents=[];S.agentOlder=null;S.caps=[];
-  S.catalog=[];S.catalogOlder=null;S.roomAgentTags=null;S.roomAgentKey=null;
+  S.catalog=[];S.catalogOlder=null;S.catalogPaged=false;S.roomAgentTags=null;S.roomAgentKey=null;
   S.roomAgentUpdatedAt=null;S.roomConfigUpdatedAt=null;S.roomConfigDraft=null;
   S.roomConfigParallel=20;S.roomConfigAuto=true;S.roomChoiceDraft=null;
   S.tasks=[];S.taskCounts=null;S.assignmentTasks=[];S.assignmentOlder=null;
@@ -495,7 +495,12 @@ async function refresh(){
     const [r,a,t,i,summary,unfiltered,catalog]=await Promise.all([
       ...["rooms","agents","tasks?status="+encodeURIComponent(status),"instructions","summary"]
         .map(x=>api(url(x))),
-      status==="all"?Promise.resolve(null):api(url("tasks")),api(url("capabilities"))]);
+      // brief=1: this second request exists only to keep the assignment dropdown showing every
+      // task while the list itself is filtered, and the dropdown reads node_id/title/state —
+      // all of which the listing already returns. Without it the server re-ran assignments.view
+      // and graph_tasks.read per task, so a filtered view cost ~4 read transactions per task
+      // twice over, every 20-second tick.
+      status==="all"?Promise.resolve(null):api(url("tasks?brief=1")),api(url("capabilities"))]);
     if(epoch!==S.epoch||status!==$("task-status-filter").value)return;
     // Drop loaded pages at refresh: old cursors can skip inserted members and retain removed ones.
     S.rooms=r.rooms;S.roomOlder=r.older_cursor;
@@ -503,11 +508,19 @@ async function refresh(){
     const existing=new Map(S.catalog.map(cap=>[cap.name,cap]));
     for(const cap of catalog.capabilities)existing.set(cap.name,cap);
     S.catalog=[...existing.values()].sort((left,right)=>left.name.localeCompare(right.name));
-    S.catalogOlder=catalog.next_cursor;
+    // The catalog MERGES pages rather than discarding them like rooms and tasks do, so its
+    // cursor must not rewind to the end of page one on every tick: that made each 20s refresh
+    // cost the user a dead click, because the re-fetched page was already in `existing` and the
+    // seen-filter dropped all of it. Once the user has paged, the cursor is theirs to advance —
+    // including to null, which means they reached the end and must not be sent back to page two.
+    if(!S.catalogPaged)S.catalogOlder=catalog.next_cursor;
     const selectedTask=$("task-select").value;
     const pinnedTask=S.assignmentTasks.find(task=>task.node_id===selectedTask);
     S.tasks=t.tasks;
-    S.assignmentTasks=(unfiltered||t).tasks;
+    // Copy, never alias: with no status filter `unfiltered` is null and both fields pointed at
+    // the SAME array, so pushing the pinned task below — or "Load more assignable tasks", which
+    // pushes a whole page — silently appended into the rendered Tasks list the user is reading.
+    S.assignmentTasks=[...(unfiltered||t).tasks];
     S.assignmentOlder=(unfiltered||t).older_cursor;
     if(pinnedTask&&!S.assignmentTasks.some(task=>task.node_id===selectedTask))
       S.assignmentTasks.push(pinnedTask);
@@ -633,7 +646,8 @@ function init(){
       if(epoch!==S.epoch||cursor!==S.catalogOlder)return;
       const seen=new Set(S.catalog.map(cap=>cap.name));
       S.catalog.push(...page.capabilities.filter(cap=>!seen.has(cap.name)));
-      S.catalogOlder=page.next_cursor;renderCatalog();renderRoomCapabilityEditor();
+      S.catalogOlder=page.next_cursor;S.catalogPaged=true;
+      renderCatalog();renderRoomCapabilityEditor();
     }catch(e){notice(e.message,true);}
   });
   $("task-select").addEventListener("change",()=>loadCandidates());
