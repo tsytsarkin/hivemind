@@ -165,6 +165,64 @@ def test_only_unread_messages_are_announced_and_the_offset_advances(mod, tmp_pat
     assert state["seen_message"] == "m5"
 
 
+def test_durable_chat_notification_points_to_server_catchup_not_legacy_bus(mod, tmp_path):
+    inbox = tmp_path / "inbox-p.jsonl"
+    state_path = tmp_path / "listener.json"
+    inbox.write_text(json.dumps({"v": 2, "type": "chat", "id": "m1", "channel": "dm"}) + "\n")
+    note = mod._notice(inbox, state_path, {})
+    assert "chat_inbox" in note and "chat_room_history" in note
+    assert "bus_send" not in note and "bus_message" not in note
+
+
+def test_autojoin_chooses_canonical_chat_and_reminds_server_catchup(mod, tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    session = "abcd-efgh"
+    pin = tmp_path / ".hivemind" / ("session-%s.json" % session)
+    pin.parent.mkdir()
+    pin.write_text(json.dumps({"project": "demo"}))
+    monkeypatch.setattr(mod, "_endpoint", lambda platform: "http://127.0.0.1:8787/mcp")
+    monkeypatch.setattr(mod, "_token", lambda platform, endpoint: "token")
+    seen = []
+
+    def fake_rpc(endpoint, token, name, args):
+        seen.append((name, args))
+        return {"ws_url": "ws://127.0.0.1:8787/p/demo/chat/ws", "listen_key": "hk2.test"}
+
+    class Child:
+        pid = 12345
+
+    monkeypatch.setattr(mod, "_rpc", fake_rpc)
+    monkeypatch.setattr(mod.subprocess, "Popen", lambda *a, **k: Child())
+    note = mod.run({"session_id": session}, "codex", "ensure")
+    assert seen[0] == ("chat_connect", {"project": "demo", "client": "codex",
+                                           "session_id": session})
+    assert "chat_inbox" in note and "24-hour" in note
+
+
+def test_canonical_session_slug_cannot_collapse_distinct_long_host_ids(mod):
+    left = "session-" + "a" * 80 + "left"
+    right = "session-" + "a" * 80 + "right"
+    one, two = mod._chat_session(left), mod._chat_session(right)
+    assert one != two
+    assert all(1 <= len(value) <= 64 and value.isascii() and value.lower() == value
+               for value in (one, two))
+
+
+def test_long_host_session_ids_have_distinct_pin_and_listener_paths(mod, tmp_path, monkeypatch):
+    helper = CLAUDE / "hivemind-project.py"
+    monkeypatch.setenv("HOME", str(tmp_path))
+    first = "s" * 110 + "left"
+    second = "s" * 110 + "right"
+    one_pin, one_dir = mod._paths(first, "claude")
+    two_pin, two_dir = mod._paths(second, "claude")
+    assert one_pin != two_pin and one_dir != two_dir
+    for sid, expected in ((first, one_pin), (second, two_pin)):
+        monkeypatch.setenv("HIVEMIND_SESSION_ID", sid)
+        call = subprocess.run([sys.executable, str(helper), "--pin", "demo"],
+                              capture_output=True, text=True, check=True)
+        assert call.returncode == 0 and expected.is_file()
+
+
 def test_the_count_survives_a_rotation_without_re_announcing_it(mod, tmp_path):
     """The offset addresses one file. A rotation replaces the inbox with a shorter one, so the
     offset stops meaning anything and the id scan has to take over — otherwise every message in
@@ -260,3 +318,73 @@ def test_the_launcher_explains_a_missing_codex_instead_of_a_traceback(tmp_path):
     assert r.returncode == 1, (r.returncode, r.stdout, r.stderr)
     assert "Traceback" not in r.stderr, r.stderr
     assert "codex" in r.stderr.lower() and "path" in r.stderr.lower(), r.stderr
+
+
+# ── a server that predates durable chat must still get a listener ─────────────────────────────
+def _legacy_rpc(calls):
+    """An `Unknown tool` answer, byte for byte as a live 1.1.0 server gave it."""
+    def rpc(endpoint, token, name, arguments):
+        calls.append(name)
+        if name == "chat_connect":
+            # {"isError": true, "content": [{"text": "Unknown tool: chat_connect"}]} — _rpc reaches
+            # json.loads on that text, so the caller sees ValueError, not a reply without a key.
+            raise ValueError("Expecting value: line 1 column 1 (char 0)")
+        return {"ws_url": "ws://127.0.0.1:8787/p/demo/bus/ws", "listen_key": "hk1.x",
+                "project": "demo"}
+    return rpc
+
+
+def test_a_server_without_chat_connect_still_joins_the_legacy_bus(mod, tmp_path, monkeypatch):
+    """The fallback only ran when chat_connect RETURNED a reply lacking a listen_key. A server that
+    does not have the tool does not do that — so the exception escaped, bus_connect was never
+    called, and the session got no listener at all. Measured against a live 1.1.0 server, whose
+    only symptom was "cannot reach the MCP bus or start its listener"."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("HIVEMIND_SERVER_URL", "http://127.0.0.1:8787")
+    monkeypatch.setenv("HIVEMIND_TOKEN", "t")
+    calls = []
+    monkeypatch.setattr(mod, "_rpc", _legacy_rpc(calls))
+    spawned = []
+    monkeypatch.setattr(mod.subprocess, "Popen",
+                        lambda *a, **k: spawned.append(a) or type("P", (), {"pid": 4242})())
+    _pin_and_state(tmp_path, "sess-legacy", "demo", {})
+    result = mod.run({"session_id": "sess-legacy"}, "claude", "ensure")
+    assert calls == ["chat_connect", "bus_connect"], calls
+    assert "joined" in result and "not joined" not in result, result
+    assert spawned, "a listener must actually be started"
+
+
+def test_a_failed_join_names_the_step_and_the_error(mod, tmp_path, monkeypatch):
+    """One sentence for three operations and five exception types is what turned a missing tool
+    into an apparent routing fault. The token must not appear: this goes into an agent's context."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("HIVEMIND_SERVER_URL", "http://127.0.0.1:8787")
+    monkeypatch.setenv("HIVEMIND_TOKEN", "super-secret-token")
+
+    def boom(endpoint, token, name, arguments):
+        raise OSError("connection refused")
+    monkeypatch.setattr(mod, "_rpc", boom)
+    _pin_and_state(tmp_path, "sess-boom", "demo", {})
+    result = mod.run({"session_id": "sess-boom"}, "claude", "ensure")
+    assert "bus_connect" in result and "OSError" in result and "connection refused" in result
+    assert "super-secret-token" not in result
+
+
+def test_a_session_id_starting_with_an_underscore_still_yields_a_valid_slug(mod):
+    """The server requires ^[a-z0-9] for the first character. The slug stripped `-` but not `_`,
+    so such an id was rejected by chat_connect, _rpc turned ok:false into {}, and the session fell
+    back to the EPHEMERAL bus with no durable mailbox — a silent loss of offline messages."""
+    import re
+    server_rule = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+    for host in ("_thread-1", "__weird__", "-leading-dash", "_", "-", "Ünicode-Ω", "ok-already"):
+        slug = mod._chat_session(host)
+        assert server_rule.fullmatch(slug), (host, slug)
+
+
+def test_the_client_package_version_matches_its_metadata():
+    import tomllib
+    root = ROOT / "packages" / "hivemind-client"
+    declared = tomllib.loads((root / "pyproject.toml").read_text())["project"]["version"]
+    source = (root / "src" / "hivemind" / "__init__.py").read_text()
+    assert f'__version__ = "{declared}"' in source, \
+        f"pyproject says {declared} but __version__ disagrees; the installed package reports both"

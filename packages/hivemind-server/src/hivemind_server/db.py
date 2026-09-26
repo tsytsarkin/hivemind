@@ -116,6 +116,16 @@ class Database:
         ("trap", "author_user", "TEXT"),
         ("tool_version", "author_user", "TEXT"),
         ("guide_proposal", "author_user", "TEXT"),
+        ("graph_task", "status_mode", "TEXT NOT NULL DEFAULT 'sidecar'"),
+        ("graph_task", "required_capabilities_json", "TEXT NOT NULL DEFAULT '[]'"),
+        ("chat_message", "task_node_id", "TEXT REFERENCES node(node_id)"),
+        ("chat_message", "sender_origin", "TEXT NOT NULL DEFAULT 'agent'"),
+        ("chat_message", "summary", "TEXT"),
+        ("agent_capability", "human_managed", "INTEGER NOT NULL DEFAULT 0"),
+        ("chat_cursor", "message_id", "TEXT"),
+        ("chat_session", "model_name", "TEXT"),
+        ("chat_session", "work_status", "TEXT"),
+        ("chat_session", "work_updated_at", "REAL"),
     )
 
     # Tables from a removed feature. Dropped on startup so a database that predates the removal
@@ -142,6 +152,69 @@ class Database:
                 if cols and column not in cols:
                     con.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
             con.executescript(_SCHEMA_PATH.read_text())
+            # Existing project-local advertisements and task requirements predate the catalog.
+            # Preserve them as editable definitions with an empty legacy description; no claim
+            # or required tag changes during this compatibility migration.
+            con.execute("INSERT OR IGNORE INTO project_capability(name,description,created_at,updated_at) "
+                        "SELECT DISTINCT value,'',0,0 FROM agent_capability, "
+                        "json_each(agent_capability.tags_json)")
+            con.execute("INSERT OR IGNORE INTO project_capability(name,description,created_at,updated_at) "
+                        "SELECT DISTINCT value,'',0,0 FROM graph_task, "
+                        "json_each(graph_task.required_capabilities_json)")
+            # Add a first arrival record for projects that persisted instructions before the
+            # delivery cursor existed. Handoffs append later arrivals, never reorder IDs.
+            con.execute("INSERT INTO agent_instruction_delivery(instruction_id,recipient_user,"
+                        "recipient_device,recipient_client,created_at,tx_id) "
+                        "SELECT i.id,i.recipient_user,i.recipient_device,i.recipient_client,"
+                        "i.created_at,i.created_tx FROM agent_instruction i WHERE NOT EXISTS "
+                        "(SELECT 1 FROM agent_instruction_delivery d WHERE d.instruction_id=i.id) "
+                        "ORDER BY i.created_at,i.id")
+            # Before status_mode existed, marked work_item nodes already versioned their
+            # statuses. The new column defaults to sidecar so generic markers remain safe;
+            # classify the old rows once, atomically, before any claim can be used. A meta
+            # marker makes this crash-retryable if the process exits between schema DDL and
+            # migration: DDL is autocommitted but these row changes and their marker are one tx.
+            marker = "graph_task_status_mode_migrated_v1"
+            if con.execute("SELECT 1 FROM meta WHERE key=?", (marker,)).fetchone() is None:
+                from . import schemas as _schemas
+                con.execute("BEGIN IMMEDIATE")
+                try:
+                    # Re-checked INSIDE the transaction; the test above is only a fast path. Two
+                    # processes opening the same project DB (a restart overlapping the outgoing
+                    # server, or a second Database() elsewhere) both saw no marker. The loser of
+                    # BEGIN IMMEDIATE then repeated the scan and its INSERT hit the primary key,
+                    # and because apply_schema runs from Database.__init__ that exception aborted
+                    # STARTUP rather than one query. ON CONFLICT covers the same race between the
+                    # re-check and the insert.
+                    if con.execute("SELECT 1 FROM meta WHERE key=?",
+                                   (marker,)).fetchone() is not None:
+                        con.execute("COMMIT")
+                        return
+                    rows = con.execute(
+                        "SELECT t.node_id,t.status,n.node_type,v.props FROM graph_task t "
+                        "JOIN node n ON n.node_id=t.node_id "
+                        "JOIN node_version v ON v.node_id=t.node_id AND v.tx_to=? "
+                        "WHERE t.status_mode='sidecar'", (SENTINEL,)).fetchall()
+                    cur = con.cursor()
+                    for row in rows:
+                        props = json.loads(row["props"])
+                        if props.get("status") != row["status"]:
+                            continue
+                        try:
+                            for status in ("unclaimed", "in_progress", "complete"):
+                                _schemas.validate_props(cur, "node", row["node_type"],
+                                                        {**props, "status": status})
+                        except Invalid:
+                            continue
+                        cur.execute("UPDATE graph_task SET status_mode='versioned' WHERE node_id=?",
+                                    (row["node_id"],))
+                    cur.close()
+                    con.execute("INSERT INTO meta(key,value) VALUES(?,?) "
+                                "ON CONFLICT(key) DO NOTHING", (marker, "1"))
+                    con.execute("COMMIT")
+                except Exception:
+                    con.execute("ROLLBACK")
+                    raise
 
     # ── reads (autocommit; WAL lets readers run concurrently with the writer) ────
     @contextmanager

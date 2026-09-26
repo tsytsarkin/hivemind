@@ -368,7 +368,7 @@ def test_two_sessions_chat_over_localhost_without_client_install(tmp_path):
                 process.wait(timeout=3)
 
 
-def test_autojoin_codex_and_claude_fallback_on_localhost(tmp_path):
+def test_autojoin_codex_and_claude_canonical_chat_on_localhost(tmp_path):
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]
@@ -441,42 +441,49 @@ def test_autojoin_codex_and_claude_fallback_on_localhost(tmp_path):
         assert "joined" in hook("codex", manual, script=manual_script)
         assert "joined" not in hook("codex", codex)  # idempotent: no second listener
         for _ in range(60):
-            online = {p["peer"] for p in _mcp_call(base, token, "bus_peers", {
-                "project": "default"})["peers"] if p["online"]}
-            if {"codex-codex-thread-1", "claude-claude-thread-2",
-                    "codex-codex-thread-3"} <= online:
+            online = {(p["address"][2], p["session_id"]) for p in _mcp_call(
+                base, token, "chat_agents", {"project": "default", "client": "codex",
+                                             "session_id": "test-inspect"})["agents"] if p["online"]}
+            if {("codex", "codex-thread-1"), ("claude", "claude-thread-2"),
+                    ("codex", "codex-thread-3")} <= online:
                 break
             time.sleep(0.05)
         else:
             raise AssertionError("autojoin listeners did not become online")
-        assert _mcp_call(base, token, "bus_send", {"project": "default", "to":
-            "codex-codex-thread-1", "body": "from claude"})["delivered"]
-        assert _mcp_call(base, token, "bus_send", {"project": "default", "to":
-            "claude-claude-thread-2", "body": "from codex"})["delivered"]
-        assert _mcp_call(base, token, "bus_send", {"project": "default", "to":
-            "codex-codex-thread-3", "body": "from claude to manual"})["delivered"]
+        for recipient, body in (("codex", "from claude"), ("claude", "from codex")):
+            sent = _mcp_call(base, token, "chat_send", {
+                "project": "default", "client": "codex", "session_id": "sender-1",
+                "to_user": "alice", "to_device": "auto-test", "to_client": recipient,
+                "body": body, "idempotency_key": "send-" + recipient})
+            assert sent["notified_live"] is True
         for platform, event, script in (("codex", codex, None), ("claude", claude, None),
                                         ("codex", manual, manual_script)):
             for _ in range(60):
                 hint = hook(platform, event, "check", script=script)
-                if "new message(s)" in hint:
+                if "new notification(s)" in hint:
                     break
                 time.sleep(0.05)
             else:
                 raise AssertionError("no saved message for " + platform)
             assert "from codex" not in hint and "from claude" not in hint
-            assert "MCP bus_send" in hint  # the prompt hook tells either agent to reply
+            assert "chat_inbox" in hint  # the prompt hook tells agents to fetch server history
             assert hook(platform, event, "check", script=script) == ""  # no repeated notices
+        assert [m["body"] for m in _mcp_call(base, token, "chat_inbox", {
+            "project": "default", "client": "codex", "session_id": "codex-thread-1"
+        })["messages"]] == ["from claude"]
         created = _mcp_call(base, token, "project_create", {"name": "alice.private",
                              "visibility": "private", "schema": "bare"})
         assert created.get("ok") is not False
         _pin(tmp_path, codex["session_id"], "--pin", "alice.private")
         assert "project=alice.private" in hook("codex", codex)
-        assert "new message(s)" not in hook("codex", codex, "check")
+        # Canonical hello is itself a reconnect reminder, even when no message has arrived.
+        assert "chat_inbox" in hook("codex", codex, "check")
+        assert hook("codex", codex, "check") == ""
         for _ in range(60):
-            other = _mcp_call(base, token, "bus_peers", {"project": "alice.private"})
-            if any(peer["peer"] == "codex-codex-thread-1" and peer["online"]
-                   for peer in other["peers"]):
+            other = _mcp_call(base, token, "chat_agents", {
+                "project": "alice.private", "client": "codex", "session_id": "test-inspect"})
+            if any(peer["session_id"] == "codex-thread-1" and peer["online"]
+                   for peer in other["agents"]):
                 break
             time.sleep(0.05)
         else:

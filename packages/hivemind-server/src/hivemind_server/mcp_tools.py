@@ -32,11 +32,15 @@ INSTRUCTIONS = (
     "approach the moment you abandon it. Search is hybrid lexical+semantic. "
     "Every tool takes a `project` argument saying which graph to act in; a tool that WRITES "
     "refuses to guess it, so pass it explicitly unless your endpoint URL already names a project. "
-    "Separately from the graph there is an AGENT BUS for live peer-to-peer coordination: call "
-    "bus_connect ONCE at session start and run the Monitor snippet it returns — messages from "
-    "other agents then arrive as notifications with no polling. bus_send / bus_broadcast reach "
-    "peers, bus_peers lists who is connected. Bus traffic is ephemeral; anything worth keeping "
-    "still goes in the graph."
+    "For agent collaboration, chat_connect binds your token user/device plus client/session_id "
+    "to a canonical address. Run its listener for live notifications and always fetch "
+    "chat_inbox / chat_room_history on connect or reconnect: the server retains DMs and explicit "
+    "topic rooms for 24 hours even if agents are offline. chat_room_create explicitly creates "
+    "rooms; chat_send delivers to an offline registered user/device/client. Optional graph_task_* "
+    "tools mark persistent graph work, with renewable fenced claim heartbeats that do not revise "
+    "the graph node. Post real progress to active rooms about every 15 minutes. The older bus_* "
+    "tools are ephemeral compatibility only, not a durable mailbox. Lasting knowledge and "
+    "completed tasks still belong in the graph."
 )
 
 
@@ -52,7 +56,7 @@ def build_mcp(registry, identities, *, instructions: str = INSTRUCTIONS) -> MCPS
     # alternative was editing every one of them to take it as an argument. A body that needs the
     # project itself rather than its database adds `project = CurrentProject()` the same way.
     db = CurrentDb()
-    real = MCPServer(name="hivemind", instructions=instructions, version="1.3.0")
+    real = MCPServer(name="hivemind", instructions=instructions, version="1.5.1")
     # Registration goes through the proxy so a tool cannot be added without project resolution.
     mcp = ProjectAware(real)
 
@@ -362,4 +366,14 @@ def build_mcp(registry, identities, *, instructions: str = INSTRUCTIONS) -> MCPS
     from . import bus_ws_tools    # agent bus: WebSocket push, deliberately outside the graph
     from .config import config as _config
     bus_ws_tools.attach(mcp, _config())
+    from . import chat_tools      # durable DMs, public project rooms and canonical sessions
+    chat_tools.attach(mcp, _config(), identities)
+    from . import graph_task_tools  # graph-backed optional work, fenced lease sidecars
+    graph_task_tools.attach(mcp, identities)
+    from . import capability_tools  # project-local self-advertised agent capabilities
+    capability_tools.attach(mcp)
+    from . import team_tools  # project rooms, membership and manager handoffs
+    team_tools.attach(mcp, identities)
+    from . import instruction_tools  # persistent project-local human instructions
+    instruction_tools.attach(mcp)
     return real                   # mount the real server; the proxy only wraps registration

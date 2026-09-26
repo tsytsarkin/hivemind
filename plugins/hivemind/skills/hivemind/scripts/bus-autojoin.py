@@ -7,6 +7,7 @@ hook context contains only a count/path, not message bodies.
 """
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -57,8 +58,23 @@ def _session(event):
     return ""
 
 
+def _chat_session(host_session):
+    """Bound long host IDs without ever conflating two IDs at the 64-byte boundary."""
+    if re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", host_session):
+        return host_session
+    # Strip `_` as well as `-`: the server requires ^[a-z0-9] for the FIRST character, so a host id
+    # beginning with an underscore produced a slug it rejected. chat_connect then answered ok:false,
+    # _rpc turned that into {}, and the session degraded silently to the ephemeral bus with no
+    # durable mailbox — the one failure here that costs offline messages rather than announcing it.
+    prefix = re.sub(r"[^a-z0-9_-]", "-", host_session.lower()).strip("-_")[:47] or "sid"
+    suffix = hashlib.sha256(host_session.encode()).hexdigest()[:16]
+    return prefix + "-" + suffix
+
+
 def _paths(session, platform):
-    slug = SLUG.sub("-", session)[:100]
+    cleaned = SLUG.sub("-", session)
+    slug = (cleaned if cleaned == session and len(cleaned) <= 100 else
+            cleaned[:83] + "-" + hashlib.sha256(session.encode()).hexdigest()[:16])
     base = Path.home() / ".hivemind"
     return base / ("session-%s.json" % slug), base / ("%s-bus" % platform) / slug
 
@@ -131,7 +147,7 @@ def _rpc(url, token, name, arguments):
     params = {"name": name, "arguments": arguments,
               "_meta": {"io.modelcontextprotocol/protocolVersion": PROTO,
                         "io.modelcontextprotocol/clientInfo": {"name": "hivemind-bus-autojoin",
-                                                             "version": "1.3.0"},
+                                                             "version": "1.4.0"},
                         "io.modelcontextprotocol/clientCapabilities": {}}}
     body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
                        "params": params}).encode()
@@ -227,10 +243,16 @@ def _frames(path, start=0):
                     frame = json.loads(line)
                 except ValueError:
                     continue
-                if isinstance(frame, dict) and frame.get("type") in ("message", "broadcast"):
-                    mid = frame.get("id")
-                    if isinstance(mid, (str, int)) and mid:
-                        ids.append(str(mid))
+                if isinstance(frame, dict):
+                    kind = frame.get("type")
+                    mid = frame.get("ts") if kind == "hello" and frame.get("v") == 2 else frame.get("id")
+                    if isinstance(mid, (str, int, float)) and mid:
+                        if kind in ("message", "broadcast"):
+                            ids.append(str(mid))
+                        elif kind == "chat":
+                            ids.append("chat:" + str(mid))
+                        elif kind == "hello" and frame.get("v") == 2:
+                            ids.append("resume:" + str(mid))
     except OSError:
         return [], start
     return ids, offset
@@ -277,6 +299,8 @@ def _notice(inbox, state_path, state):
         pending, last = len(ids) - index, ids[-1]
     if not pending:
         return ""
+    durable = any(str(value).startswith(("chat:", "resume:"))
+                  for value in (fresh if resumable else ids[index:]))
     if last:
         state["seen_message"] = last
     state["seen_inbox"] = inbox.name
@@ -285,9 +309,15 @@ def _notice(inbox, state_path, state):
         _save(state_path, state)
     except OSError:
         pass
-    return ("Hivemind bus: %d new message(s) from peer agents saved at %s. Read every full "
-            "message now, work on its request, and reply to its sender via the MCP bus_send "
-            "tool. Ask the user before deleting files or other destructive actions."
+    if durable:
+        return ("Hivemind durable chat: %d new notification(s) or reconnect at %s. Call "
+                "MCP chat_inbox and chat_room_history for relevant rooms now; fetch complete "
+                "messages, then chat_mark_read / chat_room_mark_read only after processing. "
+                "Server history, not this local file, is authoritative for 24 hours."
+                % (pending, inbox))
+    return ("Hivemind legacy bus: %d new message(s) from peer agents saved at %s. Read every "
+            "full message now, work on its request, and reply via MCP bus_send. "
+            "This legacy inbox is ephemeral."
             % (pending, inbox))
 
 
@@ -355,18 +385,42 @@ def run(event, platform="codex", mode="ensure"):
         state = {"project": project, "endpoint": endpoint, "attempted_at": time.time(), **cursor}
         _save(state_path, state)
         label = "%s-%s" % (platform, SLUG.sub("-", session)[:48])
+        chat_session = _chat_session(session)
+        step = "chat_connect"
         try:
-            reply = _rpc(endpoint, token, "bus_connect", {"project": project, "label": label})
+            reply = {}
+            if chat_session:
+                try:
+                    reply = _rpc(endpoint, token, "chat_connect",
+                                 {"project": project, "client": platform,
+                                  "session_id": chat_session})
+                except (HTTPError, URLError, OSError, ValueError, KeyError, TypeError):
+                    # A server without this tool is the WHOLE REASON the fallback below exists, and
+                    # it does not answer by returning a reply that lacks a listen_key: it answers
+                    # `{"isError": true, "content": [{"text": "Unknown tool: chat_connect"}]}`, so
+                    # _rpc's json.loads of that text raises ValueError (a JSON-RPC error object
+                    # raises KeyError, and an older proxy may answer by status). Letting any of
+                    # those reach the outer handler skipped bus_connect entirely and left the
+                    # session with NO listener — measured against a live 1.1.0 server, which
+                    # reported only "cannot reach the MCP bus or start its listener".
+                    reply = {}
+            durable = bool(reply.get("listen_key"))
+            if not durable:
+                step = "bus_connect"
+                # Older deployments or legacy project-only tokens keep their original, explicitly
+                # ephemeral bus. Never describe this fallback as offline message delivery.
+                reply = _rpc(endpoint, token, "bus_connect", {"project": project, "label": label})
             ws = reply.get("ws_url", "")
             key = reply.get("listen_key", "")
             url = urlsplit(ws)
             dest = urlsplit(endpoint)
             if (not isinstance(key, str) or not key or url.scheme not in ("ws", "wss")
                     or url.hostname != dest.hostname or _port(url) != _port(dest)
-                    or url.path != "/p/%s/bus/ws" % project
+                    or url.path != "/p/%s/%s/ws" % (project, "chat" if durable else "bus")
                     or reply.get("project", project) != project):
                 return ("Hivemind bus not joined for project=%s: bus_connect returned no usable "
                         "WebSocket/listen key. %s" % (project, notice())).strip()
+            step = "start the listener"
             marker = secrets.token_hex(12)
             child_env = {"HOME": str(Path.home()), "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
                          "HIVEMIND_LISTEN_KEY": key}
@@ -375,17 +429,31 @@ def run(event, platform="codex", mode="ensure"):
                                      "--instance-id", marker], env=child_env, stdin=subprocess.DEVNULL,
                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                     close_fds=True, start_new_session=True)
-            state.update({"pid": proc.pid, "marker": marker, "peer": label})
+            state.update({"pid": proc.pid, "marker": marker,
+                          "peer": reply.get("peer", label) if durable else label,
+                          "protocol": "chat" if durable else "legacy-bus"})
             _save(state_path, state)
-            return ("Hivemind bus joined as %s for project=%s. Messages are saved in %s. "
-                    "Codex/Claude without Monitor does not wake an idle chat; read new inbox "
-                    "messages and reply via MCP at the next prompt." % (label, project, inbox))
+            if durable:
+                return ("Hivemind durable chat joined as %s for project=%s. Call chat_inbox and "
+                        "chat_room_history for subscribed rooms NOW to catch up on 24-hour "
+                        "server history; local notifications at %s do not wake an idle chat."
+                        % (reply.get("peer", label), project, inbox))
+            return ("Hivemind legacy ephemeral bus joined as %s for project=%s. Offline "
+                    "messages are NOT preserved; local inbox at %s is not server history."
+                    % (label, project, inbox))
         except HTTPError as error:
-            return ("Hivemind bus not joined for project=%s: MCP answered HTTP %d. Check your "
-                    "server/token and project access. %s" % (project, error.code, notice())).strip()
-        except (URLError, OSError, ValueError, KeyError, TypeError):
-            return ("Hivemind bus not joined for project=%s: cannot reach the MCP bus or start "
-                    "its listener. %s" % (project, notice())).strip()
+            return ("Hivemind bus not joined for project=%s: %s answered HTTP %d. Check your "
+                    "server/token and project access. %s"
+                    % (project, step, error.code, notice())).strip()
+        except (URLError, OSError, ValueError, KeyError, TypeError) as error:
+            # Name the STEP and the exception. One sentence covering three operations and five
+            # exception types is why a `chat_connect` that a 1.1.0 server had simply never heard of
+            # read as an unreachable bus, and sent the next reader hunting for a routing fault.
+            # Type and message only — no traceback and no argument values: this string is injected
+            # into an agent's context, and the token lives in the frame that would be dumped.
+            return ("Hivemind bus not joined for project=%s: could not %s (%s: %s). %s"
+                    % (project, step, type(error).__name__,
+                       str(error)[:120], notice())).strip()
 
 
 def main():

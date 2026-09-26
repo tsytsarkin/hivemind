@@ -71,6 +71,17 @@ port_pids() {   # -> PIDs holding the port. BSD fuser cannot answer this at all,
     fi
 }
 
+# -> every server PID, whether or not it still holds the port. A wedged shutdown holds none, which
+# is the whole reason this exists; see the escalation below. `$$` and `$PPID` are excluded because
+# `-f` matches a full command line and a caller's own — an ssh running a one-liner that mentions
+# hivemind-server, for instance — must not be killed by its own pattern.
+server_pids() {
+    { pgrep -f "uv run --package hivemind-server" 2>/dev/null
+      pgrep -f "hivemind-server"                  2>/dev/null
+      port_pids
+    } | sort -u | grep -v -x -e "$$" -e "${PPID:-0}"
+}
+
 # ── stop whatever is running ────────────────────────────────────────────────────────────────────
 pkill -f "uv run --package hivemind-server" 2>/dev/null || true
 pkill -f hivemind-server                    2>/dev/null || true
@@ -82,17 +93,31 @@ pids=$(port_pids)
 
 # Wait for the port to actually free rather than sleeping a flat 4s and hoping — that was too long
 # on an idle box and, on a loaded one, sometimes not long enough, which is the bind race above.
+#
+# Waiting on the PROCESSES too, not just the port, is the other half — and assuming the port implied
+# them leaked a server on every single restart. uvicorn closes the LISTENING SOCKET as soon as it
+# takes SIGTERM and only then waits for open connections to drain; a bus WebSocket never closes on
+# its own, so the process sits in graceful shutdown indefinitely. The port therefore came free, the
+# escalation below was gated on the port alone and so never fired, and the outgoing instance stayed
+# alive — still holding the database open, still serving its already-connected peers OLD CODE that
+# no later restart would ever replace, while this script exited 0. Measured on the deploy host: two
+# such servers, ~3 days old, holding 15 and 22 open handles on the live 8.4 GB database.
 i=0
-while [ "$i" -lt 20 ] && [ -n "$(listeners)" ]; do
+while [ "$i" -lt 20 ] && { [ -n "$(listeners)" ] || [ -n "$(server_pids)" ]; }; do
     sleep 0.5
     i=$((i + 1))
 done
-if [ -n "$(listeners)" ]; then
-    echo "port $PORT still held after 10s; escalating to SIGKILL"
-    pids=$(port_pids)
-    [ -n "$pids" ] && kill -9 $pids 2>/dev/null
+survivors=$(server_pids)
+if [ -n "$(listeners)" ] || [ -n "$survivors" ]; then
+    echo "still up after 10s (pids:$(echo " $survivors" | tr '\n' ' ')); escalating to SIGKILL"
+    [ -n "$survivors" ] && kill -9 $survivors 2>/dev/null
     sleep 1
 fi
+# SIGKILL is not refusable, so anything still here is stuck in uninterruptible I/O and the launch
+# below will lose the bind race for a reason this script cannot fix. Say so instead of reporting a
+# clean stop — the point of the file is that no silent failure survives it.
+survivors=$(server_pids)
+[ -n "$survivors" ] && echo "!!! still alive after SIGKILL:$(echo " $survivors" | tr '\n' ' ')" >&2
 echo "port $PORT in use before start: $(listeners | wc -l | tr -d ' ')"
 
 # ── pick a launcher that exists ─────────────────────────────────────────────────────────────────

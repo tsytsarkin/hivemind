@@ -3,6 +3,230 @@
 --
 -- SENTINEL for "current" (open) tx_to = 9223372036854775807 (max signed int64).
 
+-- Agent collaboration metadata. Keep names distinct from the removed v1 bus_* tables:
+-- db.py drops those old tables during startup on existing deployments.
+CREATE TABLE IF NOT EXISTS chat_room (
+  room_id       TEXT PRIMARY KEY,
+  name          TEXT NOT NULL UNIQUE,
+  description   TEXT NOT NULL,
+  creator_user  TEXT NOT NULL,
+  creator_device TEXT NOT NULL,
+  creator_client TEXT NOT NULL,
+  created_at    TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS chat_subscription (
+  room_id       TEXT NOT NULL REFERENCES chat_room(room_id),
+  user          TEXT NOT NULL,
+  device        TEXT NOT NULL,
+  client        TEXT NOT NULL,
+  joined_at     TEXT NOT NULL,
+  PRIMARY KEY (room_id, user, device, client)
+);
+CREATE INDEX IF NOT EXISTS ix_chat_subscription_address
+  ON chat_subscription(user, device, client);
+CREATE TABLE IF NOT EXISTS room_manager (
+  room_id       TEXT PRIMARY KEY REFERENCES chat_room(room_id),
+  user          TEXT,
+  device        TEXT,
+  client        TEXT,
+  revision      INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS room_team_event (
+  event_id      TEXT PRIMARY KEY,
+  room_id       TEXT NOT NULL REFERENCES chat_room(room_id),
+  action        TEXT NOT NULL,
+  actor_user    TEXT NOT NULL,
+  actor_device  TEXT NOT NULL,
+  actor_client  TEXT NOT NULL,
+  target_user   TEXT NOT NULL,
+  target_device TEXT NOT NULL,
+  target_client TEXT NOT NULL,
+  prior_user    TEXT,
+  prior_device  TEXT,
+  prior_client  TEXT,
+  revision      INTEGER NOT NULL,
+  tx_id         INTEGER NOT NULL REFERENCES tx(tx_id)
+);
+CREATE INDEX IF NOT EXISTS ix_room_team_event_room ON room_team_event(room_id,tx_id);
+
+-- Instructions are durable work, not expiring chat. Retain outcomes and every handoff event.
+CREATE TABLE IF NOT EXISTS agent_instruction (
+  id TEXT PRIMARY KEY,
+  author_user TEXT NOT NULL,
+  recipient_user TEXT NOT NULL,
+  recipient_device TEXT NOT NULL,
+  recipient_client TEXT NOT NULL,
+  room_id TEXT REFERENCES chat_room(room_id),
+  to_manager INTEGER NOT NULL DEFAULT 0,
+  body TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('queued','acknowledged','in_progress',
+                                       'completed','failed','cancelled')),
+  result TEXT,
+  retry_key TEXT NOT NULL,
+  retry_of TEXT REFERENCES agent_instruction(id),
+  created_at REAL NOT NULL,
+  updated_at REAL NOT NULL,
+  created_tx INTEGER NOT NULL REFERENCES tx(tx_id),
+  UNIQUE(author_user,retry_key)
+);
+CREATE INDEX IF NOT EXISTS ix_instruction_inbox ON agent_instruction(
+  recipient_user,recipient_device,recipient_client,id);
+CREATE INDEX IF NOT EXISTS ix_instruction_room ON agent_instruction(room_id,id);
+CREATE TABLE IF NOT EXISTS agent_instruction_delivery (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  instruction_id TEXT NOT NULL REFERENCES agent_instruction(id),
+  recipient_user TEXT NOT NULL,
+  recipient_device TEXT NOT NULL,
+  recipient_client TEXT NOT NULL,
+  created_at REAL NOT NULL,
+  tx_id INTEGER NOT NULL REFERENCES tx(tx_id)
+);
+CREATE INDEX IF NOT EXISTS ix_instruction_delivery_item ON agent_instruction_delivery(instruction_id,seq);
+CREATE INDEX IF NOT EXISTS ix_instruction_delivery_recipient ON agent_instruction_delivery(
+  recipient_user,recipient_device,recipient_client,seq);
+CREATE TABLE IF NOT EXISTS agent_instruction_event (
+  id TEXT PRIMARY KEY,
+  instruction_id TEXT NOT NULL REFERENCES agent_instruction(id),
+  action TEXT NOT NULL,
+  actor TEXT NOT NULL,
+  old_state TEXT,
+  new_state TEXT NOT NULL,
+  prior_recipient TEXT,
+  created_at REAL NOT NULL,
+  tx_id INTEGER NOT NULL REFERENCES tx(tx_id)
+);
+CREATE INDEX IF NOT EXISTS ix_instruction_event_item ON agent_instruction_event(instruction_id,id);
+CREATE TABLE IF NOT EXISTS agent_instruction_archive (
+  id TEXT PRIMARY KEY,
+  author_user TEXT NOT NULL,
+  recipient_user TEXT NOT NULL,
+  recipient_device TEXT NOT NULL,
+  recipient_client TEXT NOT NULL,
+  room_id TEXT,
+  to_manager INTEGER NOT NULL,
+  state TEXT NOT NULL,
+  retry_key TEXT NOT NULL,
+  retry_of TEXT,
+  created_at REAL NOT NULL,
+  updated_at REAL NOT NULL,
+  archived_at REAL NOT NULL,
+  request_digest TEXT NOT NULL,
+  event_count INTEGER NOT NULL,
+  UNIQUE(author_user,retry_key)
+);
+CREATE TABLE IF NOT EXISTS agent_instruction_archive_event (
+  id TEXT PRIMARY KEY,
+  instruction_id TEXT NOT NULL REFERENCES agent_instruction_archive(id),
+  action TEXT NOT NULL,
+  actor TEXT NOT NULL,
+  old_state TEXT,
+  new_state TEXT NOT NULL,
+  prior_recipient TEXT,
+  created_at REAL NOT NULL,
+  tx_id INTEGER NOT NULL REFERENCES tx(tx_id),
+  archived_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_instruction_archive_event_item
+  ON agent_instruction_archive_event(instruction_id,created_at,id);
+
+CREATE TABLE IF NOT EXISTS chat_message (
+  seq            INTEGER PRIMARY KEY AUTOINCREMENT,
+  message_id     TEXT NOT NULL UNIQUE,
+  channel        TEXT NOT NULL CHECK (channel IN ('dm', 'room')),
+  room_id        TEXT REFERENCES chat_room(room_id),
+  target_user    TEXT,
+  target_device  TEXT,
+  target_client  TEXT,
+  sender_user    TEXT NOT NULL,
+  sender_device  TEXT NOT NULL,
+  sender_client  TEXT NOT NULL,
+  sender_session TEXT,
+  sender_origin TEXT NOT NULL DEFAULT 'agent',
+  target_key     TEXT NOT NULL,
+  body           TEXT NOT NULL,
+  summary        TEXT,
+  body_bytes     INTEGER NOT NULL,
+  message_kind   TEXT NOT NULL CHECK (message_kind IN ('text', 'progress')),
+  task_node_id   TEXT REFERENCES node(node_id),
+  retry_key      TEXT NOT NULL,
+  created_at     REAL NOT NULL,
+  UNIQUE (sender_user, sender_device, sender_client, target_key, retry_key)
+);
+CREATE INDEX IF NOT EXISTS ix_chat_message_target
+  ON chat_message(channel, target_user, target_device, target_client, seq);
+CREATE INDEX IF NOT EXISTS ix_chat_message_room
+  ON chat_message(room_id, seq);
+CREATE INDEX IF NOT EXISTS ix_chat_message_expiry ON chat_message(created_at);
+CREATE INDEX IF NOT EXISTS ix_chat_message_task_progress
+  ON chat_message(task_node_id, created_at) WHERE task_node_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS chat_cursor (
+  user           TEXT NOT NULL,
+  device         TEXT NOT NULL,
+  client         TEXT NOT NULL,
+  target_key     TEXT NOT NULL,
+  seq            INTEGER NOT NULL,
+  updated_at     REAL NOT NULL,
+  message_id     TEXT,
+  PRIMARY KEY (user, device, client, target_key)
+);
+CREATE TABLE IF NOT EXISTS chat_expiration_watermark (
+  target_key          TEXT PRIMARY KEY,
+  expired_through_seq INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS chat_session (
+  user             TEXT NOT NULL,
+  device           TEXT NOT NULL,
+  client           TEXT NOT NULL,
+  session_id       TEXT NOT NULL,
+  last_activity_at REAL NOT NULL,
+  model_name       TEXT,
+  work_status      TEXT,
+  work_updated_at  REAL,
+  PRIMARY KEY (user, device, client, session_id)
+);
+CREATE INDEX IF NOT EXISTS ix_chat_session_last_activity ON chat_session(last_activity_at);
+CREATE TABLE IF NOT EXISTS console_read_cursor (
+  user TEXT NOT NULL,
+  device TEXT NOT NULL,
+  channel TEXT NOT NULL,
+  conversation TEXT NOT NULL,
+  seq INTEGER NOT NULL,
+  message_id TEXT NOT NULL,
+  updated_at REAL NOT NULL,
+  PRIMARY KEY(user,device,channel,conversation)
+);
+CREATE TABLE IF NOT EXISTS agent_capability (
+  user          TEXT NOT NULL,
+  device        TEXT NOT NULL,
+  client        TEXT NOT NULL,
+  tags_json     TEXT NOT NULL CHECK (json_valid(tags_json)),
+  updated_at    REAL NOT NULL,
+  human_managed INTEGER NOT NULL DEFAULT 0 CHECK (human_managed IN (0,1)),
+  PRIMARY KEY (user, device, client)
+);
+CREATE TABLE IF NOT EXISTS agent_config (
+  user                TEXT NOT NULL,
+  device              TEXT NOT NULL,
+  client              TEXT NOT NULL,
+  max_parallel_tasks  INTEGER NOT NULL DEFAULT 20 CHECK(max_parallel_tasks BETWEEN 1 AND 20),
+  auto_claim_enabled  INTEGER NOT NULL DEFAULT 1 CHECK(auto_claim_enabled IN (0,1)),
+  updated_at          REAL NOT NULL,
+  human_managed       INTEGER NOT NULL DEFAULT 0 CHECK(human_managed IN (0,1)),
+  PRIMARY KEY(user,device,client)
+);
+CREATE TABLE IF NOT EXISTS project_capability (
+  name        TEXT PRIMARY KEY,
+  description TEXT NOT NULL,
+  created_at  REAL NOT NULL,
+  updated_at  REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS chat_usage (
+  id            INTEGER PRIMARY KEY CHECK (id=1),
+  counted_bytes INTEGER NOT NULL,
+  message_count INTEGER NOT NULL
+);
+
 -- ── provenance ────────────────────────────────────────────────────────────────
 -- One row per write. tx_id is the monotonic "as-of" coordinate for the revision axis.
 CREATE TABLE IF NOT EXISTS tx (
@@ -294,3 +518,63 @@ CREATE TABLE IF NOT EXISTS embedding (
   updated_tx INTEGER NOT NULL REFERENCES tx(tx_id),
   PRIMARY KEY (kind, item_id)
 );
+
+-- Graph task identity and volatile activity are sidecars, never simulated node revisions.
+CREATE TABLE IF NOT EXISTS graph_task (
+  node_id TEXT PRIMARY KEY REFERENCES node(node_id),
+  room_id TEXT REFERENCES chat_room(room_id),
+  status TEXT NOT NULL DEFAULT 'unclaimed'
+    CHECK(status IN ('unclaimed', 'in_progress', 'complete')),
+  created_tx INTEGER NOT NULL REFERENCES tx(tx_id),
+  updated_tx INTEGER NOT NULL REFERENCES tx(tx_id),
+  status_mode TEXT NOT NULL DEFAULT 'sidecar'
+    CHECK(status_mode IN ('sidecar', 'versioned')),
+  required_capabilities_json TEXT NOT NULL DEFAULT '[]'
+    CHECK(json_valid(required_capabilities_json))
+);
+CREATE TABLE IF NOT EXISTS graph_task_activity (
+  node_id TEXT NOT NULL REFERENCES graph_task(node_id),
+  user TEXT NOT NULL, device TEXT NOT NULL, client TEXT NOT NULL,
+  last_beat_at REAL NOT NULL,
+  interval_seconds INTEGER NOT NULL,
+  expires_after_seconds INTEGER NOT NULL,
+  PRIMARY KEY(node_id,user,device,client)
+);
+CREATE TABLE IF NOT EXISTS graph_task_claim (
+  node_id TEXT PRIMARY KEY REFERENCES graph_task(node_id),
+  holder_user TEXT, holder_device TEXT, holder_client TEXT,
+  token_digest TEXT, generation INTEGER NOT NULL,
+  claimed_at REAL NOT NULL, last_beat_at REAL NOT NULL,
+  interval_seconds INTEGER NOT NULL, expires_after_seconds INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS graph_task_assignment (
+  node_id TEXT PRIMARY KEY REFERENCES graph_task(node_id),
+  room_id TEXT NOT NULL REFERENCES chat_room(room_id),
+  assignee_user TEXT, assignee_device TEXT, assignee_client TEXT,
+  revision INTEGER NOT NULL,
+  assigned_at REAL
+);
+CREATE INDEX IF NOT EXISTS ix_graph_task_assignment_assignee
+  ON graph_task_assignment(assignee_user,assignee_device,assignee_client);
+CREATE TABLE IF NOT EXISTS graph_task_assignment_event (
+  event_id TEXT PRIMARY KEY,
+  node_id TEXT NOT NULL REFERENCES graph_task(node_id),
+  action TEXT NOT NULL,
+  assignee_user TEXT, assignee_device TEXT, assignee_client TEXT,
+  previous_user TEXT, previous_device TEXT, previous_client TEXT,
+  revision INTEGER NOT NULL,
+  happened_at REAL NOT NULL,
+  tx_id INTEGER NOT NULL REFERENCES tx(tx_id)
+);
+CREATE INDEX IF NOT EXISTS ix_graph_task_assignment_event_node
+  ON graph_task_assignment_event(node_id,tx_id);
+CREATE TABLE IF NOT EXISTS graph_task_event (
+  event_id TEXT PRIMARY KEY,
+  node_id TEXT NOT NULL REFERENCES graph_task(node_id),
+  kind TEXT NOT NULL,
+  generation INTEGER NOT NULL,
+  user TEXT, device TEXT, client TEXT,
+  happened_at REAL NOT NULL,
+  tx_id INTEGER NOT NULL REFERENCES tx(tx_id)
+);
+CREATE INDEX IF NOT EXISTS ix_graph_task_event_node ON graph_task_event(node_id, tx_id);

@@ -253,6 +253,12 @@ def render(frame, inbox=None):
     if kind in ("ping", "pong"):
         return None
     if kind == "hello":
+        if frame.get("v") == 2:
+            if inbox:
+                _record(frame, inbox)  # reconnect reminder, even when no live message arrives
+            return ("[hivemind:chat] connected as %s; call chat_inbox and "
+                    "chat_room_history for subscribed rooms to catch up after reconnect"
+                    % _label(frame.get("peer", "")))
         peers = frame.get("peers") or []
         n = frame.get("queued") or 0
         extra = ", %d queued" % n if n else ""
@@ -261,6 +267,25 @@ def render(frame, inbox=None):
                    ", ".join(_label(p) for p in peers) or "none", extra))
     if kind == "presence":
         return "[hivemind bus] %s %s" % (_label(frame.get("peer", "")), frame.get("event", "?"))
+    if kind == "chat":
+        # A v2 frame is only a notification. The full 24-hour message lives on the server;
+        # neither the preview nor a rotated local file is an authoritative read cursor.
+        mid = _clean(str(frame.get("id", "")))[:64]
+        who = _label(frame.get("from", "?"))
+        channel = frame.get("channel")
+        if channel not in ("dm", "room") or not mid:
+            return None
+        kept = _record(frame, inbox) if inbox else False
+        preview = _clean(frame.get("preview", ""))[:150]
+        if channel == "dm":
+            target = "chat_inbox"
+            scope = ""
+        else:
+            target = "chat_room_history"
+            scope = " room=%s" % _label(frame.get("room") or "?")
+        note = " (local notification saved)" if kept else ""
+        return ('[hivemind:chat id=%s from="%s"%s] %s · fetch full text via %s%s'
+                % (mid, who, scope, preview, target, note))[:512]
     if kind in ("message", "broadcast"):
         body = _clean(frame.get("body", ""))
         mid = str(frame.get("id", ""))[-8:]
@@ -482,7 +507,8 @@ def main(argv=None):
             backoff = RECONNECT_MIN                 # a clean close is not a failure
         except WSRefused as e:
             # A listen key is reusable, so a refusal means expired or revoked — not a blip.
-            print("[hivemind bus] refused (%s); run bus_connect for a fresh key" % e, flush=True)
+            reconnect = "chat_connect" if key.startswith("hk2.") else "bus_connect"
+            print("[hivemind] refused (%s); run %s for a fresh key" % (e, reconnect), flush=True)
             return 2
         except (WSError, OSError, ssl.SSLError) as e:
             print("[hivemind bus] disconnected (%s); reconnecting" % type(e).__name__, flush=True)

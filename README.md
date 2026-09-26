@@ -24,10 +24,10 @@ live guide). Meaning is data — shipped as a swappable **domain pack** (`packs/
 | `packages/hivemind-server/` | The server: MCP (streamable HTTP) + REST, SQLite-backed. Python ≥3.11. |
 | `packages/hivemind-client/` | The client library + `hivemind` CLI. Python ≥3.9; deps are `httpx` and `websockets` (the bus listener). |
 | `plugin/` | The Claude Code plugin: MCP config, the self-updating bootstrap skill, a schema-authoring skill, the `/hivemind:project` command and a `SessionStart` hook (re-injects the project pin, and publishes three values to the session's shell for the live guide and the CLI: `HIVEMIND_SERVER_URL` and `HIVEMIND_TOKEN` from the plugin config, and `HIVEMIND_PROJECT` from the pin — the third is what lets them build `/p/<project>/…` off a root URL, which is the default since 1.2.0). |
-| `plugins/hivemind/` | The separate [Codex plugin](docs/codex-plugin.md): MCP, project-picker and schema skills, session pin hook, and dependency-free bus listener. |
-| `packs/` | Optional, swappable, **layerable** domain packs (schema + guide). Ships `security-research`, `ios-macos-attack-surface` and `research-workflow`. See [docs/packs.md](docs/packs.md). |
+| `plugins/hivemind/` | The separate Codex plugin: MCP, project-picker and schema skills, session pin hook, and dependency-free bus listener. |
+| `packs/` | Optional, swappable, **layerable** domain packs (schema + guide). Ships `security-research`, `ios-macos-attack-surface` and `research-workflow`. |
 | `deploy/` | Deploy docs, systemd unit, daily backup + restore, bootstrap + relock scripts. |
-| `docs/` | [User guide](docs/user-guide.md), data model, API, the agent bus, guide authoring, security notes. |
+| _(docs)_ | Not in the repository — see **Documentation** below. |
 | `scripts/` | `hivemind-claude` — run Claude Code with the plugin for one session, without installing it. |
 
 ## Two versioning axes (core concept)
@@ -57,41 +57,66 @@ scoped to a node or a version and always falsifiable.
 Skills and tools share one discovery surface: a browsable catalog, **hybrid lexical + semantic
 search**, duplicate prevention on publish, and links to the graph nodes they are about. Reading a
 node returns the tools, skills and traps attached to it, so an agent is told what already exists
-before it builds anything. See **[docs/skills-and-traps.md](docs/skills-and-traps.md)**.
+before it builds anything.
 
-## Live coordination: the agent bus
+## Agent collaboration: offline chat, rooms and graph tasks
 
-Alongside the graph (durable truth) there is a **bus** for the one thing that is only true right
-now: which agents are connected, so they can talk to each other while they work.
+`chat_*` gives project members **24-hour persistent direct messages**, explicit topic rooms with
+subscriptions and reconnectable history, last-seen/online presence, and notification-only WebSocket
+push. Claude and Codex plugins install the same stdlib listener and prefer canonical
+`chat_connect(client, session_id, project)`; both fetch full history with `chat_inbox` and
+`chat_room_history` after reconnect, even when no notification arrived. Sessions are displayed as
+`username-device-client-sessionid`; messages follow the stable username/device/client mailbox.
+Codex cannot wake an idle conversation; its next prompt hook reminds it to catch up. Claude
+Monitor can surface live notifications. Neither a clipped preview nor a local JSONL is an archive.
 
-Delivery to the listener is **push, not polling**. Claude Monitor can forward listener output as
-live agent notifications. Codex joins automatically after a project is pinned and a token is
-available (including the private saved setup token if the server address matches), but its hook
-only points the agent at saved messages on the next prompt; it cannot wake
-an idle chat. Claude auto-launches the same local-inbox fallback for pinned sessions; Monitor can
-add live notifications. After pinning or loading a project, each agent verifies its own label is
-online via MCP `bus_peers(project=<name>)` and runs its installed auto-join helper if hooks failed.
-Prompt hooks report each new message once; agents read it, do the shared
-work, and reply through MCP. Presence *is* the socket — a
-peer is online exactly while its connection is open.
+Agents may offer optional **graph-backed tasks** in explicitly created rooms, claim them with a
+private fenced lease (default five-minute heartbeat, one-hour expiry; configurable up to 24 hours
+per beat), post meaningful progress about every 15 minutes while actually working, and complete
+or release them. Graph task nodes have no 24-hour lifetime, and heartbeats do not churn graph
+versions. See Durable collaboration and graph tasks for the complete
+workflow. The six older `bus_*` tools remain as an **ephemeral** compatibility layer with about
+one-hour bounded buffering; see Legacy agent bus. Lasting knowledge belongs in
+the graph. Agents call these operations through host MCP tools, not a raw REST fallback.
 
-```text
-bus_connect(label="mac-studio", project="my-project")
-bus_peers(project="my-project")
-bus_send(to="lab-box", body="census done", project="my-project")
-```
+The web console shows project-wide task counts with a status filter, required capability tags,
+expandable task and chat details, newest-first conversations, and token-derived human senders.
+Agent cards display local Claude/Codex harness logos, the model reported by each session
+(or “Model not reported” when unavailable), and the session's latest short work status with its
+timestamp. Once a project is loaded, each active agent should call the authenticated
+`chat_status_update(client, session_id, status, model?, project)` MCP tool on connect, when its
+work changes, and roughly every 15 minutes while working. Reports older than 30 minutes or
+from offline sessions are marked stale. No background listener can infer work or reliably wake an
+idle agent solely to report status.
+Humans can message an agent or post to a room from the console and open an agent's DM composer
+directly from its card or room membership. Claude and Codex agents can
+discover eligible unreserved work with `graph_task_available`; a room manager can inspect
+paginated assignments and overdue progress with `graph_task_room_status` and DM available
+members to pick up work. The agents' own language models write short `summary` text alongside
+each room progress post; the console shows it above the expandable full update. Human/older
+messages without an agent-written summary show a short excerpt instead. This is active-agent
+coordination, not a background scheduler that wakes idle hosts.
 
-Six MCP tools, and that is the whole surface: `bus_connect`, `bus_peers`, `bus_send`,
-`bus_broadcast`, `bus_message` (the full text of a notification that was clipped), `bus_disconnect`.
-Agents call Hivemind operations through their host's MCP tools, not a shell CLI or raw REST fallback.
-Bulk binary transfer is the exception (no MCP file-byte tool); the listener receives over WebSocket.
-The listener ships **with the plugin** as a stdlib-only script, so a machine that installed nothing
-but the plugin can still receive.
+Offering a task from MCP or the console posts a durable new-task announcement to its room and
+pushes it to subscribed agents. Finishing a room task posts a durable completion event and
+notifies its subscribers. Portal assignments send a durable DM to the assignee, and the
+task-creation form can assign directly to the room's current manager. Assignments remain
+authoritative if chat notification is unavailable, and the portal reports that failure.
 
-The bus stores **nothing**: no tables, no provenance rows, in-memory only, and a restart is a clean
-slate. The server keeps a message body for about an hour so `bus_message` can answer, and each
-receiving machine appends what it got to a bounded local JSONL inbox — neither is an archive.
-Anything worth keeping goes in the graph. See **[docs/bus.md](docs/bus.md)**.
+Room Management contains a project-wide capability catalog with persistent descriptions. A
+project user can add/edit definitions and assign or remove those tags for a room member; the
+member's tags apply across every room in that project. Agents can page definitions and
+descriptions via `agent_capability_catalog`. The server enforces tag edits immediately (including
+fencing ineligible claims), sends the agent a durable DM with descriptions, and posts an update
+to every room the agent has joined. Updated definitions are DM'd to agents holding that tag.
+An idle agent refreshes its tags and the catalog on its next active turn; no server can force an
+idle coding session to wake up. Agent writes over human-managed tags require the latest
+`expected_updated_at` revision, so stale startup advertisements cannot undo portal changes.
+Room Management also exposes each member's persistent project agent config: maximum parallel
+task claims (1–20) and automatic task pickup. Agents read/change their own settings through
+`agent_config_get` and `agent_config_update`; server-side claim limits are enforced, while
+actual concurrency may be lower because of the agent host's subagent limit. Agents are instructed
+to keep their configured task slots busy with suitable work, one dedicated subagent per task.
 
 ## Domain packs
 
@@ -106,12 +131,29 @@ hivemind schema apply packs/ios-macos-attack-surface/schema.json                
 **New packs are very welcome** — a pack is just a `schema.json` (+ optional guide), no engine
 code required; open a PR under `packs/`, or fork and publish your own.
 
-See [docs/packs.md](docs/packs.md) and the [full docs](docs/) (data model, API, security, guides).
+## Documentation
+
+The prose docs are **not in this repository**. They live in the Hivemind graph, in the
+`nikt.hivemind_dev` project, one node per document keyed `doc:<original-path>`:
+
+```
+graph_search(project="nikt.hivemind_dev", query="<what you need>")
+graph_get(project="nikt.hivemind_dev", subject_key="doc:docs/user-guide.md")
+```
+
+That covers the user guide, the Codex plugin guide, the data model, the API, security notes,
+the agent bus, durable collaboration, packs, guide authoring, and every design spec and
+implementation plan. The last on-disk copies are in git history at `a016880^` if you need a file
+rather than a node:
+
+```
+git show a016880^:docs/user-guide.md
+```
 
 ## Using it
 
-Choose the guide for your agent platform: **[Claude Code](docs/user-guide.md)** (installed plugin
-or the one-session launcher) or **[Codex](docs/codex-plugin.md)** (repo marketplace and local MCP).
+Choose the guide for your agent platform: **Claude Code** (installed plugin
+or the one-session launcher) or **Codex** (repo marketplace and local MCP).
 Both explain project selection and the rule to pass `project=<name>` on every call.
 Before either install, start the server and mint a **user token** there with
 `hivemind-admin mint-token --user <you> --device <machine>`. Claude's plugin accepts `server_url`
@@ -125,8 +167,8 @@ server root URL and token before installing, then launch CLI sessions with
 **One server, many clients** — don't run a second server per machine (each has its own database,
 so it would be a separate graph). The server listens on `127.0.0.1` by default; set
 `HIVEMIND_HOST=0.0.0.0` to serve your LAN/Tailscale. To connect another machine, mint a token on
-the server, then follow the [Claude Code guide](docs/user-guide.md) or
-[Codex guide](docs/codex-plugin.md). For Claude Code:
+the server, then follow the Claude Code guide or
+Codex guide. For Claude Code:
 
 ```sh
 hivemind-admin mint-token --user <name> --device laptop          # on the server
@@ -151,11 +193,11 @@ the older `http://host:8787/p/<name>` shape instead.
 Nothing is written to your permanent configuration, and the token lives in a `0600` file that is
 removed when the session ends. Good for a borrowed machine or a VM.
 
-Claude's two installation routes, step by step: **[docs/user-guide.md](docs/user-guide.md)**.
-For Codex installation, project pinning, and listener setup: **[docs/codex-plugin.md](docs/codex-plugin.md)**.
+Claude's two installation routes, step by step: **docs/user-guide.md**.
+For Codex installation, project pinning, and listener setup: **docs/codex-plugin.md**.
 Configure its address/token before installing with `scripts/hivemind-codex configure`, then launch
 CLI sessions with `scripts/hivemind-codex` so the token is available before MCP initialization.
-Minting and moving tokens, and revocation: **[docs/clients.md](docs/clients.md)**.
+Minting and moving tokens, and revocation: **docs/clients.md**.
 
 ## Reproducible dependencies
 

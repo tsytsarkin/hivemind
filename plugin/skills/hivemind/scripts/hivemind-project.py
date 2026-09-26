@@ -20,6 +20,7 @@ fail in a way that delays or blocks a session.
     hivemind-project.py --session-id
 """
 import argparse
+import hashlib
 import json
 import os
 import pathlib
@@ -74,13 +75,21 @@ def session_id():
             or os.environ.get("CODEX_SESSION_ID") or os.environ.get("CLAUDE_CODE_SESSION_ID") or "")
 
 
+def pin_slug(value):
+    """Use the full host ID as the pin identity, including when filenames must be shortened."""
+    cleaned = UNSAFE.sub("-", value)
+    if cleaned == value and len(cleaned) <= 100:
+        return cleaned  # keep existing short-session pin filenames stable across upgrades
+    return cleaned[:83] + "-" + hashlib.sha256(value.encode()).hexdigest()[:16]
+
+
 def pin_path():
     """One file per session id.
 
     The id lands in a filename, so it is slugged rather than merely cleaned: a value holding a
     slash or a `..` would otherwise write outside ~/.hivemind.
     """
-    slug = UNSAFE.sub("-", session_id())[:100]
+    slug = pin_slug(session_id())
     return pathlib.Path(os.path.expanduser("~")) / ".hivemind" / ("session-%s.json" % slug)
 
 

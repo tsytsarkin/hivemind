@@ -1,0 +1,253 @@
+"""Durable chat storage: rooms and identities are separate from live socket presence."""
+
+import pytest
+import sqlite3
+
+from hivemind_server.db import Conflict, Database, Invalid, NotFound
+from hivemind_server.identity import Identity
+
+
+def test_existing_chat_session_survives_status_column_migration(tmp_path):
+    from hivemind_server.chat import ChatStore
+    path = tmp_path / "existing.sqlite"
+    with sqlite3.connect(path) as con:
+        con.execute("CREATE TABLE chat_session (user TEXT NOT NULL,device TEXT NOT NULL,"
+                    "client TEXT NOT NULL,session_id TEXT NOT NULL,last_activity_at REAL NOT NULL,"
+                    "PRIMARY KEY(user,device,client,session_id))")
+        con.execute("INSERT INTO chat_session VALUES ('nik','mac','claude','old',99999999999)")
+    db = Database(path)
+    store = ChatStore(db)
+    store.touch(("nik", "mac", "claude"), "old")
+    assert store.agents()[0]["model"] is None
+    assert store.agents()[0]["work_status"] is None
+    assert store.update_status(("nik", "mac", "claude"), "old", "Reviewing", "opus-4")["model"] == "opus-4"
+    assert ChatStore(Database(path)).agents()[0]["work_status"] == "Reviewing"
+
+
+def test_room_is_explicit_and_stays_joinable_after_restart(db):
+    from hivemind_server.chat import ChatStore
+    store = ChatStore(db)
+    assert store.rooms() == []
+
+    room = store.create_room("search-bugs", "Parser crashes", ("nikt", "mac", "codex"))
+    store.join(room["name"], ("nikt", "mac", "codex"))
+
+    restarted = ChatStore(Database(db.path))
+    assert restarted.rooms()[0]["name"] == "search-bugs"
+    assert restarted.rooms()[0]["description"] == "Parser crashes"
+    assert restarted.subscribed("search-bugs", ("nikt", "mac", "codex"))
+    assert not restarted.subscribed("search-bugs", ("nikt", "mac", "claude"))
+
+
+def test_room_subscription_roster_changes_on_leave(db):
+    from hivemind_server.chat import ChatStore
+    store = ChatStore(db)
+    store.create_room("search-bugs", "Parser crashes", ("nikt", "mac", "codex"))
+    store.join("search-bugs", ("peer", "mac", "claude"))
+    assert store.subscribers("search-bugs") == [("peer", "mac", "claude")]
+    store.leave("search-bugs", ("peer", "mac", "claude"))
+    assert store.subscribers("search-bugs") == []
+
+
+def test_duplicate_room_name_and_missing_room_are_errors(db):
+    from hivemind_server.chat import ChatStore
+    store = ChatStore(db)
+    owner = ("nikt", "mac", "codex")
+    store.create_room("search-bugs", "Parser crashes", owner)
+    with pytest.raises(Conflict):
+        store.create_room("search-bugs", "Another topic", owner)
+    with pytest.raises(NotFound):
+        store.join("no-such-room", owner)
+
+
+def test_hyphenated_identity_parts_do_not_collide(db):
+    from hivemind_server.chat import ChatStore
+    store = ChatStore(db)
+    store.create_room("search-bugs", "Parser crashes", ("a-b", "c", "d"))
+    store.join("search-bugs", ("a-b", "c", "d"))
+    assert store.subscribed("search-bugs", ("a-b", "c", "d"))
+    assert not store.subscribed("search-bugs", ("a", "b-c", "d"))
+
+
+def test_stable_identity_uses_credentials_not_self_declared_username():
+    from hivemind_server.chat import stable_identity
+    assert stable_identity(Identity("nikt", "macbook"), "codex", "session-1") == (
+        "nikt", "macbook", "codex", "session-1")
+    with pytest.raises(Invalid):
+        stable_identity(Identity("legacy:peer", "peer", legacy=True), "codex", "session-1")
+    with pytest.raises(Invalid):
+        stable_identity(Identity("nikt", "?"), "codex", "session-1")
+    with pytest.raises(Invalid):
+        stable_identity(Identity("nikt", "macbook"), "CODEX", "session-1")
+    with pytest.raises(Invalid):
+        stable_identity(Identity("nikt", "macbook"), "codex", "x" * 65)
+
+
+SENDER = ("nikt", "mac", "codex")
+RECEIVER = ("peer", "mac", "claude")
+T0 = 1_700_000_000.0
+
+
+def test_offline_dm_survives_database_reopen(db):
+    from hivemind_server.chat import ChatStore
+    first = ChatStore(db).send("dm", RECEIVER, SENDER, "hello", "retry-1", now=T0)
+    rows = ChatStore(Database(db.path)).inbox(RECEIVER, 0, now=T0 + 10)["messages"]
+    assert [m["id"] for m in rows] == [first["id"]]
+    assert rows[0]["body"] == "hello"
+
+
+def test_same_retry_key_is_idempotent_and_cannot_change_body(db):
+    from hivemind_server.chat import ChatStore
+    store = ChatStore(db)
+    first = store.send("dm", RECEIVER, SENDER, "hello", "retry-1", now=T0)
+    second = store.send("dm", RECEIVER, SENDER, "hello", "retry-1", now=T0 + 1)
+    assert second["id"] == first["id"] and second["duplicate"] is True
+    assert len(store.inbox(RECEIVER, 0, now=T0 + 2)["messages"]) == 1
+    with pytest.raises(Conflict):
+        store.send("dm", RECEIVER, SENDER, "changed", "retry-1", now=T0 + 2)
+
+
+def test_llm_written_room_progress_summary_roundtrips_and_is_idempotent(db):
+    from hivemind_server.chat import ChatStore
+    store = ChatStore(db)
+    store.create_room("reviews", "Review", SENDER)
+    full = "I inspected the parser and reproduced a null dereference in the fallback path. " \
+           "The reproduction is saved for the next pass."
+    brief = "Reproduced a parser null dereference; investigating the fallback path."
+    sent = store.send("room", "reviews", SENDER, full, "one", kind="progress", summary=brief)
+    history = store.history("reviews")["messages"]
+    assert history[0]["summary"] == brief
+    assert history[0]["body"] == full
+    assert sent["summary"] == brief
+    assert store.send("room", "reviews", SENDER, full, "one", kind="progress",
+                      summary=brief)["duplicate"] is True
+    with pytest.raises(Conflict):
+        store.send("room", "reviews", SENDER, full, "one", kind="progress",
+                   summary="different summary")
+    with pytest.raises(Invalid):
+        store.send("dm", RECEIVER, SENDER, "Hi", "two", summary="Not for DMs")
+    with pytest.raises(Invalid):
+        store.send("room", "reviews", SENDER, full, "two", kind="progress", summary="x" * 401)
+
+
+def test_existing_chat_table_adds_nullable_summary_without_losing_messages(db):
+    from hivemind_server.chat import ChatStore
+    store = ChatStore(db)
+    store.create_room("reviews", "Review", SENDER)
+    store.send("room", "reviews", SENDER, "Existing post", "before")
+    db.conn().execute("ALTER TABLE chat_message DROP COLUMN summary")
+    db.apply_schema()
+    assert store.history("reviews")["messages"][0]["summary"] is None
+    assert store.history("reviews")["messages"][0]["body"] == "Existing post"
+
+
+def test_room_history_available_to_late_joiner_for_24_hours(db):
+    from hivemind_server.chat import ChatStore
+    store = ChatStore(db)
+    store.create_room("search-bugs", "Parser crashes", SENDER)
+    sent = store.send("room", "search-bugs", SENDER, "fix is pending", "retry-2", now=T0)
+    store.join("search-bugs", RECEIVER)
+    assert [m["id"] for m in store.history("search-bugs", 0, now=T0 + 86_399)["messages"]] == [sent["id"]]
+    assert store.history("search-bugs", 0, now=T0 + 86_400)["messages"] == []
+
+
+def test_expired_empty_inbox_reports_gap_even_after_cleanup(db):
+    from hivemind_server.chat import ChatStore
+    store = ChatStore(db)
+    sent = store.send("dm", RECEIVER, SENDER, "hello", "retry-1", now=T0)
+    result = store.inbox(RECEIVER, 0, now=T0 + 86_400)
+    assert result["messages"] == []
+    assert result["gap"] is True
+    assert result["expired_through_seq"] >= sent["seq"]
+
+
+def test_chat_body_cap_counts_utf8_bytes(db):
+    from hivemind_server.chat import ChatStore
+    store = ChatStore(db)
+    with pytest.raises(Invalid):
+        store.send("dm", RECEIVER, SENDER, "\U0001F600" * 65_537, "retry-1", now=T0)
+
+
+def test_project_quota_rejects_new_mail_without_evicting_unexpired(db):
+    from hivemind_server.chat import ChatStore
+    store = ChatStore(db, max_bytes=520)
+    first = store.send("dm", RECEIVER, SENDER, "hello", "retry-1", now=T0)
+    with pytest.raises(Invalid, match="quota"):
+        store.send("dm", RECEIVER, SENDER, "world", "retry-2", now=T0 + 1)
+    assert [m["id"] for m in store.inbox(RECEIVER, 0, now=T0 + 2)["messages"]] == [first["id"]]
+
+
+def test_private_dm_lookup_and_read_cursor_are_authorized(db):
+    from hivemind_server.chat import ChatStore
+    store = ChatStore(db)
+    message = store.send("dm", RECEIVER, SENDER, "secret", "retry-1", now=T0)
+    assert store.message(message["id"], RECEIVER, now=T0 + 1)["body"] == "secret"
+    with pytest.raises(NotFound):
+        store.message(message["id"], ("other", "mac", "codex"), now=T0 + 1)
+    with pytest.raises(Invalid):
+        store.mark_read(("other", "mac", "codex"), "dm", message["seq"], now=T0 + 1)
+    store.mark_read(RECEIVER, "dm", message["seq"], now=T0 + 1)
+    assert store.read_cursor(RECEIVER, "dm") == message["seq"]
+
+
+def test_room_named_dm_has_a_separate_read_cursor_from_the_dm_inbox(db):
+    from hivemind_server.chat import ChatStore
+    store = ChatStore(db)
+    store.create_room("dm", "Discuss delivery", SENDER)
+    private = store.send("dm", RECEIVER, SENDER, "private", "private-1", now=T0)
+    public = store.send("room", "dm", SENDER, "public", "public-1", now=T0)
+    assert store.mark_read(RECEIVER, "dm", private["seq"], now=T0 + 1)["up_to_seq"] == private["seq"]
+    assert store.mark_read(RECEIVER, "dm", public["seq"], channel="room", now=T0 + 1)["up_to_seq"] == public["seq"]
+    assert store.read_cursor(RECEIVER, "dm") == private["seq"]
+    assert store.read_cursor(RECEIVER, "dm", channel="room") == public["seq"]
+
+
+def test_mark_read_returns_persisted_monotonic_cursor(db):
+    from hivemind_server.chat import ChatStore
+    store = ChatStore(db)
+    earlier = store.send("dm", RECEIVER, SENDER, "one", "retry-1", now=T0)
+    later = store.send("dm", RECEIVER, SENDER, "two", "retry-2", now=T0 + 1)
+    store.mark_read(RECEIVER, "dm", later["seq"], now=T0 + 2)
+    assert store.mark_read(RECEIVER, "dm", earlier["seq"], now=T0 + 3)["up_to_seq"] == later["seq"]
+
+
+def test_private_last_read_message_id_survives_message_expiration(db):
+    from hivemind_server.chat import ChatStore
+    store = ChatStore(db)
+    sent = store.send("dm", RECEIVER, SENDER, "review this", "review-1", now=T0)
+    out = store.mark_read(RECEIVER, "dm", sent["seq"], now=T0 + 1)
+    assert out["last_read_message_id"] == sent["id"]
+    store.cleanup(now=T0 + 86_400)
+    assert store.read_marker(RECEIVER, "dm") == {"last_read_seq": sent["seq"],
+                                                  "last_read_message_id": sent["id"]}
+
+
+def test_presence_expires_without_deleting_room_subscription(db):
+    from hivemind_server.chat import ChatStore
+    store = ChatStore(db)
+    store.create_room("search-bugs", "Parser crashes", SENDER)
+    store.join("search-bugs", RECEIVER)
+    store.touch(RECEIVER, "session-1", now=T0)
+    assert [p["session_id"] for p in store.agents(now=T0 + 86_399)] == ["session-1"]
+    assert store.agents(now=T0 + 86_400) == []
+    assert store.subscribed("search-bugs", RECEIVER)
+
+
+def test_last_seen_does_not_regress_when_two_sessions_touch_out_of_order(db):
+    from hivemind_server.chat import ChatStore
+    store = ChatStore(db)
+    store.touch(RECEIVER, "session-1", now=T0 + 100)
+    store.touch(RECEIVER, "session-1", now=T0)
+    assert store.agents(now=T0 + 101)[0]["last_activity_at"] == T0 + 100
+
+
+def test_housekeeping_physically_purges_expired_chat_and_stale_sessions(db):
+    from hivemind_server.chat import ChatStore
+    store = ChatStore(db)
+    store.send("dm", RECEIVER, SENDER, "expired", "retry-1", now=T0)
+    store.touch(RECEIVER, "old-session", now=T0)
+    assert store.cleanup(now=T0 + 86_400) == 1
+    with db.read() as cur:
+        assert cur.execute("SELECT COUNT(*) FROM chat_message").fetchone()[0] == 0
+        assert cur.execute("SELECT COUNT(*) FROM chat_session").fetchone()[0] == 0
+    assert store.inbox(RECEIVER, 0, now=T0 + 86_400)["gap"] is True
