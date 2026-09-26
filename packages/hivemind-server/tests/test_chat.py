@@ -53,3 +53,87 @@ def test_stable_identity_uses_credentials_not_self_declared_username():
         stable_identity(Identity("nikt", "macbook"), "CODEX", "session-1")
     with pytest.raises(Invalid):
         stable_identity(Identity("nikt", "macbook"), "codex", "x" * 65)
+
+
+SENDER = ("nikt", "mac", "codex")
+RECEIVER = ("peer", "mac", "claude")
+T0 = 1_700_000_000.0
+
+
+def test_offline_dm_survives_database_reopen(db):
+    from hivemind_server.chat import ChatStore
+    first = ChatStore(db).send("dm", RECEIVER, SENDER, "hello", "retry-1", now=T0)
+    rows = ChatStore(Database(db.path)).inbox(RECEIVER, 0, now=T0 + 10)["messages"]
+    assert [m["id"] for m in rows] == [first["id"]]
+    assert rows[0]["body"] == "hello"
+
+
+def test_same_retry_key_is_idempotent_and_cannot_change_body(db):
+    from hivemind_server.chat import ChatStore
+    store = ChatStore(db)
+    first = store.send("dm", RECEIVER, SENDER, "hello", "retry-1", now=T0)
+    second = store.send("dm", RECEIVER, SENDER, "hello", "retry-1", now=T0 + 1)
+    assert second["id"] == first["id"] and second["duplicate"] is True
+    assert len(store.inbox(RECEIVER, 0, now=T0 + 2)["messages"]) == 1
+    with pytest.raises(Conflict):
+        store.send("dm", RECEIVER, SENDER, "changed", "retry-1", now=T0 + 2)
+
+
+def test_room_history_available_to_late_joiner_for_24_hours(db):
+    from hivemind_server.chat import ChatStore
+    store = ChatStore(db)
+    store.create_room("search-bugs", "Parser crashes", SENDER)
+    sent = store.send("room", "search-bugs", SENDER, "fix is pending", "retry-2", now=T0)
+    store.join("search-bugs", RECEIVER)
+    assert [m["id"] for m in store.history("search-bugs", 0, now=T0 + 86_399)["messages"]] == [sent["id"]]
+    assert store.history("search-bugs", 0, now=T0 + 86_400)["messages"] == []
+
+
+def test_expired_empty_inbox_reports_gap_even_after_cleanup(db):
+    from hivemind_server.chat import ChatStore
+    store = ChatStore(db)
+    sent = store.send("dm", RECEIVER, SENDER, "hello", "retry-1", now=T0)
+    result = store.inbox(RECEIVER, 0, now=T0 + 86_400)
+    assert result["messages"] == []
+    assert result["gap"] is True
+    assert result["expired_through_seq"] >= sent["seq"]
+
+
+def test_chat_body_cap_counts_utf8_bytes(db):
+    from hivemind_server.chat import ChatStore
+    store = ChatStore(db)
+    with pytest.raises(Invalid):
+        store.send("dm", RECEIVER, SENDER, "\U0001F600" * 65_537, "retry-1", now=T0)
+
+
+def test_project_quota_rejects_new_mail_without_evicting_unexpired(db):
+    from hivemind_server.chat import ChatStore
+    store = ChatStore(db, max_bytes=520)
+    first = store.send("dm", RECEIVER, SENDER, "hello", "retry-1", now=T0)
+    with pytest.raises(Invalid, match="quota"):
+        store.send("dm", RECEIVER, SENDER, "world", "retry-2", now=T0 + 1)
+    assert [m["id"] for m in store.inbox(RECEIVER, 0, now=T0 + 2)["messages"]] == [first["id"]]
+
+
+def test_private_dm_lookup_and_read_cursor_are_authorized(db):
+    from hivemind_server.chat import ChatStore
+    store = ChatStore(db)
+    message = store.send("dm", RECEIVER, SENDER, "secret", "retry-1", now=T0)
+    assert store.message(message["id"], RECEIVER, now=T0 + 1)["body"] == "secret"
+    with pytest.raises(NotFound):
+        store.message(message["id"], ("other", "mac", "codex"), now=T0 + 1)
+    with pytest.raises(Invalid):
+        store.mark_read(("other", "mac", "codex"), "dm", message["seq"], now=T0 + 1)
+    store.mark_read(RECEIVER, "dm", message["seq"], now=T0 + 1)
+    assert store.read_cursor(RECEIVER, "dm") == message["seq"]
+
+
+def test_presence_expires_without_deleting_room_subscription(db):
+    from hivemind_server.chat import ChatStore
+    store = ChatStore(db)
+    store.create_room("search-bugs", "Parser crashes", SENDER)
+    store.join("search-bugs", RECEIVER)
+    store.touch(RECEIVER, "session-1", now=T0)
+    assert [p["session_id"] for p in store.agents(now=T0 + 86_399)] == ["session-1"]
+    assert store.agents(now=T0 + 86_400) == []
+    assert store.subscribed("search-bugs", RECEIVER)

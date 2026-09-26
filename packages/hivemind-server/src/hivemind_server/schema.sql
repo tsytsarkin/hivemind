@@ -25,6 +25,60 @@ CREATE TABLE IF NOT EXISTS chat_subscription (
 CREATE INDEX IF NOT EXISTS ix_chat_subscription_address
   ON chat_subscription(user, device, client);
 
+CREATE TABLE IF NOT EXISTS chat_message (
+  seq            INTEGER PRIMARY KEY AUTOINCREMENT,
+  message_id     TEXT NOT NULL UNIQUE,
+  channel        TEXT NOT NULL CHECK (channel IN ('dm', 'room')),
+  room_id        TEXT REFERENCES chat_room(room_id),
+  target_user    TEXT,
+  target_device  TEXT,
+  target_client  TEXT,
+  sender_user    TEXT NOT NULL,
+  sender_device  TEXT NOT NULL,
+  sender_client  TEXT NOT NULL,
+  sender_session TEXT,
+  target_key     TEXT NOT NULL,
+  body           TEXT NOT NULL,
+  body_bytes     INTEGER NOT NULL,
+  message_kind   TEXT NOT NULL CHECK (message_kind IN ('text', 'progress')),
+  retry_key      TEXT NOT NULL,
+  created_at     REAL NOT NULL,
+  UNIQUE (sender_user, sender_device, sender_client, target_key, retry_key)
+);
+CREATE INDEX IF NOT EXISTS ix_chat_message_target
+  ON chat_message(channel, target_user, target_device, target_client, seq);
+CREATE INDEX IF NOT EXISTS ix_chat_message_room
+  ON chat_message(room_id, seq);
+CREATE INDEX IF NOT EXISTS ix_chat_message_expiry ON chat_message(created_at);
+
+CREATE TABLE IF NOT EXISTS chat_cursor (
+  user           TEXT NOT NULL,
+  device         TEXT NOT NULL,
+  client         TEXT NOT NULL,
+  target_key     TEXT NOT NULL,
+  seq            INTEGER NOT NULL,
+  updated_at     REAL NOT NULL,
+  PRIMARY KEY (user, device, client, target_key)
+);
+CREATE TABLE IF NOT EXISTS chat_expiration_watermark (
+  target_key          TEXT PRIMARY KEY,
+  expired_through_seq INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS chat_session (
+  user             TEXT NOT NULL,
+  device           TEXT NOT NULL,
+  client           TEXT NOT NULL,
+  session_id       TEXT NOT NULL,
+  last_activity_at REAL NOT NULL,
+  PRIMARY KEY (user, device, client, session_id)
+);
+CREATE INDEX IF NOT EXISTS ix_chat_session_last_activity ON chat_session(last_activity_at);
+CREATE TABLE IF NOT EXISTS chat_usage (
+  id            INTEGER PRIMARY KEY CHECK (id=1),
+  counted_bytes INTEGER NOT NULL,
+  message_count INTEGER NOT NULL
+);
+
 -- ── provenance ────────────────────────────────────────────────────────────────
 -- One row per write. tx_id is the monotonic "as-of" coordinate for the revision axis.
 CREATE TABLE IF NOT EXISTS tx (
