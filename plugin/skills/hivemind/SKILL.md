@@ -172,7 +172,21 @@ touching the graph version. Only the authenticated claimant with its current tok
 versioned `unclaimed`/`in_progress`/`complete` statuses. A generic node whose schema cannot
 support all three may still take/release claims with status in sidecar task metadata. Completing
 a room task posts a durable task-completed event in that room and notifies subscribers; no
-roomless task can produce a room post. Defaults are heartbeat every 5 minutes,
+roomless task can produce a room post.
+
+**If you requested the work, you own the result.** Offering or assigning a task is not handing it
+away: when a task you offered (`graph_task_offer`) or assigned (`graph_task_assign`) reaches
+`complete` or `failed`, read what the worker actually produced — the completion post in the room
+via `chat_room_history`, the graph node the work updated, and any artifact or node it names — and
+then act on it. Accept it, integrate it, or say concretely what is still wrong and offer or
+reassign the follow-up. A `complete` status is the worker's claim about its own work, not a
+verdict on it; leaving that claim uninspected is how a task is marked done while nothing
+downstream of it moves. The same applies to an instruction you queued: its terminal state reports
+what the agent did, not that the outcome was what you wanted. Do this while the session is live,
+because chat text is retained only 24 hours — the graph node persists, the room post explaining
+it does not.
+
+Defaults are heartbeat every 5 minutes,
 expiry 1 hour after the last beat; an agent may choose interval 30 seconds–8 hours and expiry
 1 minute–24 hours, at least twice the interval. Total actively renewed work and completed graph
 tasks have **no** 24-hour lifetime. `graph_task_get(node_id, client, session_id, project=<p>)`
