@@ -21,20 +21,24 @@ def attach(mcp) -> None:
 
     @mcp.tool(annotations=WRITE, description="Offer an optional graph work_item in an EXISTING project room. Does not create a room or expire with its messages.")
     @_envelope
-    def graph_task_offer(room: str, title: str, summary: str, client: str, session_id: str) -> dict:
+    def graph_task_offer(room: str, title: str, summary: str, client: str, session_id: str,
+                         required_capabilities: Optional[list[str]] = None) -> dict:
         p, _ = _context(client, session_id)
-        return graph_tasks.offer(p.db, "graph-task-offer", room, title, summary)
+        return graph_tasks.offer(p.db, "graph-task-offer", room, title, summary,
+                                 required_capabilities=required_capabilities)
 
     @mcp.tool(annotations=WRITE, description="Mark an existing graph node as an optional task; optionally link an explicitly created room.")
     @_envelope
     def graph_task_enable(node_id: str, client: str, session_id: str,
-                          room: Optional[str] = None) -> dict:
+                          room: Optional[str] = None,
+                          required_capabilities: Optional[list[str]] = None) -> dict:
         p, _ = _context(client, session_id)
         room_id = None
         if room is not None:
             with p.db.read() as cur:
                 room_id = ChatStore(p.db)._lookup_room(cur, room)
-        return graph_tasks.enable(p.db, "graph-task-enable", node_id, room_id)
+        return graph_tasks.enable(p.db, "graph-task-enable", node_id, room_id,
+                                  required_capabilities=required_capabilities)
 
     @mcp.tool(annotations=WRITE, description="Optional non-exclusive graph task heartbeat; never changes the node revision or claims a task.")
     @_envelope

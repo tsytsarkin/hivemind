@@ -87,3 +87,17 @@ async def test_private_project_blocks_nonmember_task_access(env):
         allowed = await _tool(client, nik, project.name, "graph_task_get", node_id=nid,
                               client="codex", session_id="sid-1")
         assert allowed["ok"] is True
+
+
+@pytest.mark.anyio
+async def test_mcp_offer_in_schema_less_project_records_capability_requirements(env):
+    app, project, _ = env
+    nik = _token(app, "nik", "mac")
+    ChatStore(project.db).create_room("parser", "Parser work", ("nik", "mac", "codex"))
+    async with Lifespan(app), httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                               base_url="http://t", timeout=30) as client:
+        offered = await _tool(client, nik, project.name, "graph_task_offer", room="parser",
+                              title="Audit parser", summary="review diff", client="codex",
+                              session_id="sid-1", required_capabilities=["review"])
+    assert offered["ok"] is True
+    assert offered["task"]["required_capabilities"] == ["review"]

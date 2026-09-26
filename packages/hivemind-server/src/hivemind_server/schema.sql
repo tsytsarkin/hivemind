@@ -392,7 +392,9 @@ CREATE TABLE IF NOT EXISTS graph_task (
   created_tx INTEGER NOT NULL REFERENCES tx(tx_id),
   updated_tx INTEGER NOT NULL REFERENCES tx(tx_id),
   status_mode TEXT NOT NULL DEFAULT 'sidecar'
-    CHECK(status_mode IN ('sidecar', 'versioned'))
+    CHECK(status_mode IN ('sidecar', 'versioned')),
+  required_capabilities_json TEXT NOT NULL DEFAULT '[]'
+    CHECK(json_valid(required_capabilities_json))
 );
 CREATE TABLE IF NOT EXISTS graph_task_activity (
   node_id TEXT NOT NULL REFERENCES graph_task(node_id),

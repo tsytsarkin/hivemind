@@ -55,6 +55,68 @@ def _task(db):
     return node["node_id"]
 
 
+def test_marked_task_exposes_optional_required_capabilities(db):
+    from hivemind_server import graph, graph_tasks
+
+    node_id = _task(db)
+    assert graph_tasks.read(db, node_id)["required_capabilities"] == []
+    second = graph.upsert_node(db, "nik", "finding", {"title": "audit tools"})["node_id"]
+    graph_tasks.enable(db, "nik", second, required_capabilities=["review", "python", "review"])
+    assert graph_tasks.read(Database(db.path), second)["required_capabilities"] == [
+        "python", "review"]
+
+
+def test_required_capabilities_reject_wrong_type_instead_of_becoming_unrestricted(db):
+    from hivemind_server import graph, graph_tasks
+
+    node_id = graph.upsert_node(db, "nik", "finding", {"title": "audit tools"})["node_id"]
+    with pytest.raises(Invalid, match="list"):
+        graph_tasks.enable(db, "nik", node_id, required_capabilities="")
+
+
+def test_eligibility_checks_all_task_tags_against_agent_advertisement(db):
+    from hivemind_server import capabilities, graph, graph_tasks
+
+    node_id = graph.upsert_node(db, "nik", "finding", {"title": "audit tools"})["node_id"]
+    graph_tasks.enable(db, "nik", node_id, required_capabilities=["python", "review"])
+    capabilities.replace(db, OWNER, ["python"])
+    with db.read() as cur:
+        with pytest.raises(Invalid, match="missing required capabilities: review"):
+            graph_tasks.eligible(cur, node_id, OWNER)
+    capabilities.replace(db, OWNER, ["python", "review"])
+    with db.read() as cur:
+        graph_tasks.eligible(cur, node_id, OWNER)
+
+
+def test_offer_uses_builtin_graph_type_if_project_lacks_work_item(db):
+    from hivemind_server import graph_tasks
+    from hivemind_server.chat import ChatStore
+
+    ChatStore(db).create_room("review-work", "Tasks for reviewers", OWNER)
+    task = graph_tasks.offer(db, "nik", "review-work", "Audit change", "Review carefully",
+                             required_capabilities=["review"])
+    assert task["node_type"] == "hivemind_collab_task"
+    assert graph_tasks.read(db, task["node_id"])["required_capabilities"] == ["review"]
+
+
+def test_incompatible_custom_work_item_is_preserved_when_offering_task(db):
+    from hivemind_server import graph_tasks, schemas
+    from hivemind_server.chat import ChatStore
+
+    with db.write("setup") as tx:
+        schemas.define_type(tx.cur, tx, "node", "work_item",
+                            {"type": "object", "properties": {"title": {"type": "string"}},
+                             "required": ["title"], "additionalProperties": False},
+                            status="active")
+    ChatStore(db).create_room("review-work", "Tasks for reviewers", OWNER)
+    task = graph_tasks.offer(db, "nik", "review-work", "Audit change", "Review carefully")
+    assert task["node_type"] == "hivemind_collab_task"
+    with db.read() as cur:
+        row = cur.execute("SELECT json_schema FROM node_type WHERE name='work_item' "
+                          "AND status='active'").fetchone()
+    assert '"additionalProperties":false' in row["json_schema"].replace(" ", "")
+
+
 def _versioned_task(db):
     from hivemind_server import graph_tasks, schemas
     with db.write("setup") as tx:
@@ -260,15 +322,15 @@ def test_heartbeat_clock_never_regresses_or_renews_after_write_lock_expiry(db, m
         graph_tasks.heartbeat(db, nid, claim["claim_token"], OWNER)
 
 
-def test_offering_graph_task_requires_explicit_room_and_schema(db):
+def test_offering_graph_task_requires_explicit_room_and_bootstraps_task_schema(db):
     from hivemind_server import graph_tasks
     from hivemind_server.chat import ChatStore
     with pytest.raises(NotFound, match="room"):
         graph_tasks.offer(db, "nik", "missing", "Audit parser", "Check malformed input")
     assert ChatStore(db).rooms() == []
     ChatStore(db).create_room("parser", "Parser audit", OWNER)
-    with pytest.raises(Invalid, match="schema"):
-        graph_tasks.offer(db, "nik", "parser", "Audit parser", "Check malformed input")
+    offered = graph_tasks.offer(db, "nik", "parser", "Audit parser", "Check malformed input")
+    assert offered["node_type"] == "hivemind_collab_task"
 
 
 def test_offered_graph_task_keeps_versioned_status_after_chat_history_expires(db):

@@ -10,7 +10,7 @@ from typing import Optional
 from .chat import StableAddress, _address
 from .db import Conflict, Database, Invalid, NotFound, SENTINEL
 from .ids import ulid
-from . import schemas
+from . import capabilities, schemas
 
 DEFAULT_INTERVAL = 300
 DEFAULT_EXPIRY = 3600
@@ -34,7 +34,17 @@ def _marker(cur, node_id: str):
     return row
 
 
-def enable(db: Database, agent_id: str, node_id: str, room_id: Optional[str] = None) -> dict:
+def eligible(cur, node_id: str, who: StableAddress) -> None:
+    """Require every task tag from this agent's current project-local advertisement."""
+    task = _marker(cur, node_id)
+    required = json.loads(task["required_capabilities_json"])
+    capabilities.require_tags(required, capabilities.get_in_transaction(cur, _address(who)))
+
+
+def enable(db: Database, agent_id: str, node_id: str, room_id: Optional[str] = None,
+           *, required_capabilities: Optional[list[str]] = None) -> dict:
+    required = capabilities.normalize([] if required_capabilities is None
+                                      else required_capabilities, limit=32)
     with db.write(agent_id, "enable graph task marker") as tx:
         cur = tx.cur
         row = cur.execute("SELECT redirect_to,node_type FROM node WHERE node_id=?", (node_id,)).fetchone()
@@ -69,15 +79,20 @@ def enable(db: Database, agent_id: str, node_id: str, room_id: Optional[str] = N
                 except Invalid:
                     versioned = False
                     break
-        cur.execute("INSERT INTO graph_task VALUES(?,?,?,?,?,?)",
+        cur.execute("INSERT INTO graph_task(node_id,room_id,status,created_tx,updated_tx,"
+                    "status_mode,required_capabilities_json) VALUES(?,?,?,?,?,?,?)",
                     (node_id, room_id, marked if marked in TASK_STATES else "unclaimed",
-                     tx.tx_id, tx.tx_id, "versioned" if versioned else "sidecar"))
+                     tx.tx_id, tx.tx_id, "versioned" if versioned else "sidecar",
+                     json.dumps(required)))
     return read(db, node_id)
 
 
 def offer(db: Database, agent_id: str, room_name: str,
-          title: str, summary: str) -> dict:
-    """Create a versioned work_item and explicit-room marker in one transaction."""
+          title: str, summary: str,
+          *, required_capabilities: Optional[list[str]] = None) -> dict:
+    """Create a graph task in an existing room, bootstrapping a built-in type if needed."""
+    required = capabilities.normalize([] if required_capabilities is None
+                                      else required_capabilities, limit=32)
     if (not isinstance(title, str) or not 1 <= len(title.strip()) <= 256 or
             not isinstance(summary, str) or not 1 <= len(summary.strip()) <= 2048):
         raise Invalid("task title and summary must be nonempty and bounded")
@@ -85,21 +100,34 @@ def offer(db: Database, agent_id: str, room_name: str,
     from .graph import _create_node_tx, get_node
     with db.write(agent_id, "offer graph task") as tx:
         room_id = ChatStore(db)._lookup_room(tx.cur, room_name)
-        exists = tx.cur.execute("SELECT 1 FROM node_type WHERE name='work_item' AND "
-                                "status='active' LIMIT 1").fetchone()
-        if exists is None:
-            raise Invalid("project needs an active work_item schema; propose it with schema_propose")
         props = {"title": title.strip(), "summary": summary.strip(),
                  "status": "unclaimed", "room_id": room_id}
-        try:
-            for state in ("in_progress", "complete"):
-                schemas.validate_props(tx.cur, "node", "work_item", {**props, "status": state})
-            node = _create_node_tx(tx, "work_item", props)
-        except Invalid as exc:
-            raise Invalid("work_item schema must permit title, summary, status and room_id; "
-                          "propose an additive schema update") from exc
-        tx.cur.execute("INSERT INTO graph_task VALUES(?,?,?,?,?,?)",
-                       (node["node_id"], room_id, "unclaimed", tx.tx_id, tx.tx_id, "versioned"))
+        compatible = tx.cur.execute("SELECT 1 FROM node_type WHERE name='work_item' AND "
+                                    "status='active' LIMIT 1").fetchone() is not None
+        if compatible:
+            try:
+                for state in TASK_STATES:
+                    schemas.validate_props(tx.cur, "node", "work_item", {**props, "status": state})
+            except Invalid:
+                compatible = False
+        node_type = "work_item" if compatible else "hivemind_collab_task"
+        if not compatible and schemas.usable_type(tx.cur, "node", node_type) is None:
+            schemas.define_type(tx.cur, tx, "node", node_type,
+                                {"type": "object", "additionalProperties": False,
+                                 "properties": {"title": {"type": "string"},
+                                                "summary": {"type": "string"},
+                                                "status": {"enum": list(TASK_STATES)},
+                                                "room_id": {"type": "string"}},
+                                 "required": ["title", "summary", "status", "room_id"]},
+                                status="active")
+        if not compatible:
+            for state in TASK_STATES:
+                schemas.validate_props(tx.cur, "node", node_type, {**props, "status": state})
+        node = _create_node_tx(tx, node_type, props)
+        tx.cur.execute("INSERT INTO graph_task(node_id,room_id,status,created_tx,updated_tx,"
+                       "status_mode,required_capabilities_json) VALUES(?,?,?,?,?,?,?)",
+                       (node["node_id"], room_id, "unclaimed", tx.tx_id, tx.tx_id,
+                        "versioned", json.dumps(required)))
         _event(tx, node["node_id"], "offer", 0, None, time.time())
     return get_node(db, node_id=node["node_id"])
 
@@ -123,6 +151,7 @@ def _read(cur, node_id: str, t: float) -> dict:
         progress = found["last_progress"] if found else None
     out = {"node_id": node_id, "room_id": task["room_id"], "status": task["status"],
             "status_mode": task["status_mode"],
+            "required_capabilities": json.loads(task["required_capabilities_json"]),
             "effective_status": ("unclaimed" if task["status"] == "in_progress" and not live
                                  else task["status"]),
             "active_agents": [{"address": (r["user"], r["device"], r["client"]),

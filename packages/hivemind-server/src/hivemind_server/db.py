@@ -117,6 +117,7 @@ class Database:
         ("tool_version", "author_user", "TEXT"),
         ("guide_proposal", "author_user", "TEXT"),
         ("graph_task", "status_mode", "TEXT NOT NULL DEFAULT 'sidecar'"),
+        ("graph_task", "required_capabilities_json", "TEXT NOT NULL DEFAULT '[]'"),
         ("chat_message", "task_node_id", "TEXT REFERENCES node(node_id)"),
         ("chat_cursor", "message_id", "TEXT"),
     )
