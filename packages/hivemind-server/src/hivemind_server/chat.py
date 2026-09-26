@@ -5,6 +5,7 @@ import json
 import re
 import sqlite3
 import time
+from pathlib import Path
 from typing import Optional
 
 from .db import Conflict, Database, Invalid, NotFound, now_iso
@@ -68,6 +69,24 @@ class ChatStore:
         self.db = db
         self.max_bytes = max_bytes
         self.max_messages = max_messages
+
+    @classmethod
+    def for_project(cls, db: Database, project_dir: Path) -> "ChatStore":
+        """Load operator-owned project chat caps; fail closed on corrupt settings."""
+        path = project_dir / "chat_limits.json"
+        try:
+            limits = json.loads(path.read_text())
+        except FileNotFoundError:
+            limits = {}
+        except (OSError, ValueError) as exc:
+            raise Invalid("project chat_limits.json cannot be read") from exc
+        if not isinstance(limits, dict) or set(limits) - {"max_bytes", "max_messages"}:
+            raise Invalid("project chat_limits.json must contain only max_bytes and max_messages")
+        max_bytes = limits.get("max_bytes", MAX_CHAT_BYTES)
+        max_messages = limits.get("max_messages", MAX_CHAT_MESSAGES)
+        if any(type(value) is not int or value <= 0 for value in (max_bytes, max_messages)):
+            raise Invalid("project chat_limits.json caps must be positive integers")
+        return cls(db, max_bytes=max_bytes, max_messages=max_messages)
 
     def create_room(self, name: str, description: str, who: StableAddress) -> dict:
         name = _room_name(name)
@@ -212,6 +231,8 @@ class ChatStore:
             if duplicate:
                 if duplicate["body"] != body or duplicate["message_kind"] != kind:
                     raise Conflict("idempotency_key already used for different content")
+                if session_id is not None:
+                    self._touch(cur, who, session_id, t)
                 return {**self._public(duplicate), "duplicate": True}
             byte_count = len(body.encode("utf-8"))
             cur.execute("INSERT INTO chat_usage VALUES(1,0,0) ON CONFLICT(id) DO NOTHING")
@@ -289,21 +310,26 @@ class ChatStore:
             raise NotFound("message not found")
         return self._public(row)
 
-    def _cursor_key(self, cur, target: str, who: StableAddress) -> tuple[str, str, tuple]:
-        if target == "dm":
+    def _cursor_key(self, cur, target: str, who: StableAddress,
+                    channel: str) -> tuple[str, str, tuple]:
+        if channel == "dm":
+            if target != "dm":
+                raise Invalid("DM cursor target must be dm")
             return "channel='dm' AND target_user=? AND target_device=? AND target_client=?", \
                 self._target_key("dm", who), who
+        if channel != "room":
+            raise Invalid("cursor channel must be dm or room")
         room_id = self._lookup_room(cur, target)
         return "channel='room' AND room_id=?", self._target_key("room", room_id), (room_id,)
 
     def mark_read(self, stable: StableAddress, target: str, seq: int,
-                  *, now: Optional[float] = None) -> dict:
+                  *, channel: str = "dm", now: Optional[float] = None) -> dict:
         who = _address(stable)
         if not isinstance(seq, int) or seq <= 0:
             raise Invalid("read cursor must name a fetched message")
         t = time.time() if now is None else float(now)
         with self.db.write_light() as cur:
-            clause, key, args = self._cursor_key(cur, target, who)
+            clause, key, args = self._cursor_key(cur, target, who, channel)
             row = cur.execute(f"SELECT 1 FROM chat_message WHERE {clause} "
                               "AND seq=? AND created_at>?", (*args, seq, t - MESSAGE_TTL)).fetchone()
             if row is None:
@@ -311,12 +337,14 @@ class ChatStore:
             cur.execute("INSERT INTO chat_cursor VALUES(?,?,?,?,?,?) ON CONFLICT(user,device,client,target_key) "
                         "DO UPDATE SET seq=MAX(seq,excluded.seq),updated_at=excluded.updated_at",
                         (*who, key, seq, t))
-        return {"up_to_seq": seq, "target": target}
+            stored = cur.execute("SELECT seq FROM chat_cursor WHERE user=? AND device=? "
+                                 "AND client=? AND target_key=?", (*who, key)).fetchone()["seq"]
+        return {"up_to_seq": stored, "target": target}
 
-    def read_cursor(self, stable: StableAddress, target: str) -> int:
+    def read_cursor(self, stable: StableAddress, target: str, *, channel: str = "dm") -> int:
         who = _address(stable)
         with self.db.read() as cur:
-            _, key, _ = self._cursor_key(cur, target, who)
+            _, key, _ = self._cursor_key(cur, target, who, channel)
             row = cur.execute("SELECT seq FROM chat_cursor WHERE user=? AND device=? "
                               "AND client=? AND target_key=?", (*who, key)).fetchone()
         return row["seq"] if row else 0

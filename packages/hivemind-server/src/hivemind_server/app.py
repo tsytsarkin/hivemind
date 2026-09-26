@@ -306,7 +306,8 @@ def build_app(cfg: Optional[Config] = None) -> Starlette:
         def _chat_route(p=project, require_auth=cfg.require_auth):
             async def endpoint(ws):
                 from . import chat_ws as _c
-                await _c.websocket_endpoint(ws, p.name, p.dir, require_auth=require_auth)
+                await _c.websocket_endpoint(ws, p.name, p.dir, require_auth=require_auth,
+                                            identities=identities)
             return endpoint
         # The ws route comes FIRST: Starlette takes the first matching route, and
         # Mount("/p/<name>") would otherwise swallow this path into the MCP app, which has no

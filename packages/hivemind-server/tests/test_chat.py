@@ -138,6 +138,27 @@ def test_private_dm_lookup_and_read_cursor_are_authorized(db):
     assert store.read_cursor(RECEIVER, "dm") == message["seq"]
 
 
+def test_room_named_dm_has_a_separate_read_cursor_from_the_dm_inbox(db):
+    from hivemind_server.chat import ChatStore
+    store = ChatStore(db)
+    store.create_room("dm", "Discuss delivery", SENDER)
+    private = store.send("dm", RECEIVER, SENDER, "private", "private-1", now=T0)
+    public = store.send("room", "dm", SENDER, "public", "public-1", now=T0)
+    assert store.mark_read(RECEIVER, "dm", private["seq"], now=T0 + 1)["up_to_seq"] == private["seq"]
+    assert store.mark_read(RECEIVER, "dm", public["seq"], channel="room", now=T0 + 1)["up_to_seq"] == public["seq"]
+    assert store.read_cursor(RECEIVER, "dm") == private["seq"]
+    assert store.read_cursor(RECEIVER, "dm", channel="room") == public["seq"]
+
+
+def test_mark_read_returns_persisted_monotonic_cursor(db):
+    from hivemind_server.chat import ChatStore
+    store = ChatStore(db)
+    earlier = store.send("dm", RECEIVER, SENDER, "one", "retry-1", now=T0)
+    later = store.send("dm", RECEIVER, SENDER, "two", "retry-2", now=T0 + 1)
+    store.mark_read(RECEIVER, "dm", later["seq"], now=T0 + 2)
+    assert store.mark_read(RECEIVER, "dm", earlier["seq"], now=T0 + 3)["up_to_seq"] == later["seq"]
+
+
 def test_presence_expires_without_deleting_room_subscription(db):
     from hivemind_server.chat import ChatStore
     store = ChatStore(db)

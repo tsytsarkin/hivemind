@@ -1,6 +1,7 @@
 """MCP interface to project-scoped durable chat and canonical WebSocket notifications."""
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
 from . import bus_ws, chat_ws
@@ -11,13 +12,16 @@ from .envelope import WRITE, current_project, envelope as _envelope
 from .identity import Identity, current_identity
 from .projects_meta import can_access
 
+log = logging.getLogger(__name__)
+
 
 def attach(mcp, cfg, identities) -> None:
     def _project():
         return current_project()
 
     def _store() -> ChatStore:
-        return ChatStore(_project().db)
+        p = _project()
+        return ChatStore.for_project(p.db, p.dir)
 
     def _addressed(client: str, session_id: str) -> tuple[StableAddress, str]:
         user, device, actual_client, session = stable_identity(current_identity(), client, session_id)
@@ -60,7 +64,7 @@ def attach(mcp, cfg, identities) -> None:
         p = _project()
         if not bus_ws.is_mounted(p.dir):
             raise bus_ws.not_mounted_error(p.name)
-        key = _hub().mint_key((*stable, session))
+        key = _hub().mint_key((*stable, session), current_identity().credential_hash)
         _store().touch(stable, session)
         ws_url = _ws_url()
         command = (f'python3 "$HOME/.hivemind/bus-listen.py" '
@@ -132,7 +136,6 @@ def attach(mcp, cfg, identities) -> None:
             raise Invalid("recipient user/device does not exist or lacks project access")
         store = _store()
         message = store.send("dm", recipient, who, body, idempotency_key, session_id=session)
-        _touch(store, who, session)
         live = _notify(recipient, message) > 0
         return {"id": message["id"], "seq": message["seq"],
                 "expires_at": message["expires_at"], "notified_live": live,
@@ -169,12 +172,15 @@ def attach(mcp, cfg, identities) -> None:
         store = _store()
         message = store.send("room", name, who, body, idempotency_key,
                              kind=kind, session_id=session)
-        _touch(store, who, session)
         delivered = 0
-        for recipient in store.subscribers(name):
-            if recipient != who and can_access(Identity(recipient[0], recipient[1]),
-                                               _project().meta):
-                delivered += _notify(recipient, message, room=name)
+        try:
+            for recipient in store.subscribers(name):
+                if recipient != who and can_access(Identity(recipient[0], recipient[1]),
+                                                   _project().meta):
+                    delivered += _notify(recipient, message, room=name)
+        except Exception:
+            # The post was committed. A notification lookup cannot undo the accepted send.
+            log.exception("room notification lookup failed after persistent send")
         return {"id": message["id"], "seq": message["seq"],
                 "expires_at": message["expires_at"], "notified_live": delivered > 0,
                 "notified_count": delivered, "duplicate": message["duplicate"]}
@@ -186,7 +192,7 @@ def attach(mcp, cfg, identities) -> None:
         who, session = _addressed(client, session_id)
         store = _store()
         result = store.history(name, after_seq, limit)
-        result["last_read_seq"] = store.read_cursor(who, name)
+        result["last_read_seq"] = store.read_cursor(who, name, channel="room")
         _touch(store, who, session)
         return result
 
@@ -195,7 +201,7 @@ def attach(mcp, cfg, identities) -> None:
     def chat_room_mark_read(name: str, client: str, session_id: str, up_to_seq: int) -> dict:
         who, session = _addressed(client, session_id)
         store = _store()
-        result = store.mark_read(who, name, up_to_seq)
+        result = store.mark_read(who, name, up_to_seq, channel="room")
         _touch(store, who, session)
         return result
 

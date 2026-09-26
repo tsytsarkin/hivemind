@@ -1,8 +1,10 @@
 """Durable MCP chat must work without an online receiver or the legacy recent cache."""
 
+import json
+
 import httpx
 import pytest
-from starlette.testclient import TestClient
+from starlette.testclient import TestClient, WebSocketDisconnect
 
 from conftest import Lifespan, _call, _headers, _post, _rpc
 from hivemind_server import bus_ws
@@ -61,6 +63,65 @@ async def test_sender_cannot_create_mailbox_for_unregistered_device(env):
                           to_device="someone-elses-device", to_client="claude", client="codex",
                           session_id="sid-1", body="secret", idempotency_key="dm-1")
     assert out["ok"] is False
+
+
+@pytest.mark.anyio
+async def test_accepted_room_post_survives_subscriber_lookup_failure(env, monkeypatch):
+    app, project, _ = env
+    nik = _token(app, "nik", "mac")
+    store = ChatStore(project.db)
+    store.create_room("parser-work", "Debug parser crashes", ("nik", "mac", "codex"))
+
+    def unavailable(*args):
+        raise OSError("notification lookup unavailable")
+
+    monkeypatch.setattr(ChatStore, "subscribers", unavailable)
+    async with Lifespan(app), httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                               base_url="http://t", timeout=30) as client:
+        out = await _tool(client, nik, project.name, "chat_room_post", name="parser-work",
+                          client="codex", session_id="sid-1", body="persist this",
+                          idempotency_key="post-1")
+        history = await _tool(client, nik, project.name, "chat_room_history",
+                              name="parser-work", client="codex", session_id="sid-1")
+    assert out["ok"] is True and out["notified_live"] is False
+    assert [message["id"] for message in history["messages"]] == [out["id"]]
+
+
+@pytest.mark.anyio
+async def test_accepted_dm_does_not_require_second_presence_write(env, monkeypatch):
+    app, project, _ = env
+    nik = _token(app, "nik", "mac")
+    ana = _token(app, "ana", "laptop")
+
+    def unavailable(*args):
+        raise OSError("second presence write unavailable")
+
+    monkeypatch.setattr(ChatStore, "touch", unavailable)
+    async with Lifespan(app), httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                               base_url="http://t", timeout=30) as client:
+        out = await _tool(client, nik, project.name, "chat_send", to_user="ana",
+                          to_device="laptop", to_client="claude", client="codex",
+                          session_id="sid-1", body="persist this", idempotency_key="dm-1")
+    assert out["ok"] is True
+    assert [m["id"] for m in ChatStore(project.db).inbox(("ana", "laptop", "claude"))["messages"]] == [out["id"]]
+
+
+@pytest.mark.anyio
+async def test_project_chat_limits_reject_over_quota_without_discarding_unexpired_mail(env):
+    app, project, _ = env
+    nik = _token(app, "nik", "mac")
+    _token(app, "ana", "laptop")
+    (project.dir / "chat_limits.json").write_text(json.dumps({"max_bytes": 520, "max_messages": 1}))
+    async with Lifespan(app), httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                               base_url="http://t", timeout=30) as client:
+        first = await _tool(client, nik, project.name, "chat_send", to_user="ana",
+                            to_device="laptop", to_client="claude", client="codex",
+                            session_id="sid-1", body="hello", idempotency_key="dm-1")
+        second = await _tool(client, nik, project.name, "chat_send", to_user="ana",
+                             to_device="laptop", to_client="claude", client="codex",
+                             session_id="sid-1", body="world", idempotency_key="dm-2")
+    assert first["ok"] is True and second["ok"] is False and "quota" in second["error"]
+    assert [m["id"] for m in ChatStore(project.db).inbox(("ana", "laptop", "claude"))["messages"]] == [first["id"]]
 
 
 @pytest.mark.anyio
@@ -127,19 +188,69 @@ async def test_signed_canonical_connection_binds_all_identity_parts(env):
     assert joined["ok"] is True
     assert joined["peer"] == "nik-mac-codex-sid-1"
     assert joined["listen_key"].startswith("hk2.")
-    assert chat_ws.hub_for(project.dir).verify_key(joined["listen_key"]) == (
+    assert chat_ws.hub_for(project.dir).verify_key(joined["listen_key"])[0] == (
         "nik", "mac", "codex", "sid-1")
+
+
+@pytest.mark.anyio
+async def test_revoked_token_cannot_reconnect_with_its_unexpired_chat_key(env):
+    app, project, _ = env
+    nik = _token(app, "nik", "mac")
+    identities = IdentityStore(app.state.cfg.identities_path)
+    _token(app, "nik", "mac")  # user and device still have access; only original token is revoked
+    with TestClient(app) as client:
+        result = client.post("/mcp", json=_rpc("tools/call", {
+            "name": "chat_connect", "arguments": {"project": project.name,
+                                                   "client": "codex", "session_id": "sid-1"}}),
+            headers=_headers(nik, "tools/call", "chat_connect"))
+        joined = _call(result)
+        identities.refresh_if_changed()
+        identities._tokens.pop(nik)
+        identities.save()
+        with pytest.raises(WebSocketDisconnect):
+            with client.websocket_connect(f'/p/{project.name}/chat/ws?key={joined["listen_key"]}'):
+                pass
+
+
+@pytest.mark.anyio
+async def test_revoked_socket_gets_no_further_live_notifications(env):
+    from hivemind_server import chat_ws
+    app, project, _ = env
+    nik = _token(app, "nik", "mac")
+    identities = IdentityStore(app.state.cfg.identities_path)
+    fingerprint = identities.verify(nik).credential_hash
+    hub = chat_ws.hub_for(project.dir)
+
+    class Socket:
+        def __init__(self):
+            self.frames = []
+            self.closed = False
+
+        async def send_text(self, frame):
+            self.frames.append(frame)
+
+        async def close(self, *, code):
+            self.closed = True
+
+    socket = Socket()
+    await hub.attach(("nik", "mac", "codex", "sid-1"), socket,
+                     credential_hash=fingerprint, identities=identities)
+    identities._tokens.pop(nik)
+    identities.save()
+    assert await hub.notify(("nik", "mac", "codex"), {"type": "chat", "id": "m1"}) == 0
+    assert socket.frames == [] and socket.closed and not hub.online(("nik", "mac", "codex"))
 
 
 def test_signed_socket_receives_persisted_room_post_from_subscription(env):
     from hivemind_server import chat_ws
     app, project, _ = env
     nik = _token(app, "nik", "mac")
-    _token(app, "ana", "laptop")
+    ana = _token(app, "ana", "laptop")
     store = ChatStore(project.db)
     store.create_room("parser-work", "Debug parser crashes", ("nik", "mac", "codex"))
     store.join("parser-work", ("ana", "laptop", "claude"))
-    key = chat_ws.hub_for(project.dir).mint_key(("ana", "laptop", "claude", "sid-2"))
+    key = chat_ws.hub_for(project.dir).mint_key(("ana", "laptop", "claude", "sid-2"),
+                                                 IdentityStore(app.state.cfg.identities_path).verify(ana).credential_hash)
 
     with TestClient(app) as client:
         with client.websocket_connect(f"/p/{project.name}/chat/ws?key={key}") as socket:

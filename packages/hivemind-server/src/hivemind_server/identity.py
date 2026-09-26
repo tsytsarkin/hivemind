@@ -8,6 +8,7 @@ verbatim).
 """
 from __future__ import annotations
 
+import hashlib
 import re
 import secrets
 from contextvars import ContextVar
@@ -41,6 +42,7 @@ class Identity:
     token_id: str = ""
     legacy: bool = False
     project_scope: Optional[str] = None      # legacy tokens reach ONLY this project
+    credential_hash: str = ""                 # revocable chat key binding, never the bearer token
 
     @property
     def is_admin(self) -> bool:
@@ -68,7 +70,17 @@ class IdentityStore(JsonFileStore):
         if not user:
             return None                # malformed row (operator typo) — refuse just this token
         return Identity(user=user, device=info.get("device", "?"),
-                        role=info.get("role", "member"), token_id=token[:12])
+                        role=info.get("role", "member"), token_id=token[:12],
+                        credential_hash=hashlib.sha256(token.encode()).hexdigest())
+
+    def active_credential(self, user: str, device: str, fingerprint: str) -> bool:
+        """Re-read the operator-owned token file for revocation on each live delivery."""
+        if not isinstance(fingerprint, str) or len(fingerprint) != 64:
+            return False
+        self.refresh_if_changed()
+        return any(info.get("user") == user and info.get("device") == device and
+                   secrets.compare_digest(hashlib.sha256(token.encode()).hexdigest(), fingerprint)
+                   for token, info in self._tokens.items())
 
     def mint(self, user: str, device: str = "?", role: str = "member") -> str:
         validate_username(user)
