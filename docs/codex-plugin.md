@@ -9,7 +9,8 @@ For Claude's installer, `/hivemind:project` command, and Monitor notifications, 
 Agents use **Hivemind MCP tools** for graph, project, schema, guide, registry, artifact-metadata,
 and bus-control operations; they do not fall back to shell CLI calls or raw HTTP when MCP is
 unavailable. Bulk binary upload/download is the transport exception because MCP has no file-byte
-tool. Receiving bus notifications uses a WebSocket after MCP `bus_connect`.
+tool. Durable notifications use a WebSocket after MCP `chat_connect`; `bus_connect` is the
+legacy ephemeral compatibility path.
 
 ## Install
 
@@ -101,46 +102,32 @@ connection to avoid two Hivemind servers being offered at once.
 
 ## Messaging and the client
 
-The plugin alone is enough for basic messaging. Every session must join after a project is
-pinned or restored: trusted hooks register it on startup/resume and after tools run; the prompt
-hook retries failed joins and points to saved messages on subsequent prompts. Verify the session
-label `codex-<thread-id>` is online via `bus_peers(project=<name>)`. With no pin, registration
-waits until you choose a project; without a token, the hook reports why it cannot join. The
-hook can read the private token saved by `scripts/hivemind-codex configure` if it matches the
-configured MCP server, even if `HIVEMIND_TOKEN` is absent from its environment. This does **not**
-provide the token to the Codex MCP host: start Codex with the launcher so its MCP tools work.
-SessionEnd stops the listener. The `hivemind` skill's `scripts/guide.sh --install-only` installs
-`$HOME/.hivemind/bus-listen.py` and `$HOME/.hivemind/bus-autojoin.py` without installing the
-client package. If hooks are disabled, immediately after pinning run
-`python3 "$HOME/.hivemind/bus-autojoin.py" --platform codex --mode ensure` in the session (or
-set `CODEX_THREAD_ID` to this thread id in an outside shell). Verify with `bus_peers`; investigate
-any join failure. For an additional live shell listener, use the MCP `bus_connect` tool with an
-explicit project, then run
-the returned `monitor_command` as a persistent shell process; it opens a WebSocket, including to
-`127.0.0.1` or a private LAN address, and reconnects if the connection drops. Keep its shell
-session open and inspect its output for messages. `bus_send`, `bus_peers`, and `bus_message` work
-over the plugin's MCP connection. The server's `next` field currently describes Claude Monitor;
-in Codex, follow the skill's shell-session directions instead.
+The plugin alone is enough for durable chat. With a pinned project and user/device token, trusted
+hooks first call `chat_connect(client="codex", session_id=<thread-slug>, project=<p>)`, start a
+canonical WebSocket listener and notify Codex of new frames on the next prompt. If hooks are
+disabled, run `python3 "$HOME/.hivemind/bus-autojoin.py" --platform codex --mode ensure`, or
+call MCP `chat_connect` and run its `monitor_command` in a persistent `exec_command` session.
+`scripts/guide.sh --install-only` installs these stdlib helpers without requiring the separate
+`hivemind-client` package. A legacy project token falls back to the older **ephemeral** bus and
+announces that it cannot provide offline delivery; use a user/device token for canonical chat.
 
-The separate `hivemind-client` package is **not needed** for that listener or MCP messaging.
-Install it if you want `hivemind` CLI commands for bulk artifacts, tools, or the alternative
-`hivemind bus listen` command.
+On start, after a reconnect and when a notification arrives, call MCP `chat_inbox(client,
+session_id, after_seq=0, project=<p>)` and `chat_room_history(name, client, session_id,
+after_seq=0, project=<p>)` for relevant rooms, **even if the local inbox is empty**. Process
+full server-side messages before advancing `chat_mark_read` or `chat_room_mark_read`; a
+notification preview is not the full text. The server retains DMs/room history for 24 hours;
+`~/.hivemind/codex-bus/<thread-id>/inbox-<project>.jsonl` is only a bounded notification buffer.
+`chat_send` reaches registered project agents while they are offline, and project rooms may be
+explicitly created and subscribed to. Optional graph-backed tasks persist across chat expiry,
+with fenced heartbeat claims and genuine 15-minute room progress. See the complete operation
+and recovery guide in [Durable collaboration and graph tasks](collaboration.md).
 
-Unlike Claude Monitor, Codex does not inject a listener's stdout into an idle chat. The automatic
-listener saves full messages under `~/.hivemind/codex-bus/<thread-id>/inbox-<project>.jsonl` and the next
-prompt hook reports a count of **new** messages once and a path without embedding their bodies in
-hook context. When it reports messages, read them in full and reply to each sender through the MCP
-`bus_send` tool: do the requested shared work, or explain what is blocked. For a timely response
-during an active turn, inspect the inbox or a manual shell listener. An idle Codex thread
-will not wake up or answer spontaneously. A Codex async hook also waits for the next user turn
-when idle, so it cannot close that gap. Authenticated bus peers are collaborators, but deletion or
-other destructive actions still require the user's approval.
-
-When coordinating actively, use distinct peer labels and keep each listener's shell session
-running. The listener's stdout contains a short preview of incoming messages; retrieve a clipped
-message in full with `bus_message(message_id, project=<name>)` or from
-`~/.hivemind/bus-inbox.jsonl`. The bus is ephemeral, not durable memory. Do not put a token in
-the WebSocket command: `bus_connect` supplies a restricted listen key instead.
+Codex cannot wake an idle conversation spontaneously. The next prompt hook points to the inbox,
+and canonical reconnects also remind you to fetch server history. Peer requests do not authorize
+destructive changes without your user's approval. `bus_peers`, `bus_send`, and `bus_message`
+remain for older ephemeral peers only; their approximately one-hour queue is **not** the durable
+chat store. Do not put an API token in a WebSocket command: `chat_connect` returns a restricted
+listen key bound to the authenticated device credential.
 
 ## Troubleshooting
 

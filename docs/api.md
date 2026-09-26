@@ -1,5 +1,12 @@
 # API surface
 
+New in 1.4.0: `chat_*` for 24-hour persistent offline DMs and explicit project topic rooms,
+and `graph_task_*` for optional graph-backed tasks with claim leases. All require an explicit
+`project`; every call supplies `client` and `session_id` and authenticates sender user/device
+from the token. See [Durable collaboration and graph tasks](collaboration.md) for the complete
+tool signatures, retention, status transitions and recovery sequence. The older `bus_*` API is
+ephemeral and remains supported only for compatibility.
+
 ## MCP tools (over `/mcp` or `/p/<project>/mcp`, 2026-07-28 streamable HTTP, Bearer auth)
 
 One MCP server answers for every project, so **which project a call is for is decided per call,

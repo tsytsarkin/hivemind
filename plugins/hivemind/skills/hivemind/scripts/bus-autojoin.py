@@ -7,6 +7,7 @@ hook context contains only a count/path, not message bodies.
 """
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -57,8 +58,19 @@ def _session(event):
     return ""
 
 
+def _chat_session(host_session):
+    """Bound long host IDs without ever conflating two IDs at the 64-byte boundary."""
+    if re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", host_session):
+        return host_session
+    prefix = re.sub(r"[^a-z0-9_-]", "-", host_session.lower()).strip("-")[:47] or "sid"
+    suffix = hashlib.sha256(host_session.encode()).hexdigest()[:16]
+    return prefix + "-" + suffix
+
+
 def _paths(session, platform):
-    slug = SLUG.sub("-", session)[:100]
+    cleaned = SLUG.sub("-", session)
+    slug = (cleaned if cleaned == session and len(cleaned) <= 100 else
+            cleaned[:83] + "-" + hashlib.sha256(session.encode()).hexdigest()[:16])
     base = Path.home() / ".hivemind"
     return base / ("session-%s.json" % slug), base / ("%s-bus" % platform) / slug
 
@@ -131,7 +143,7 @@ def _rpc(url, token, name, arguments):
     params = {"name": name, "arguments": arguments,
               "_meta": {"io.modelcontextprotocol/protocolVersion": PROTO,
                         "io.modelcontextprotocol/clientInfo": {"name": "hivemind-bus-autojoin",
-                                                             "version": "1.3.0"},
+                                                             "version": "1.4.0"},
                         "io.modelcontextprotocol/clientCapabilities": {}}}
     body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
                        "params": params}).encode()
@@ -227,10 +239,16 @@ def _frames(path, start=0):
                     frame = json.loads(line)
                 except ValueError:
                     continue
-                if isinstance(frame, dict) and frame.get("type") in ("message", "broadcast"):
-                    mid = frame.get("id")
-                    if isinstance(mid, (str, int)) and mid:
-                        ids.append(str(mid))
+                if isinstance(frame, dict):
+                    kind = frame.get("type")
+                    mid = frame.get("ts") if kind == "hello" and frame.get("v") == 2 else frame.get("id")
+                    if isinstance(mid, (str, int, float)) and mid:
+                        if kind in ("message", "broadcast"):
+                            ids.append(str(mid))
+                        elif kind == "chat":
+                            ids.append("chat:" + str(mid))
+                        elif kind == "hello" and frame.get("v") == 2:
+                            ids.append("resume:" + str(mid))
     except OSError:
         return [], start
     return ids, offset
@@ -277,6 +295,8 @@ def _notice(inbox, state_path, state):
         pending, last = len(ids) - index, ids[-1]
     if not pending:
         return ""
+    durable = any(str(value).startswith(("chat:", "resume:"))
+                  for value in (fresh if resumable else ids[index:]))
     if last:
         state["seen_message"] = last
     state["seen_inbox"] = inbox.name
@@ -285,9 +305,15 @@ def _notice(inbox, state_path, state):
         _save(state_path, state)
     except OSError:
         pass
-    return ("Hivemind bus: %d new message(s) from peer agents saved at %s. Read every full "
-            "message now, work on its request, and reply to its sender via the MCP bus_send "
-            "tool. Ask the user before deleting files or other destructive actions."
+    if durable:
+        return ("Hivemind durable chat: %d new notification(s) or reconnect at %s. Call "
+                "MCP chat_inbox and chat_room_history for relevant rooms now; fetch complete "
+                "messages, then chat_mark_read / chat_room_mark_read only after processing. "
+                "Server history, not this local file, is authoritative for 24 hours."
+                % (pending, inbox))
+    return ("Hivemind legacy bus: %d new message(s) from peer agents saved at %s. Read every "
+            "full message now, work on its request, and reply via MCP bus_send. "
+            "This legacy inbox is ephemeral."
             % (pending, inbox))
 
 
@@ -355,15 +381,22 @@ def run(event, platform="codex", mode="ensure"):
         state = {"project": project, "endpoint": endpoint, "attempted_at": time.time(), **cursor}
         _save(state_path, state)
         label = "%s-%s" % (platform, SLUG.sub("-", session)[:48])
+        chat_session = _chat_session(session)
         try:
-            reply = _rpc(endpoint, token, "bus_connect", {"project": project, "label": label})
+            reply = (_rpc(endpoint, token, "chat_connect", {"project": project,
+                      "client": platform, "session_id": chat_session}) if chat_session else {})
+            durable = bool(reply.get("listen_key"))
+            if not durable:
+                # Older deployments or legacy project-only tokens keep their original, explicitly
+                # ephemeral bus. Never describe this fallback as offline message delivery.
+                reply = _rpc(endpoint, token, "bus_connect", {"project": project, "label": label})
             ws = reply.get("ws_url", "")
             key = reply.get("listen_key", "")
             url = urlsplit(ws)
             dest = urlsplit(endpoint)
             if (not isinstance(key, str) or not key or url.scheme not in ("ws", "wss")
                     or url.hostname != dest.hostname or _port(url) != _port(dest)
-                    or url.path != "/p/%s/bus/ws" % project
+                    or url.path != "/p/%s/%s/ws" % (project, "chat" if durable else "bus")
                     or reply.get("project", project) != project):
                 return ("Hivemind bus not joined for project=%s: bus_connect returned no usable "
                         "WebSocket/listen key. %s" % (project, notice())).strip()
@@ -375,11 +408,18 @@ def run(event, platform="codex", mode="ensure"):
                                      "--instance-id", marker], env=child_env, stdin=subprocess.DEVNULL,
                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                     close_fds=True, start_new_session=True)
-            state.update({"pid": proc.pid, "marker": marker, "peer": label})
+            state.update({"pid": proc.pid, "marker": marker,
+                          "peer": reply.get("peer", label) if durable else label,
+                          "protocol": "chat" if durable else "legacy-bus"})
             _save(state_path, state)
-            return ("Hivemind bus joined as %s for project=%s. Messages are saved in %s. "
-                    "Codex/Claude without Monitor does not wake an idle chat; read new inbox "
-                    "messages and reply via MCP at the next prompt." % (label, project, inbox))
+            if durable:
+                return ("Hivemind durable chat joined as %s for project=%s. Call chat_inbox and "
+                        "chat_room_history for subscribed rooms NOW to catch up on 24-hour "
+                        "server history; local notifications at %s do not wake an idle chat."
+                        % (reply.get("peer", label), project, inbox))
+            return ("Hivemind legacy ephemeral bus joined as %s for project=%s. Offline "
+                    "messages are NOT preserved; local inbox at %s is not server history."
+                    % (label, project, inbox))
         except HTTPError as error:
             return ("Hivemind bus not joined for project=%s: MCP answered HTTP %d. Check your "
                     "server/token and project access. %s" % (project, error.code, notice())).strip()

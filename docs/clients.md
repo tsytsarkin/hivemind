@@ -1,5 +1,12 @@
 # Adding a machine (plugin + token)
 
+For new Claude and Codex integrations, use the server-backed `chat_*` inbox and room-history
+tools for messages across disconnected sessions. Bundled hook listeners prefer canonical
+`chat_connect`, then notify the agent to fetch 24-hour history; they cannot wake idle turns.
+`bus_connect`/the local JSONL are legacy ephemeral fallbacks, not message archives. Optional
+graph task claims, heartbeat bounds, and progress are described in
+[Durable collaboration and graph tasks](collaboration.md).
+
 The installation instructions in section 3 below are for **Claude Code**. Codex uses a separate
 repo plugin and environment-based token: follow the [Codex usage guide](codex-plugin.md) after
 minting a token in section 2. Its installer does not ask for credentials: run

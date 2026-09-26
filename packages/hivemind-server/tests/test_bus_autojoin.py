@@ -165,6 +165,64 @@ def test_only_unread_messages_are_announced_and_the_offset_advances(mod, tmp_pat
     assert state["seen_message"] == "m5"
 
 
+def test_durable_chat_notification_points_to_server_catchup_not_legacy_bus(mod, tmp_path):
+    inbox = tmp_path / "inbox-p.jsonl"
+    state_path = tmp_path / "listener.json"
+    inbox.write_text(json.dumps({"v": 2, "type": "chat", "id": "m1", "channel": "dm"}) + "\n")
+    note = mod._notice(inbox, state_path, {})
+    assert "chat_inbox" in note and "chat_room_history" in note
+    assert "bus_send" not in note and "bus_message" not in note
+
+
+def test_autojoin_chooses_canonical_chat_and_reminds_server_catchup(mod, tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    session = "abcd-efgh"
+    pin = tmp_path / ".hivemind" / ("session-%s.json" % session)
+    pin.parent.mkdir()
+    pin.write_text(json.dumps({"project": "demo"}))
+    monkeypatch.setattr(mod, "_endpoint", lambda platform: "http://127.0.0.1:8787/mcp")
+    monkeypatch.setattr(mod, "_token", lambda platform, endpoint: "token")
+    seen = []
+
+    def fake_rpc(endpoint, token, name, args):
+        seen.append((name, args))
+        return {"ws_url": "ws://127.0.0.1:8787/p/demo/chat/ws", "listen_key": "hk2.test"}
+
+    class Child:
+        pid = 12345
+
+    monkeypatch.setattr(mod, "_rpc", fake_rpc)
+    monkeypatch.setattr(mod.subprocess, "Popen", lambda *a, **k: Child())
+    note = mod.run({"session_id": session}, "codex", "ensure")
+    assert seen[0] == ("chat_connect", {"project": "demo", "client": "codex",
+                                           "session_id": session})
+    assert "chat_inbox" in note and "24-hour" in note
+
+
+def test_canonical_session_slug_cannot_collapse_distinct_long_host_ids(mod):
+    left = "session-" + "a" * 80 + "left"
+    right = "session-" + "a" * 80 + "right"
+    one, two = mod._chat_session(left), mod._chat_session(right)
+    assert one != two
+    assert all(1 <= len(value) <= 64 and value.isascii() and value.lower() == value
+               for value in (one, two))
+
+
+def test_long_host_session_ids_have_distinct_pin_and_listener_paths(mod, tmp_path, monkeypatch):
+    helper = CLAUDE / "hivemind-project.py"
+    monkeypatch.setenv("HOME", str(tmp_path))
+    first = "s" * 110 + "left"
+    second = "s" * 110 + "right"
+    one_pin, one_dir = mod._paths(first, "claude")
+    two_pin, two_dir = mod._paths(second, "claude")
+    assert one_pin != two_pin and one_dir != two_dir
+    for sid, expected in ((first, one_pin), (second, two_pin)):
+        monkeypatch.setenv("HIVEMIND_SESSION_ID", sid)
+        call = subprocess.run([sys.executable, str(helper), "--pin", "demo"],
+                              capture_output=True, text=True, check=True)
+        assert call.returncode == 0 and expected.is_file()
+
+
 def test_the_count_survives_a_rotation_without_re_announcing_it(mod, tmp_path):
     """The offset addresses one file. A rotation replaces the inbox with a shorter one, so the
     offset stops meaning anything and the id scan has to take over — otherwise every message in

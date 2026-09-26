@@ -97,6 +97,34 @@ def test_listener_never_emits_a_clippable_line(tmp_path):
                 assert "\n" not in line
 
 
+def test_durable_notification_directs_receiver_to_server_history(tmp_path):
+    render = _load_listener().render
+    inbox = tmp_path / "notifications.jsonl"
+    mid = "01ABCDEFGHABCDEFGHABCDEFG"
+    dm = {"v": 2, "type": "chat", "channel": "dm", "id": mid, "from": "nik-mac-codex",
+          "preview": "check parser", "ts": 1700000000.0}
+    room = {**dm, "channel": "room", "room": "parser"}
+    dm_line = render(dm, inbox=inbox)
+    room_line = render(room, inbox=inbox)
+    assert mid in dm_line and "chat_inbox" in dm_line
+    assert mid in room_line and "chat_room_history" in room_line
+    assert "bus_message" not in (dm_line + room_line)
+    assert [json.loads(line)["id"] for line in inbox.read_text().splitlines()] == [mid, mid]
+
+
+def test_revoked_canonical_listener_requests_canonical_reconnect(tmp_path, monkeypatch, capsys):
+    mod = _load_listener()
+
+    def refused(*args, **kwargs):
+        raise mod.WSRefused("revoked")
+
+    monkeypatch.setattr(mod, "_once", refused)
+    code = mod.main(["--url", "ws://localhost/p/demo/chat/ws", "--key", "hk2.revoked",
+                     "--once", "--inbox", str(tmp_path / "inbox.jsonl")])
+    assert code == 2
+    assert "chat_connect" in capsys.readouterr().out
+
+
 def test_guide_sh_installs_the_listener(tmp_path, monkeypatch):
     """The Monitor command names a fixed $HOME path, so loading the skill must put it there."""
     dst = tmp_path / "nested" / "bus-listen.py"

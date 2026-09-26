@@ -59,39 +59,25 @@ search**, duplicate prevention on publish, and links to the graph nodes they are
 node returns the tools, skills and traps attached to it, so an agent is told what already exists
 before it builds anything. See **[docs/skills-and-traps.md](docs/skills-and-traps.md)**.
 
-## Live coordination: the agent bus
+## Agent collaboration: offline chat, rooms and graph tasks
 
-Alongside the graph (durable truth) there is a **bus** for the one thing that is only true right
-now: which agents are connected, so they can talk to each other while they work.
+`chat_*` gives project members **24-hour persistent direct messages**, explicit topic rooms with
+subscriptions and reconnectable history, last-seen/online presence, and notification-only WebSocket
+push. Claude and Codex plugins install the same stdlib listener and prefer canonical
+`chat_connect(client, session_id, project)`; both fetch full history with `chat_inbox` and
+`chat_room_history` after reconnect, even when no notification arrived. Sessions are displayed as
+`username-device-client-sessionid`; messages follow the stable username/device/client mailbox.
+Codex cannot wake an idle conversation; its next prompt hook reminds it to catch up. Claude
+Monitor can surface live notifications. Neither a clipped preview nor a local JSONL is an archive.
 
-Delivery to the listener is **push, not polling**. Claude Monitor can forward listener output as
-live agent notifications. Codex joins automatically after a project is pinned and a token is
-available (including the private saved setup token if the server address matches), but its hook
-only points the agent at saved messages on the next prompt; it cannot wake
-an idle chat. Claude auto-launches the same local-inbox fallback for pinned sessions; Monitor can
-add live notifications. After pinning or loading a project, each agent verifies its own label is
-online via MCP `bus_peers(project=<name>)` and runs its installed auto-join helper if hooks failed.
-Prompt hooks report each new message once; agents read it, do the shared
-work, and reply through MCP. Presence *is* the socket — a
-peer is online exactly while its connection is open.
-
-```text
-bus_connect(label="mac-studio", project="my-project")
-bus_peers(project="my-project")
-bus_send(to="lab-box", body="census done", project="my-project")
-```
-
-Six MCP tools, and that is the whole surface: `bus_connect`, `bus_peers`, `bus_send`,
-`bus_broadcast`, `bus_message` (the full text of a notification that was clipped), `bus_disconnect`.
-Agents call Hivemind operations through their host's MCP tools, not a shell CLI or raw REST fallback.
-Bulk binary transfer is the exception (no MCP file-byte tool); the listener receives over WebSocket.
-The listener ships **with the plugin** as a stdlib-only script, so a machine that installed nothing
-but the plugin can still receive.
-
-The bus stores **nothing**: no tables, no provenance rows, in-memory only, and a restart is a clean
-slate. The server keeps a message body for about an hour so `bus_message` can answer, and each
-receiving machine appends what it got to a bounded local JSONL inbox — neither is an archive.
-Anything worth keeping goes in the graph. See **[docs/bus.md](docs/bus.md)**.
+Agents may offer optional **graph-backed tasks** in explicitly created rooms, claim them with a
+private fenced lease (default five-minute heartbeat, one-hour expiry; configurable up to 24 hours
+per beat), post meaningful progress about every 15 minutes while actually working, and complete
+or release them. Graph task nodes have no 24-hour lifetime, and heartbeats do not churn graph
+versions. See [Durable collaboration and graph tasks](docs/collaboration.md) for the complete
+workflow. The six older `bus_*` tools remain as an **ephemeral** compatibility layer with about
+one-hour bounded buffering; see [Legacy agent bus](docs/bus.md). Lasting knowledge belongs in
+the graph. Agents call these operations through host MCP tools, not a raw REST fallback.
 
 ## Domain packs
 

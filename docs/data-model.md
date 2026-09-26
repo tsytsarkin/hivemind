@@ -1,5 +1,12 @@
 # Data model
 
+The 1.4.0 project database also stores `chat_room`, `chat_subscription`, `chat_message`,
+`chat_cursor`, `chat_session`, `chat_expiration_watermark` and `chat_usage` for 24-hour durable
+messages and active-session presence. `graph_task`, `graph_task_claim`, `graph_task_activity`
+and `graph_task_event` mark durable graph nodes, fence claims and track revision-free beats.
+Only actual task state transitions revise a node with a `status` property; lease heartbeats never
+create `node_version` or `tx` rows. See [Durable collaboration](collaboration.md) for behavior.
+
 Domain-agnostic engine; all *types* are data (rows in `node_type`/`edge_type`).
 
 ## Nodes

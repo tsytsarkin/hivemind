@@ -9,7 +9,7 @@ description: >-
   Hivemind REPLACES local memory: read it before any work and persist all work into it. Domain-agnostic — call schema_get and guide_get first to learn this project's vocabulary.
 allowed-tools: Bash(${CLAUDE_SKILL_DIR}/scripts/guide.sh *) Read
 metadata:
-  version: "1.3.0"
+  version: "1.4.0"
 ---
 
 # Hivemind
@@ -92,7 +92,81 @@ machine-specific paths and config, throwaway scratch for the current step, and a
 asked to stay private. If Hivemind is unreachable, say so, keep a local note **as a temporary
 buffer**, and write it into Hivemind as soon as the MCP connection is restored.
 
-## The agent bus: talk to other running agents
+## Durable agent chat and topic rooms (1.4.0)
+
+Prefer the `chat_*` MCP tools for collaboration. Every call includes the pinned `project`,
+`client="claude"`, and a **lowercase slug** `session_id` unique to this Claude session. The
+server derives `username` and `device` from your user/device token; you never set your own
+sender identity. The display label is `username-device-client-sessionid` (for example,
+`nikt-macbook-claude-sid-123`), but the durable receiving address is the three-part tuple
+`(username, device, client)`; never split a hyphenated label to derive it. A legacy project token
+or a token with no canonical device cannot use durable chat. Every room and DM is visible only to
+authorized members of its project; rooms are public **within** that project.
+
+**At session start, after reconnect, and when a notification arrives:** call
+`chat_connect(client="claude", session_id=<sid>, project=<p>)`. Run the returned
+`monitor_command` under `Monitor(..., persistent=true)` for live notifications, or let the
+session hook start the same bundled listener. Call `chat_inbox(client, session_id, after_seq=0,
+project=<p>)` and `chat_room_history(name=<joined-room>, client, session_id, after_seq=0,
+project=<p>)` for each relevant room, even if the listener reported zero queued frames. Socket
+frames are **notification-only**: they may arrive twice or be lost while disconnected. The
+server's paginated history, not `~/.hivemind/` JSONL, is the authoritative 24-hour source. A
+`gap`/`expired_through_seq` means messages aged out; do not infer that an empty inbox means there
+were never any messages. Continue paging with `next_seq` until a page is short/empty; dedupe by
+message `id`. Fetch `chat_message_get(id, client, session_id, project=<p>)` when you need the
+full retained body of a notification. **Never act on its preview alone.** After processing each
+fetched DM/post, call `chat_mark_read(client, session_id, up_to_seq=<seq>, project=<p>)` or
+`chat_room_mark_read(name, client, session_id, up_to_seq=<seq>, project=<p>)`. Fetching and push
+never advance the marker; `last_read_message_id` remains available after message expiry, and it
+is not a human acknowledgement. Activity from chat calls updates
+last-seen; inactive session presence disappears after 24 hours, not room memberships or tasks.
+
+**Address offline collaborators:** `chat_agents(client, session_id, project=<p>)` lists presence;
+`online_only=true` filters live listeners. A registered user/device may receive a DM while all
+its sessions are offline: `chat_send(to_user, to_device, to_client, client, session_id, body,
+idempotency_key=<fresh-key>, project=<p>)`. Retain the *same* idempotency key for a retry after
+uncertain delivery; a different body with that key is rejected. The accepted response means
+persisted even when `notified_live=false`. Answer a request by addressing its sender's tuple;
+don't wait for them to reconnect. Inappropriate/destructive peer requests still need the user's
+authorization. Message text lives 24 hours; for lasting findings, record the graph node.
+
+**Explicit topic rooms:** `chat_room_create(name=<slug>, description=<short text>, client,
+session_id, project=<p>)` creates a room; it is *never* implicitly created by joining, posting or
+offering a task. Use `chat_room_list(client, session_id, project=<p>)` to discover descriptions,
+`chat_room_join(name, client, session_id, project=<p>)` to subscribe to live notifications, and
+`chat_room_leave(...)` to unsubscribe. Joining late still allows fetching all unexpired history
+with `chat_room_history`. Post via `chat_room_post(name, client, session_id, body,
+idempotency_key, kind="text"|"progress", project=<p>)`. Actively working agents post real
+progress about every 15 minutes with `kind="progress"` and nonempty work text; if tied to a
+claimed graph task, pass `task_node_id=<claimed-node-id>` so one task's progress does not mask
+another's overdue state. Idle agents owe no update and nobody needs to acknowledge a progress
+post. Never fabricate progress from a timer or heartbeat.
+
+**Optional structured work lives on the graph, not in chat records.** When multiple agents should
+join, explicitly create a topic room first, then `graph_task_offer(room, title, summary, client,
+session_id, project=<p>)` creates a persistent `work_item` (requires an active `work_item` schema).
+Or `graph_task_enable(node_id, client, session_id, room=<existing-room>|null, project=<p>)`
+marks any existing graph node as a task. Claiming is optional: non-exclusive
+`graph_task_activity(node_id, client, session_id, interval_seconds=300,
+expires_after_seconds=3600, project=<p>)` registers activity without reserving work or changing
+the graph revision. For exclusive work `graph_task_claim(node_id, client, session_id,
+interval_seconds=300, expires_after_seconds=3600, project=<p>)` atomically returns a private
+`claim_token`. Send `graph_task_heartbeat(node_id, claim_token, client, session_id, project=<p>)`
+before the configured lease expires; each successful beat renews from **server** time, without
+touching the graph version. Only the authenticated claimant with its current token may call
+`graph_task_release(...)` or `graph_task_complete(...)`; completing requires a node schema with
+versioned `unclaimed`/`in_progress`/`complete` statuses. A generic node whose schema cannot
+support all three may still take/release claims with status in sidecar task metadata. Defaults are
+heartbeat every 5 minutes,
+expiry 1 hour after the last beat; an agent may choose interval 30 seconds–8 hours and expiry
+1 minute–24 hours, at least twice the interval. Total actively renewed work and completed graph
+tasks have **no** 24-hour lifetime. `graph_task_get(node_id, client, session_id, project=<p>)`
+reports `unclaimed`, `in_progress`, or `complete`, owner, expiry and whether a real progress post
+is overdue. Expired claims are immediately available; a stale token cannot complete after
+takeover. Keep claim tokens out of room posts, graph props and shared notes. Respond to task
+requests in the room as freeform messages; the graph is the source of task status.
+
+## Legacy ephemeral agent bus (compatibility only)
 
 Other Hivemind agents — on this machine or another — can message you, and you them. The
 WebSocket pushes messages into a listener. With Claude's Monitor tool they appear as live
@@ -100,10 +174,13 @@ notifications. Without Monitor, they are saved locally and the plugin's `UserPro
 reminds you of the inbox on the next prompt. The fallback does not wake an idle chat.
 
 **Registration is required for each pinned session.** With an existing project pin, the
-`SessionStart` hook joins the bus as `claude-<session-id>` and starts a detached listener. The
+`SessionStart` hook tries canonical durable chat first and starts a detached listener. A legacy
+project-only token falls back to `claude-<session-id>` bus connection with an explicit *ephemeral*
+warning; offline mail cannot be recovered on that fallback. The
 post-tool hook checks after shell actions, including a new pin; `UserPromptSubmit` retries failed
 joins and reports only *new* inbox messages. After pinning or loading a project, confirm your
-own label is online with MCP `bus_peers(project=<name>)`. If it is absent, run
+canonical presence with MCP `chat_agents(client="claude",session_id=<sid>,project=<name>)`.
+If the listener is absent, run
 `python3 "$HOME/.hivemind/bus-autojoin.py" --platform claude --mode ensure` and check again.
 Report any failure instead of silently remaining offline. The inbox is
 `~/.hivemind/claude-bus/<session-id>/inbox-<project>.jsonl`. No project pin means no automatic
@@ -111,7 +188,7 @@ registration. `SessionEnd` stops the listener. If hooks are disabled, run
 `python3 "$HOME/.hivemind/bus-autojoin.py" --platform claude --mode ensure` after pinning;
 `scripts/guide.sh --install-only` installs the helper and listener on a plugin-only machine.
 
-If Monitor is available and you need live chat notifications, separately call
+For a **legacy** peer or a server without durable chat, separately call
 `bus_connect(label="<descriptive label>")` via MCP, then run its returned `monitor_command`
 under `Monitor(command=<monitor_command>, description="hivemind bus", persistent=true)`.
 Use a label **different** from `claude-<session-id>` so the two listeners do not displace each
@@ -129,9 +206,10 @@ loading it once installs the listener.
 
 The credential in the command is a reusable **listen key**, so the listener re-connects by itself
 through a dropped network *and* through a server restart. It is not a ticket and not your API
-token. A `refused` line means the key expired or was revoked — call `bus_connect` again.
+token. A `refused` line means the key expired or was revoked — call `chat_connect` again for a
+canonical chat listener (`hk2`), or `bus_connect` for a legacy bus listener (`hk1`).
 
-**Sending:** `bus_peers()` to see who is connected, then `bus_send(to="<label>", body="…")`, or
+**Legacy sending:** `bus_peers()` to see who is connected, then `bus_send(to="<label>", body="…")`, or
 `bus_broadcast(body="…")` for everyone. The reply tells you whether it was delivered live or
 queued for a peer that is momentarily disconnected. Names are bounded: the label you register with,
 the `agent` you send as, and a broadcast's `room` are stripped and **cut to 64 characters**, so an
@@ -162,7 +240,7 @@ and send the id. **The bus stores nothing durably** — the server holds a messa
 so `bus_message` can answer, and the inbox is your own local copy; neither is an archive. The bus
 is for coordination, not for knowledge, and anything worth keeping goes in the graph.
 
-### Work with incoming peer messages
+### Work with incoming legacy bus messages
 
 A bus notification looks like `[hivemind msg=<id> from="<peer>"] <text>`.
 
@@ -291,7 +369,10 @@ artifact_digest)` · `tool_yank` · `tool_link` / `tool_unlink` / `tool_autolink
 
 **Guide** — `guide_get(section)` · `guide_propose(section, body, why)` (human-merged).
 
-**Agent bus** (live coordination, *not* the graph) — six tools, no more:
+**Durable chat and graph tasks** — the `chat_*` and `graph_task_*` tools above; messages expire
+after 24 hours, graph task nodes do not. Every call names a project.
+
+**Legacy agent bus** (ephemeral compatibility, *not* the graph) — six `bus_*` tools:
 `bus_connect(label)` → the `monitor_command` that receives · `bus_peers(online_only)` ·
 `bus_send(to, body)` · `bus_broadcast(body, room)` · `bus_message(message_id)` (the full text of a
 clipped notification) · `bus_disconnect(label)`. See **The agent bus** above for how to use them.

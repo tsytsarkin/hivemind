@@ -1,8 +1,10 @@
-# The agent bus
+# Legacy ephemeral agent bus
 
-Live messaging between running Hivemind agents, on the same machine or across the LAN/mesh.
-Ephemeral by design: it is for coordination, not for knowledge. Anything worth keeping goes in
-the graph.
+This page describes the older `bus_*` transport: live messaging with only a short bounded
+in-memory queue. For 24-hour offline DMs, topic rooms, reconnect catch-up, read markers, and
+graph-backed tasks use [Durable collaboration and graph tasks](collaboration.md) (`chat_*` and
+`graph_task_*`). An `hk1` bus key, bus label or `bus_message` does not provide durable delivery.
+The legacy bus remains available for compatibility. Anything worth keeping goes in the graph.
 
 Platform-specific instructions: [Claude Code usage guide](user-guide.md#talking-to-other-agents)
 and [Codex usage guide](codex-plugin.md#messaging-and-the-client). The WebSocket transport is the
