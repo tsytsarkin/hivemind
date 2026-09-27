@@ -161,54 +161,97 @@ rather than a node:
 git show a016880^:docs/user-guide.md
 ```
 
-## Using it
+## Install the agent plugins
 
-Choose the guide for your agent platform: **Claude Code** (installed plugin
-or the one-session launcher) or **Codex** (repo marketplace and local MCP).
-Both explain project selection and the rule to pass `project=<name>` on every call.
-Before either install, start the server and mint a **user token** there with
-`hivemind-admin mint-token --user <you> --device <machine>`. Claude's plugin accepts `server_url`
-and sensitive `api_token` as installer config. Codex's plugin installer does **not** prompt for
-Hivemind credentials: run `scripts/hivemind-codex configure` from this checkout to enter the
-server root URL and token before installing, then launch CLI sessions with
-`scripts/hivemind-codex`. See the platform guides for storage and desktop-app caveats.
+Run **one server** for all your machines ([server setup](deploy/DEPLOY.md)). The plugin talks to
+the server over MCP; neither agent platform needs the separate Python `hivemind` client for MCP
+tools or for the bundled message listener. Install that client only if you want its artifact CLI.
 
-## Adding machines
-
-**One server, many clients** — don't run a second server per machine (each has its own database,
-so it would be a separate graph). The server listens on `127.0.0.1` by default; set
-`HIVEMIND_HOST=0.0.0.0` to serve your LAN/Tailscale. To connect another machine, mint a token on
-the server, then follow the Claude Code guide or
-Codex guide. For Claude Code:
+On the **server**, mint a user token for each machine (not an older project-specific token):
 
 ```sh
-hivemind-admin mint-token --user <name> --device laptop          # on the server
-claude plugin marketplace add tsytsarkin/hivemind                # on the new machine
+hivemind-admin mint-token --user <your-name> --device <machine-name>
+```
+
+Keep the returned `hm_…` token private. The server root is `http://127.0.0.1:8787` if it runs
+on the same machine. On another machine, use the server's reachable HTTPS/LAN address instead;
+the server binds only to loopback unless you set `HIVEMIND_HOST=0.0.0.0`. These commands assume
+you have this repo checked out on the **agent machine** and are in its root directory.
+
+### Codex CLI install
+
+```sh
+./scripts/hivemind-codex configure     # prompts for server ROOT URL and token (hidden input)
+codex plugin marketplace list          # if 'personal' is absent, add this checkout:
+codex plugin marketplace add .
+codex plugin add hivemind@personal
+codex plugin list
+./scripts/hivemind-codex               # starts a NEW Codex session with MCP credentials
+```
+
+Use `http://127.0.0.1:8787` as the URL for a local server, **not** `/p/<project>` or `/mcp`.
+`configure` stores the token at `~/.hivemind/codex-token` (mode `0600`), saves the address in
+`~/.hivemind/codex-server.json`, and sets the plugin's MCP URL in
+`plugins/hivemind/.mcp.json` **before** installation; it does not store the token in the repo.
+The checkout's MCP URL may appear modified after configuration; do not commit a machine-specific
+address. The Codex plugin installer itself does not ask for Hivemind credentials. The launch
+wrapper exports them **before** Codex starts its MCP server; launching `codex` directly without
+`HIVEMIND_TOKEN` leaves the Hivemind MCP connection unauthenticated.
+
+Ask Codex to use `hivemind-project` to list projects and pin one. Until a project is pinned,
+MCP calls to the server root are refused; thereafter every call must pass `project=<name>`.
+The trusted session hooks then re-inject the pin and launch the bundled listener. No separate
+shell listener or Python client installation is required. For a changed checkout or server URL,
+run `configure` again if needed, then refresh the cached installation:
+
+```sh
+codex plugin remove hivemind@personal
+codex plugin add hivemind@personal
+./scripts/hivemind-codex               # new session; existing sessions keep old MCP state
+```
+
+Codex in the ChatGPT desktop app can install the repo plugin from its Plugins Directory after
+opening this repo (the marketplace is `.agents/plugins/marketplace.json`); restart the app after
+adding the marketplace. The CLI wrapper only launches **Codex CLI**: the desktop app must also
+receive `HIVEMIND_TOKEN` in its own startup environment, or its MCP server cannot authenticate.
+The Codex IDE extension does not support plugins. See the
+[official Codex plugin guide](https://developers.openai.com/codex/plugins/build) for marketplace
+and desktop-app setup.
+
+### Claude Code install
+
+For a permanent user installation from **this checkout**:
+
+```sh
+claude plugin marketplace add .
 claude plugin install hivemind@hivemind-marketplace --scope user \
-  --config server_url=http://<server-ip>:8787 --config api_token=hm_…
+  --config server_url=http://127.0.0.1:8787 --config api_token=<user-token>
 ```
-Passing `api_token` as a shell argument may expose it in shell history or process listings; the
-prompting launcher below avoids that command-line exposure. See the Claude guide for details.
-Or skip installing altogether — `scripts/hivemind-claude` prompts for an address (default
-`localhost:8787`) and a token, loads the plugin for that session only via `--plugin-dir`, and
-forwards any other arguments to `claude`:
+
+Replace the URL and token for your server. You can instead add the released GitHub marketplace
+with `claude plugin marketplace add tsytsarkin/hivemind` (it will not include unpublished local
+changes). **Caution:** passing `api_token` on the command line can expose it in shell history or
+process listings. On a borrowed machine, or to avoid putting the token in argv, use the one-session
+launcher from this checkout instead of installing:
 
 ```sh
-scripts/hivemind-claude                      # prompt, then launch
-scripts/hivemind-claude --url <host>:8787 --resume
+./scripts/hivemind-claude                         # prompts for URL and token
+./scripts/hivemind-claude --url 127.0.0.1:8787 --resume
 ```
-The address it passes on is the **server root**, as an install's is, so a launched session has no
-project until `/hivemind:project` pins one — the launcher says so at launch. `--project <name>` uses
-the older `http://host:8787/p/<name>` shape instead.
 
-Nothing is written to your permanent configuration, and the token lives in a `0600` file that is
-removed when the session ends. Good for a borrowed machine or a VM.
+The launcher keeps the token in a private `0600` temporary file and removes it on exit; the
+default server is `localhost:8787`. With either installation, start a **new Claude session** and
+run `/hivemind:project` to select and pin a project. Calls use `project=<name>`; the plugin's
+session hook restores the pin and connects the bundled message listener. To update an installed
+GitHub marketplace plugin, run `claude plugin marketplace update hivemind-marketplace`, then
+`claude plugin update hivemind@hivemind-marketplace` and restart Claude Code. With the one-session
+launcher, update the checkout and start a new session instead.
 
-Claude's two installation routes, step by step: **docs/user-guide.md**.
-For Codex installation, project pinning, and listener setup: **docs/codex-plugin.md**.
-Configure its address/token before installing with `scripts/hivemind-codex configure`, then launch
-CLI sessions with `scripts/hivemind-codex` so the token is available before MCP initialization.
-Minting and moving tokens, and revocation: **docs/clients.md**.
+If MCP tools do not appear after installation, check that the server URL is its root, the token is
+a server-level **user** token, the plugin is enabled, and you started a new session after setting
+credentials. On Codex, use `codex plugin list` and launch via `./scripts/hivemind-codex`; on
+Claude Code, inspect `/plugin` and its Hivemind configuration. A pinned project is also required
+before graph reads or writes. Agents on different machines share the same server, not copies of it.
 
 ## Reproducible dependencies
 
