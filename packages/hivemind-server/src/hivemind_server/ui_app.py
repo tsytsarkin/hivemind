@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hmac
 import time
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 from starlette.applications import Starlette
@@ -28,6 +29,13 @@ CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' 
 def _json(data, status=200):
     return JSONResponse(data, status_code=status, headers={"cache-control": "no-store",
                                                "x-content-type-options": "nosniff"})
+
+
+def _server_version():
+    try:
+        return version("hivemind-server")
+    except PackageNotFoundError:
+        return None
 
 
 def build_ui_app(cfg, registry, identities: IdentityStore) -> Starlette:
@@ -80,7 +88,8 @@ def build_ui_app(cfg, registry, identities: IdentityStore) -> Starlette:
             failures[ip].append(now)
             return _json({"error": "invalid server user token"}, 401)
         secret, csrf = sessions.create(who)
-        answer = _json({"user": who.user, "device": who.device, "csrf_token": csrf})
+        answer = _json({"user": who.user, "device": who.device, "csrf_token": csrf,
+                        "version": _server_version()})
         answer.set_cookie(COOKIE, secret, httponly=True, samesite="strict",
                           secure=req.url.scheme == "https", max_age=24 * 3600, path="/")
         return answer
@@ -110,7 +119,8 @@ def build_ui_app(cfg, registry, identities: IdentityStore) -> Starlette:
             # idle/absolute TTL, or the credential may have been revoked, in between. Indexing
             # None here turned that race into a 500 instead of the 401 it actually is.
             return _json({"error": "login required"}, 401)
-        return _json({"user": who.user, "device": who.device, "csrf_token": current[1]})
+        return _json({"user": who.user, "device": who.device,
+                      "csrf_token": current[1], "version": _server_version()})
 
     async def shell(_req: Request):
         return FileResponse(ASSETS / "index.html", media_type="text/html",

@@ -203,6 +203,7 @@ CREATE TABLE IF NOT EXISTS agent_capability (
   tags_json     TEXT NOT NULL CHECK (json_valid(tags_json)),
   updated_at    REAL NOT NULL,
   human_managed INTEGER NOT NULL DEFAULT 0 CHECK (human_managed IN (0,1)),
+  approved_tags_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(approved_tags_json)),
   PRIMARY KEY (user, device, client)
 );
 CREATE TABLE IF NOT EXISTS agent_config (
@@ -219,7 +220,8 @@ CREATE TABLE IF NOT EXISTS project_capability (
   name        TEXT PRIMARY KEY,
   description TEXT NOT NULL,
   created_at  REAL NOT NULL,
-  updated_at  REAL NOT NULL
+  updated_at  REAL NOT NULL,
+  approved    INTEGER NOT NULL DEFAULT 0 CHECK (approved IN (0,1))
 );
 CREATE TABLE IF NOT EXISTS chat_usage (
   id            INTEGER PRIMARY KEY CHECK (id=1),

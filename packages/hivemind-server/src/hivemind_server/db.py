@@ -122,6 +122,8 @@ class Database:
         ("chat_message", "sender_origin", "TEXT NOT NULL DEFAULT 'agent'"),
         ("chat_message", "summary", "TEXT"),
         ("agent_capability", "human_managed", "INTEGER NOT NULL DEFAULT 0"),
+        ("agent_capability", "approved_tags_json", "TEXT NOT NULL DEFAULT '[]'"),
+        ("project_capability", "approved", "INTEGER NOT NULL DEFAULT 0"),
         ("chat_cursor", "message_id", "TEXT"),
         ("chat_session", "model_name", "TEXT"),
         ("chat_session", "work_status", "TEXT"),
@@ -152,6 +154,8 @@ class Database:
                 if cols and column not in cols:
                     con.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
             con.executescript(_SCHEMA_PATH.read_text())
+            from .client_alias_migration import preflight as preflight_client_alias
+            preflight_client_alias(con)
             # Existing project-local advertisements and task requirements predate the catalog.
             # Preserve them as editable definitions with an empty legacy description; no claim
             # or required tag changes during this compatibility migration.
@@ -161,6 +165,63 @@ class Database:
             con.execute("INSERT OR IGNORE INTO project_capability(name,description,created_at,updated_at) "
                         "SELECT DISTINCT value,'',0,0 FROM graph_task, "
                         "json_each(graph_task.required_capabilities_json)")
+            approval_marker = "capability_approval_migrated_v1"
+            if con.execute("SELECT 1 FROM meta WHERE key=?", (approval_marker,)).fetchone() is None:
+                con.execute("BEGIN IMMEDIATE")
+                try:
+                    if con.execute("SELECT 1 FROM meta WHERE key=?", (approval_marker,)).fetchone() is None:
+                        con.execute("UPDATE project_capability SET approved=CASE WHEN "
+                                    "TRIM(description)<>'' THEN 1 ELSE 0 END")
+                        # A capability that some in-flight task already requires stays approved.
+                        # Those requirements were the operating reality before the upgrade, and
+                        # leaving them unapproved makes the task unclaimable BY ANYONE — the
+                        # backfill above gives them an empty description, so the rule on the line
+                        # above would otherwise strip every pre-existing requirement.
+                        con.execute(
+                            "UPDATE project_capability SET approved=1 WHERE name IN ("
+                            " SELECT rq.value FROM graph_task t,"
+                            " json_each(t.required_capabilities_json) rq"
+                            " WHERE t.status<>'complete')")
+                        # human_managed is NOT evidence that a human approved these tags. It is a
+                        # ROW flag, and 1.5.1's replace_in_transaction let an AGENT overwrite a
+                        # human-managed row whenever it passed the current expected_updated_at —
+                        # the guard only fired when that was None — leaving the flag set. The
+                        # 1.5.1 skill told agents to do exactly that. Backfilling from it granted
+                        # self-declared tags on upgrade: measured against a real database, an
+                        # agent that declared a curated `admin` on such a row came out of the
+                        # migration holding it, which is the state 1.5.2 exists to remove.
+                        # No per-tag audit exists to recover who set what, so the only tags kept
+                        # are the ones carrying their own evidence — a live claim or a standing
+                        # assignment the agent is already committed to, which DEPLOY.md promises
+                        # keeps working. Everything else returns to pending for a human to
+                        # approve; that is deliberate, and the operator is told so.
+                        con.execute(
+                            "UPDATE agent_capability SET approved_tags_json=("
+                            " SELECT COALESCE(json_group_array(value), json('[]')) FROM ("
+                            "  SELECT DISTINCT je.value AS value"
+                            "    FROM json_each(agent_capability.tags_json) je"
+                            "   WHERE je.value IN ("
+                            "          SELECT rq.value FROM graph_task t,"
+                            "               json_each(t.required_capabilities_json) rq"
+                            "           WHERE EXISTS (SELECT 1 FROM graph_task_claim c"
+                            "                          WHERE c.node_id=t.node_id"
+                            "                            AND c.token_digest IS NOT NULL"
+                            "                            AND c.holder_user=agent_capability.user"
+                            "                            AND c.holder_device=agent_capability.device"
+                            "                            AND c.holder_client=agent_capability.client)"
+                            "              OR EXISTS (SELECT 1 FROM graph_task_assignment a"
+                            "                          WHERE a.node_id=t.node_id"
+                            "                            AND a.assignee_user=agent_capability.user"
+                            "                            AND a.assignee_device=agent_capability.device"
+                            "                            AND a.assignee_client=agent_capability.client))))")
+                        con.execute("INSERT INTO meta(key,value) VALUES(?,?)",
+                                    (approval_marker, "1"))
+                    con.execute("COMMIT")
+                except Exception:
+                    con.execute("ROLLBACK")
+                    raise
+            from .client_alias_migration import migrate as migrate_client_alias
+            migrate_client_alias(con)
             # Add a first arrival record for projects that persisted instructions before the
             # delivery cursor existed. Handoffs append later arrivals, never reorder IDs.
             con.execute("INSERT INTO agent_instruction_delivery(instruction_id,recipient_user,"

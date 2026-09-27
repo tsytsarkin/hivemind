@@ -17,6 +17,8 @@ def _task(db, required=None):
     ChatStore(db).create_room("reviews", "Review work", OWNER)
     teams.add_member(db, "reviews", OWNER, OWNER)
     teams.add_member(db, "reviews", PEER, OWNER)
+    for tag in sorted(set(required or [])):
+        capabilities.define(db, tag, f"Project-user-approved {tag} work")
     return graph_tasks.offer(db, "setup", "reviews", "Audit code", "Inspect the diff",
                              required_capabilities=required)["node_id"]
 
@@ -25,7 +27,7 @@ def test_offline_assignment_reserves_task_without_starting_heartbeat(db):
     from hivemind_server import assignments
 
     node_id = _task(db, ["review"])
-    capabilities.replace(db, OWNER, ["review"])
+    capabilities.replace(db, OWNER, ["review"], managed_by_ui=True)
     assigned = assignments.assign(db, "manager", node_id, OWNER)
     assert assigned["state"] == "assigned_waiting"
     assert graph_tasks.read(db, node_id)["effective_status"] == "unclaimed"
@@ -56,7 +58,7 @@ def test_ineligible_agent_can_neither_be_assigned_nor_claim(db):
     from hivemind_server import assignments
 
     node_id = _task(db, ["review", "python"])
-    capabilities.replace(db, OWNER, ["review"])
+    capabilities.replace(db, OWNER, ["review"], managed_by_ui=True)
     with pytest.raises(Invalid, match="python"):
         assignments.assign(db, "manager", node_id, OWNER)
     with pytest.raises(Invalid, match="python"):
@@ -68,15 +70,15 @@ def test_losing_capability_fences_active_claim_and_releases_waiting_assignment(d
     from hivemind_server import assignments
 
     node_id = _task(db, ["review"])
-    capabilities.replace(db, OWNER, ["review"])
+    capabilities.replace(db, OWNER, ["review"], managed_by_ui=True)
     assignments.assign(db, "manager", node_id, OWNER)
-    capabilities.replace(db, OWNER, [])
+    capabilities.replace(db, OWNER, [], managed_by_ui=True)
     assert assignments.view(db, node_id)["state"] == "available"
 
-    capabilities.replace(db, OWNER, ["review"])
+    capabilities.replace(db, OWNER, ["review"], managed_by_ui=True)
     assignments.assign(db, "manager", node_id, OWNER)
     claim = graph_tasks.claim(db, "owner", node_id, OWNER)
-    capabilities.replace(db, OWNER, [])
+    capabilities.replace(db, OWNER, [], managed_by_ui=True)
     assert graph_tasks.read(db, node_id)["effective_status"] == "unclaimed"
     assert assignments.view(db, node_id)["state"] == "available"
     with pytest.raises(Conflict):
@@ -126,9 +128,10 @@ def test_new_required_capability_revokes_ineligible_claim(db):
     from hivemind_server import assignments
 
     node_id = _task(db, ["review"])
-    capabilities.replace(db, OWNER, ["review"])
+    capabilities.replace(db, OWNER, ["review"], managed_by_ui=True)
     assignments.assign(db, "manager", node_id, OWNER)
     claim = graph_tasks.claim(db, "owner", node_id, OWNER)
+    capabilities.define(db, "python", "Project-user-approved Python work")
     updated = graph_tasks.set_requirements(db, "manager", node_id, ["python"])
     assert updated["required_capabilities"] == ["python"]
     assert assignments.view(db, node_id)["state"] == "available"

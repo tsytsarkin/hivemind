@@ -43,6 +43,14 @@ function app(fetch) {
   return {ids, context, run: code => vm.runInContext(code, context)};
 }
 
+test('console version uses authenticated server metadata and has an unknown fallback', () => {
+  const {ids, run} = app();
+  run("showVersion({version:'1.5.2'})");
+  assert.equal(ids.get('server-version').textContent, 'v1.5.2');
+  run('showVersion({version:null})');
+  assert.equal(ids.get('server-version').textContent, 'Version unavailable');
+});
+
 test('task cards hide full summary while preserving visible status and required tags', () => {
   const {ids, run} = app();
   run(`S.rooms=[{room_id:'r1',name:'reviews'}];
@@ -115,6 +123,7 @@ test('filtered task list keeps unfiltered assignment choices and server-wide cou
       counts:{available:0,assigned_waiting:1,in_progress:0,complete:0},older_cursor:null} :
       path.includes('/rooms') ? {rooms:[],older_cursor:null} :
       path.includes('/agents') ? {agents:[],capabilities:[],older_cursor:null} :
+      path.includes('/capabilities/pending') ? {agents:[],next_cursor:null} :
       path.includes('/capabilities') ? {capabilities:[],next_cursor:null} :
       path.includes('/instructions') ? {instructions:[],older_cursor:null} :
       {online_agents:0,waiting_assignments:1,overdue_updates:0,queued_instructions:0,stalled_instructions:0};
@@ -141,25 +150,31 @@ test('human message destination picks the proper project endpoint without a supp
     {room:'reviews',body:'Update',idempotency_key:'twice'});
 });
 
-test('room capability editor uses project definitions and preserves unloaded agent tags', () => {
+test('Agent settings works for roster agents outside rooms and reviews pending tags', () => {
   const {ids, run} = app();
-  run(`S.rooms=[{name:'reviews',members:[['ana','laptop','claude']]}];
-    S.catalog=[{name:'python',description:'Implement Python'},
-      {name:'review',description:'Review code'}];
+  assert.match(shell, /data-view="capabilities"/);
+  run(`S.rooms=[];S.agents=[{address:['ana','laptop','claude'],online:false,sessions:[]}];
+    S.catalog=[{name:'python',description:'Implement Python',approved:true},
+      {name:'review',description:'Review code',approved:true},
+      {name:'swift',description:'Build Swift apps',approved:true}];
     S.roomAgentKey='["ana","laptop","claude"]';
     S.roomAgentUpdatedAt=123;
     S.roomAgentTags=['review','swift'];
-    $('capability-room').value='reviews'; renderRoomCapabilityEditor();`);
+    S.pendingAgentTags=['swift']; renderAgents();`);
+  const card=ids.get('agent-list').children[0];
+  assert.ok(card.children.some(n=>n.tagName==='button' && n.textContent==='Settings'));
+  assert.equal(ids.get('capability-agent').options[0].value,'["ana","laptop","claude"]');
   const choices=ids.get('capability-choices').children;
   assert.match(choices[0].textContent, /python.*Implement Python/);
   assert.equal(choices[1].children[0].checked, true);
+  assert.equal(choices[2].children[0].checked, false, 'pending tags need explicit approval');
   choices[0].children[0].checked=true;
   choices[0].children[0].events.change();
   choices[1].children[0].checked=false;
   choices[1].children[0].events.change();
-  assert.deepEqual(JSON.parse(JSON.stringify(run('selectedRoomCapabilities()'))),
+  assert.deepEqual(JSON.parse(JSON.stringify(run('selectedAgentCapabilities()'))),
     {address:['ana','laptop','claude'],expected_updated_at:123,
-      capabilities:['swift','python']});
+      capabilities:['python']});
 });
 
 test('agent card opens a direct DM with the correct stable recipient preselected', () => {
@@ -185,7 +200,7 @@ test('agent cards identify harness and show per-session model and timestamped wo
     S.rooms=[]; renderAgents();`);
   const [codex, claude] = ids.get('agent-list').children;
   assert.match(codex.textContent, /Codex.*gpt-6-sol.*Reviewing parser/);
-  assert.match(codex.textContent, /Model not reported/);
+  assert.match(codex.textContent, /Model unknown/);
   assert.match(claude.textContent, /Claude/);
   assert.equal(codex.children[0].children[0].children[0].className.includes('codex'), true);
   assert.equal(claude.children[0].children[0].children[0].className.includes('claude'), true);

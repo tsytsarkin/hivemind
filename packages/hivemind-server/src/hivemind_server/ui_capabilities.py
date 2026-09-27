@@ -26,7 +26,7 @@ async def replace_and_notify(project, identities, author: Identity,
     if original["updated_at"] != expected_updated_at:
         raise Conflict("agent capabilities changed; refresh and retry")
     previous = original["capabilities"]
-    if previous == tags:
+    if previous == tags and not original["pending_capabilities"]:
         return {**original, "changed": False,
                 "notified_rooms": 0, "notification_warnings": []}
     store = ChatStore.for_project(db, project.dir)
@@ -73,11 +73,14 @@ async def replace_and_notify(project, identities, author: Identity,
 
 
 async def define_and_notify(project, identities, author: Identity,
-                            name: str, description: str) -> dict:
+                            name: str, description: str,
+                            expected_updated_at: float | None) -> dict:
     db = project.db
     old = capabilities.descriptions(db, [name]).get(name)
     store = ChatStore.for_project(db, project.dir)
-    defined = capabilities.define(db, name, description)
+    defined = capabilities.define(db, name, description,
+                                  expected_updated_at=expected_updated_at,
+                                  enforce_revision=True)
     if old == defined["description"]:
         return {**defined, "changed": False, "notified_agents": 0,
                 "notification_warnings": []}

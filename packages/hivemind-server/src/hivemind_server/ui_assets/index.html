@@ -36,12 +36,13 @@
       <nav id="nav" class="nav-list" aria-label="Project views">
         <button type="button" data-view="overview" class="nav-link selected"><span aria-hidden="true">◈</span> Overview</button>
         <button type="button" data-view="rooms" class="nav-link"><span aria-hidden="true">▦</span> Rooms</button>
+        <button type="button" data-view="capabilities" class="nav-link"><span aria-hidden="true">◈</span> Capabilities</button>
         <button type="button" data-view="agents" class="nav-link"><span aria-hidden="true">◎</span> Agents</button>
         <button type="button" data-view="tasks" class="nav-link"><span aria-hidden="true">☷</span> Tasks</button>
         <button type="button" data-view="instructions" class="nav-link"><span aria-hidden="true">✉</span> Instructions</button>
         <button type="button" data-view="messages" class="nav-link"><span aria-hidden="true">◌</span> Messages</button>
       </nav>
-      <div class="sidebar-bottom"><span id="sidebar-user">Signed in</span><button id="logout" type="button" class="text-button">Sign out ↗</button></div>
+      <div class="sidebar-bottom"><span id="server-version" class="tiny muted">Version unavailable</span><span id="sidebar-user">Signed in</span><button id="logout" type="button" class="text-button">Sign out ↗</button></div>
     </aside>
 
     <main class="main-content" id="main">
@@ -57,7 +58,10 @@
 
         <section id="view-rooms" class="view" aria-label="Rooms" hidden>
           <div class="split-grid"><section class="panel"><div class="panel-heading"><div><span class="eyebrow">TOPIC SPACES</span><h2>Project rooms</h2></div></div><div id="room-list" class="stack"></div><button type="button" id="room-older" class="button ghost" hidden>Load more rooms</button></section><section class="panel form-panel"><span class="eyebrow">CREATE A SPACE</span><h2>New room</h2><p class="muted">A topic, a team, and a place to keep everyone in sync.</p><form id="room-create-form" class="form-stack"><label>Room name<input name="name" required pattern="[a-z0-9][a-z0-9_-]*" placeholder="release-reviews"></label><label>What is this room about?<textarea name="description" required maxlength="256" placeholder="Review and ship the next release…"></textarea></label><button class="button primary" type="submit">Create room ↗</button></form><form id="manager-form" class="form-stack separated"><span class="eyebrow">DESIGNATE MANAGER</span><label>Room<select name="room" data-room-select></select></label><div class="triple" data-address-fields></div><button class="button secondary" type="submit">Promote manager</button></form><hr><span class="eyebrow">BUILD A TEAM</span><h2>Room members</h2><form id="member-form" class="form-stack"><label>Room<select name="room" data-room-select></select></label><div class="triple" data-address-fields></div><button class="button secondary" type="submit">Add agent to room</button></form></section></div>
-          <div class="split-grid separated">
+        </section>
+
+        <section id="view-capabilities" class="view" aria-label="Capabilities" hidden>
+          <div class="split-grid">
             <section class="panel"><span class="eyebrow">PROJECT-WIDE CAPABILITIES</span><h2>Capability catalog</h2>
               <p class="muted">Descriptions are shared with agents when their capabilities change.</p>
               <div id="capability-catalog" class="stack"></div>
@@ -68,12 +72,22 @@
                 <button class="button secondary" type="submit">Add or update capability</button>
               </form>
             </section>
-            <section class="panel form-panel"><span class="eyebrow">MANAGE ROOM AGENTS</span><h2>Assign project capabilities</h2>
-              <p class="muted">Choose a room member. Their capability tags apply across the entire project.</p>
+            <section class="panel"><span class="eyebrow">LEGACY REVIEW</span><h2>Pending agent assignments</h2>
+              <p class="muted">Legacy self-reported tags need approval for each agent.</p>
+              <div id="pending-agent-list" class="stack"></div>
+              <button type="button" id="pending-agent-older" class="button ghost" hidden>Load more pending agents</button>
+            </section>
+          </div>
+        </section>
+
+        <section id="view-agents" class="view" aria-label="Agents" hidden><div class="split-grid"><section class="panel"><div class="panel-heading"><div><span class="eyebrow">PROJECT ROSTER</span><h2>Agents & presence</h2></div></div><div id="agent-list" class="stack"></div><button type="button" id="agent-older" class="button ghost" hidden>Load more agents</button></section><section class="panel form-panel"><span class="eyebrow">HUMAN MESSAGE</span><h2>Reach an agent or room</h2><p class="privacy-warning">ⓘ DMs are visible to everyone with access to this project.</p><form id="dm-form" class="form-stack"><label>Destination<select id="dm-destination" name="destination"><option value="agent">Agent</option><option value="room">Room</option></select></label><label id="dm-agent-field">Agent<select id="dm-recipient" name="recipient" required></select></label><label id="dm-room-field" hidden>Room<select id="dm-room" name="room" data-room-select></select></label><button type="button" id="dm-agent-older" class="button ghost" hidden>Load more agents</button><label>Message<textarea name="body" required placeholder="A quick note for this agent…"></textarea></label><button class="button primary" type="submit">Send message ↗</button></form></section></div>
+          <div class="split-grid separated">
+            <section class="panel form-panel"><span class="eyebrow">AGENT SETTINGS</span><h2>Capabilities and task limits</h2>
+              <p class="muted">Choose any project agent, whether or not they belong to a room.</p>
               <form id="capability-assign-form" class="form-stack">
-                <label>Room<select id="capability-room" data-room-select></select></label>
                 <label>Agent<select id="capability-agent" required></select></label>
                 <div id="capability-choices" class="stack"></div>
+                <div id="agent-pending-choices" class="stack" role="status"></div>
                 <button class="button secondary" type="submit">Save agent capabilities</button>
               </form>
               <form id="agent-config-form" class="form-stack separated">
@@ -85,8 +99,6 @@
             </section>
           </div>
         </section>
-
-        <section id="view-agents" class="view" aria-label="Agents" hidden><div class="split-grid"><section class="panel"><div class="panel-heading"><div><span class="eyebrow">PROJECT ROSTER</span><h2>Agents & presence</h2></div></div><div id="agent-list" class="stack"></div><button type="button" id="agent-older" class="button ghost" hidden>Load more agents</button></section><section class="panel form-panel"><span class="eyebrow">HUMAN MESSAGE</span><h2>Reach an agent or room</h2><p class="privacy-warning">ⓘ DMs are visible to everyone with access to this project.</p><form id="dm-form" class="form-stack"><label>Destination<select id="dm-destination" name="destination"><option value="agent">Agent</option><option value="room">Room</option></select></label><label id="dm-agent-field">Agent<select id="dm-recipient" name="recipient" required></select></label><label id="dm-room-field" hidden>Room<select id="dm-room" name="room" data-room-select></select></label><button type="button" id="dm-agent-older" class="button ghost" hidden>Load more agents</button><label>Message<textarea name="body" required placeholder="A quick note for this agent…"></textarea></label><button class="button primary" type="submit">Send message ↗</button></form></section></div></section>
 
         <section id="view-tasks" class="view" aria-label="Tasks" hidden>
           <div class="split-grid"><section class="panel">

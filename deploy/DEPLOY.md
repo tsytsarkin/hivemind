@@ -1,5 +1,34 @@
 # Deploying Hivemind
 
+## Upgrading to 1.5.2
+
+Before starting the new server, stop writes and make a verified SQLite **online backup** of
+every project database (including its WAL state), together with project ACL metadata and token
+files; see [Backups](#backups). The first open adds capability approval columns and performs a
+one-time per-project merge of historical `claude-code` addresses into `claude`. If both aliases
+contain contradictory human-managed settings or conflicting message retry keys, that project
+refuses to open with a diagnostic. Resolve the conflict from the backup rather than deleting
+either agent's state. The data migration is transactional and restart-safe, but SQLite additive
+column changes can commit separately, so a full rollback requires that pre-upgrade backup.
+
+**The upgrade returns existing agent grants to pending, and a human must re-approve them.** They
+stay visible and cannot qualify a **new** task claim until approved. This is deliberate: the
+`human_managed` row flag is not evidence that a human chose those tags, because 1.5.1 let an agent
+overwrite such a row whenever it passed the current revision, and the flag survived — so
+backfilling from it would have blessed self-declared grants exactly as this release sets out to
+stop. There is no per-tag record of who set what, so nothing else can be trusted.
+
+The one exception carries its own evidence: a tag that an agent's **live claim or standing
+assignment already depends on** stays approved, and the capability it names stays approved too.
+Existing active claims can still heartbeat and complete, and queued assignments stay claimable,
+so no in-flight work is stranded. In the web console, open **Capabilities** to approve definitions, then
+**Agents → Settings** to confirm grants and adjust each agent's parallel-task/auto-claim limits.
+See [web-console.md](../docs/web-console.md) for the detailed behavior. The version badge reads
+the running server, not a frontend build constant; agents without a host-provided model display
+“Model unknown”. A user token authenticates both agent MCP and human UI calls, so the supported
+MCP restriction on capability writes is a workflow boundary, not isolation from deliberate UI
+HTTP calls made with that same token.
+
 Hivemind 1.5.1 starts an optional second listener for the
 [project web console](../docs/web-console.md), enabled by default on `127.0.0.1:8788`.
 Set `[web_ui] enabled = false` in `<data-dir>/hivemind.toml` to close the UI socket; changing

@@ -10,11 +10,12 @@ def test_capability_loss_releases_assigned_work_and_preserves_human_queue(db):
     teams.add_member(db, "reviews", who, who)
     nid = graph.upsert_node(db, "setup", "finding", {"title": "Audit"})["node_id"]
     room_id = ChatStore(db).rooms()[0]["room_id"]
+    capabilities.define(db, "python", "Implement Python")
     graph_tasks.enable(db, "setup", nid, room_id=room_id, required_capabilities=["python"])
-    capabilities.replace(db, who, ["python"])
+    capabilities.replace(db, who, ["python"], managed_by_ui=True)
     assignments.assign(db, "manager", nid, who)
     item = instructions.enqueue(db, "nik", who, "Queue another review", "once")
-    capabilities.replace(db, who, [])
+    capabilities.replace(db, who, [], managed_by_ui=True)
     assert assignments.view(db, nid)["state"] == "available"
     assert instructions.inbox(db, who)["instructions"][0]["id"] == item["id"]
     assert who in teams.list_members(db, "reviews")

@@ -8,9 +8,10 @@ test('token login, teams, tasks and mobile controls', async ({ page }) => {
   await page.locator('#login-form button').click();
   await expect(page.locator('#page-title')).toHaveText('Overview');
   await expect(page.locator('#project-switcher')).toHaveValue('default');
+  await expect(page.locator('#server-version')).toHaveText(/^v\d+\.\d+\.\d+/);
   await page.getByRole('button', {name: 'Rooms', exact: true}).click();
   await page.locator('#room-create-form [name=name]').fill('release-review');
-  await page.locator('#room-create-form [name=description]').fill('Coordinating the 1.5.1 release');
+  await page.locator('#room-create-form [name=description]').fill('Coordinating the 1.5.2 release');
   await page.locator('#room-create-form button').click();
   await expect(page.locator('#room-list')).toContainText('release-review');
   await page.locator('#member-form [name=address_user]').fill('nikt');
@@ -22,6 +23,8 @@ test('token login, teams, tasks and mobile controls', async ({ page }) => {
   await page.locator('#manager-form [name=address_client]').fill('codex');
   await page.locator('#manager-form button').click();
   await expect(page.locator('#room-list')).toContainText('Manager: nikt · macbook · codex');
+  await expect(page.locator('#capability-create-form')).toBeHidden();
+  await page.getByRole('button', {name: 'Capabilities', exact: true}).click();
   for(const [tag, description] of [['review', 'Review code for correctness'],
                                     ['python', 'Implement Python changes']]) {
     await page.locator('#capability-create-form [name=name]').fill(tag);
@@ -29,6 +32,7 @@ test('token login, teams, tasks and mobile controls', async ({ page }) => {
     await page.locator('#capability-create-form button').click();
     await expect(page.locator('#capability-catalog')).toContainText(description);
   }
+  await page.getByRole('button', {name: 'Agents', exact: true}).click();
   await page.locator('#capability-agent').selectOption('["nikt","macbook","codex"]');
   await page.locator('#capability-choices input[value=review]').check();
   await page.locator('#capability-choices input[value=python]').check();
