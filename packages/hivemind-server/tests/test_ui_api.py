@@ -154,7 +154,9 @@ async def test_console_updates_agent_capabilities_fences_claim_and_notifies_room
     store = ChatStore(project.db)
     store.create_room("reviews", "Review work", owner)
     store.join("reviews", peer)
-    capabilities.replace(project.db, peer, ["review", "python"])
+    capabilities.define(project.db, "review", "Review code")
+    capabilities.define(project.db, "python", "Implement Python")
+    capabilities.replace(project.db, peer, ["review", "python"], managed_by_ui=True)
     revision = capabilities.get(project.db, peer)["updated_at"]
     node = graph_tasks.offer(project.db, "setup", "reviews", "Audit", "Review patch",
                              required_capabilities=["review"])["node_id"]
@@ -204,6 +206,7 @@ async def test_console_defines_project_capability_and_pushes_description_to_assi
     nik, _ = ids.mint("nik", "mac"), ids.mint("ana", "laptop")
     peer = ("ana", "laptop", "claude")
     capabilities.replace(project.db, peer, ["review"])
+    revision = capabilities.catalog(project.db)["capabilities"][0]["updated_at"]
     ChatStore(project.db).create_room("reviews", "Review work", ("nik", "mac", "codex"))
     ChatStore(project.db).join("reviews", peer)
     app = build_ui_app(mcp.state.cfg, mcp.state.registry, ids)
@@ -213,18 +216,125 @@ async def test_console_defines_project_capability_and_pushes_description_to_assi
         csrf = (await c.post("/api/login", json={"token": nik})).json()["csrf_token"]
         headers = {"x-csrf-token": csrf}
         saved = await c.post(root + "/capabilities", headers=headers,
-                             json={"name": "review", "description": "Assess code for correctness"})
+                             json={"name": "review", "description": "Assess code for correctness",
+                                   "expected_updated_at": revision})
         listed = await c.get(root + "/capabilities")
         invalid = await c.post(root + "/agents/capabilities", headers=headers,
                                json={"address": peer, "capabilities": ["unknown"]})
     assert saved.status_code == 200 and listed.status_code == 200
     assert listed.json()["capabilities"][0]["description"] == "Assess code for correctness"
     assert invalid.status_code == 422
-    assert capabilities.get(project.db, peer)["capabilities"] == ["review"]
+    assert capabilities.get(project.db, peer)["capabilities"] == []
+    assert capabilities.get(project.db, peer)["pending_capabilities"] == ["review"]
     dm = ChatStore(project.db).inbox(peer)["messages"]
     assert len(dm) == 1 and "Assess code for correctness" in dm[0]["body"]
     room = ChatStore(project.db).history("reviews")["messages"]
     assert len(room) == 1 and "Assess code for correctness" in room[0]["body"]
+
+
+@pytest.mark.anyio
+async def test_console_capability_definition_rejects_concurrent_edit(env):
+    from hivemind_server import capabilities
+
+    mcp, project, _ = env
+    ids = IdentityStore(mcp.state.cfg.identities_path)
+    token = ids.mint("nik", "mac")
+    app = build_ui_app(mcp.state.cfg, mcp.state.registry, ids)
+    path = f"/api/projects/{project.name}/capabilities"
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                 base_url="http://testserver") as c:
+        csrf = (await c.post("/api/login", json={"token": token})).json()["csrf_token"]
+        headers = {"x-csrf-token": csrf}
+        first = await c.post(path, headers=headers, json={"name": "review",
+            "description": "Review code", "expected_updated_at": None})
+        assert first.status_code == 200, first.text
+        newer = await c.post(path, headers=headers, json={"name": "review",
+            "description": "Review code and tests",
+            "expected_updated_at": first.json()["updated_at"]})
+        stale = await c.post(path, headers=headers, json={"name": "review",
+            "description": "Stale edit", "expected_updated_at": first.json()["updated_at"]})
+    assert newer.status_code == 200 and stale.status_code == 409
+    assert capabilities.catalog(project.db)["capabilities"][0]["description"] == \
+        "Review code and tests"
+
+
+@pytest.mark.anyio
+async def test_console_pages_pending_agent_capabilities_without_room_membership(env):
+    from hivemind_server import capabilities
+
+    mcp, project, _ = env
+    ids = IdentityStore(mcp.state.cfg.identities_path)
+    token = ids.mint("nik", "mac")
+    for who in (("agent0", "laptop", "codex"), ("agent1", "laptop", "claude")):
+        capabilities.replace(project.db, who, ["review"])
+    ui = build_ui_app(mcp.state.cfg, mcp.state.registry, ids)
+    path = f"/api/projects/{project.name}/capabilities/pending"
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=ui),
+                                 base_url="http://testserver") as c:
+        await c.post("/api/login", json={"token": token})
+        first = await c.get(path, params={"limit": 1})
+        second = await c.get(path, params={"limit": 1,
+                                            "after": first.json()["next_cursor"]})
+    assert first.status_code == second.status_code == 200
+    assert first.json()["agents"][0]["address"] == ["agent0", "laptop", "codex"]
+    assert second.json()["agents"][0]["address"] == ["agent1", "laptop", "claude"]
+    assert all(row["pending_capabilities"] == ["review"] for row in
+               first.json()["agents"] + second.json()["agents"])
+    assert second.json()["next_cursor"] is None
+
+
+@pytest.mark.anyio
+async def test_console_can_approve_preexisting_pending_grant_without_changing_tags(env):
+    from hivemind_server import capabilities
+
+    mcp, project, _ = env
+    ids = IdentityStore(mcp.state.cfg.identities_path)
+    token = ids.mint("nik", "mac")
+    who = ("nik", "mac", "codex")
+    capabilities.replace(project.db, who, ["review"])
+    capabilities.define(project.db, "review", "Review code")
+    revision = capabilities.get(project.db, who)["updated_at"]
+    ui = build_ui_app(mcp.state.cfg, mcp.state.registry, ids)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=ui),
+                                 base_url="http://testserver") as c:
+        csrf = (await c.post("/api/login", json={"token": token})).json()["csrf_token"]
+        response = await c.post(f"/api/projects/{project.name}/agents/capabilities",
+                                headers={"x-csrf-token": csrf},
+                                json={"address": who, "capabilities": ["review"],
+                                      "expected_updated_at": revision})
+    assert response.status_code == 200, response.text
+    assert response.json()["changed"] is True
+    assert capabilities.get(project.db, who)["capabilities"] == ["review"]
+    assert capabilities.get(project.db, who)["pending_capabilities"] == []
+
+
+@pytest.mark.anyio
+async def test_console_saving_approved_grants_removes_unchecked_pending_tags(env):
+    from hivemind_server import capabilities
+
+    mcp, project, _ = env
+    ids = IdentityStore(mcp.state.cfg.identities_path)
+    token = ids.mint("nik", "mac")
+    who = ("nik", "mac", "codex")
+    capabilities.define(project.db, "review", "Review code")
+    capabilities.replace(project.db, who, ["review"], managed_by_ui=True)
+    current = capabilities.get(project.db, who)
+    capabilities.replace(project.db, who, ["review", "swift"],
+                         expected_updated_at=current["updated_at"])
+    revision = capabilities.get(project.db, who)["updated_at"]
+    assert capabilities.get(project.db, who)["pending_capabilities"] == ["swift"]
+    ui = build_ui_app(mcp.state.cfg, mcp.state.registry, ids)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=ui),
+                                 base_url="http://testserver") as c:
+        csrf = (await c.post("/api/login", json={"token": token})).json()["csrf_token"]
+        response = await c.post(f"/api/projects/{project.name}/agents/capabilities",
+                                headers={"x-csrf-token": csrf},
+                                json={"address": who, "capabilities": ["review"],
+                                      "expected_updated_at": revision})
+    assert response.status_code == 200, response.text
+    assert response.json()["changed"] is True
+    assert capabilities.get(project.db, who)["capabilities"] == ["review"]
+    assert capabilities.get(project.db, who)["pending_capabilities"] == []
 
 
 @pytest.mark.anyio
@@ -470,12 +580,15 @@ async def test_agent_roster_includes_capabilities_beyond_first_hundred(env):
     token = ids.mint("nik", "mac")
     who = ("nik", "mac", "codex")
     ChatStore(project.db).create_room("reviews", "Code reviews", who)
+    capabilities.define(project.db, "python", "Implement Python")
+    capabilities.define(project.db, "review", "Review code")
     for n in range(101):
         address = (f"agent{n}", "laptop", "codex")
         teams.add_member(project.db, "reviews", address, who)
         capabilities.replace(project.db, address,
-                             ["python"] if n == 0 else ["review"])
-    capabilities.replace(project.db, ("unrelated", "laptop", "codex"), ["review"])
+                             ["python"] if n == 0 else ["review"], managed_by_ui=True)
+    capabilities.replace(project.db, ("unrelated", "laptop", "codex"),
+                         ["review"], managed_by_ui=True)
     app = build_ui_app(mcp.state.cfg, mcp.state.registry, ids)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
                                  base_url="http://testserver") as c:
@@ -557,11 +670,12 @@ async def test_assignment_candidates_page_and_mark_missing_capability_tags(env):
     token = ids.mint("nik", "mac")
     who = ("nik", "mac", "codex")
     ChatStore(project.db).create_room("review", "Review", who)
+    capabilities.define(project.db, "python", "Implement Python")
     for n in range(3):
         address = (f"agent{n}", "laptop", "codex")
         teams.add_member(project.db, "review", address, who)
         if n == 2:
-            capabilities.replace(project.db, address, ["python"])
+            capabilities.replace(project.db, address, ["python"], managed_by_ui=True)
     nid = graph_tasks.offer(project.db, "setup", "review", "Review fix", "Run checks",
                             required_capabilities=["python"])["node_id"]
     app = build_ui_app(mcp.state.cfg, mcp.state.registry, ids)

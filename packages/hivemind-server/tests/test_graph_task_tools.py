@@ -4,7 +4,7 @@ import httpx
 import pytest
 
 from conftest import Lifespan, _call, _post
-from hivemind_server import graph, projects_meta, schemas
+from hivemind_server import capabilities, graph, projects_meta, schemas
 from hivemind_server.chat import ChatStore
 from hivemind_server.identity import IdentityStore
 
@@ -94,6 +94,7 @@ async def test_mcp_offer_in_schema_less_project_records_capability_requirements(
     app, project, _ = env
     nik = _token(app, "nik", "mac")
     ChatStore(project.db).create_room("parser", "Parser work", ("nik", "mac", "codex"))
+    capabilities.define(project.db, "review", "Review source")
     async with Lifespan(app), httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
                                                base_url="http://t", timeout=30) as client:
         offered = await _tool(client, nik, project.name, "graph_task_offer", room="parser",
@@ -112,6 +113,7 @@ async def test_mcp_task_offer_announces_it_to_subscribed_room(env, monkeypatch):
     owner, peer = ("nik", "mac", "codex"), ("ana", "laptop", "claude")
     ChatStore(project.db).create_room("reviews", "Review work", owner)
     teams.add_member(project.db, "reviews", peer, owner)
+    capabilities.define(project.db, "review", "Review source")
     frames = []
 
     class Hub:
@@ -157,6 +159,7 @@ async def test_enabling_an_existing_node_as_room_task_announces_it(env):
     app, project, _ = env
     nik = _token(app, "nik", "mac")
     ChatStore(project.db).create_room("reviews", "Review work", ("nik", "mac", "codex"))
+    capabilities.define(project.db, "review", "Review source")
     with project.db.write("setup") as tx:
         schemas.define_type(tx.cur, tx, "node", "finding",
                             {"type": "object", "additionalProperties": True}, status="active")
@@ -237,8 +240,10 @@ async def test_available_task_discovery_pages_only_eligible_unreserved_work(env)
     who, other = ("nik", "mac", "codex"), ("ana", "laptop", "claude")
     ChatStore(project.db).create_room("reviews", "Code reviews", who)
     teams.add_member(project.db, "reviews", other, who)
-    capabilities.replace(project.db, who, ["review"])
-    capabilities.replace(project.db, other, ["review"])
+    capabilities.define(project.db, "review", "Review source")
+    capabilities.define(project.db, "python", "Implement Python")
+    capabilities.replace(project.db, who, ["review"], managed_by_ui=True)
+    capabilities.replace(project.db, other, ["review"], managed_by_ui=True)
     nodes = [graph_tasks.offer(project.db, "setup", "reviews", f"Task {n}", "Review",
                               required_capabilities=(["review"] if n != 2 else ["python"]))
              ["node_id"] for n in range(5)]
@@ -318,7 +323,8 @@ async def test_manager_assigns_through_mcp_and_assignee_discovers_waiting_work(e
     teams.add_member(project.db, "review-work", owner, owner)
     teams.add_member(project.db, "review-work", peer, owner)
     teams.promote(project.db, "review-work", owner, owner, expected_revision=0)
-    capabilities.replace(project.db, peer, ["review"])
+    capabilities.define(project.db, "review", "Review source")
+    capabilities.replace(project.db, peer, ["review"], managed_by_ui=True)
     node_id = graph_tasks.offer(project.db, "setup", "review-work", "Audit code",
                                 "Review the patch", required_capabilities=["review"])["node_id"]
     assert room["room_id"] == graph_tasks.read(project.db, node_id)["room_id"]
@@ -357,7 +363,9 @@ async def test_mcp_can_change_task_requirements_and_release_ineligible_assignmen
     owner = ("nik", "mac", "codex")
     ChatStore(project.db).create_room("review-work", "Review work", owner)
     teams.add_member(project.db, "review-work", owner, owner)
-    capabilities.replace(project.db, owner, ["review"])
+    capabilities.define(project.db, "review", "Review source")
+    capabilities.define(project.db, "python", "Implement Python")
+    capabilities.replace(project.db, owner, ["review"], managed_by_ui=True)
     node_id = graph_tasks.offer(project.db, "setup", "review-work", "Audit code",
                                 "Review the patch", required_capabilities=["review"])["node_id"]
     assignments.assign(project.db, "setup", node_id, owner)

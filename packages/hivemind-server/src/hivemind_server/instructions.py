@@ -126,7 +126,12 @@ def enqueue(db: Database, author: str, recipient: StableAddress, body: str,
         if archived is not None:
             digest = _request_digest(body, room_id, to_manager, who, retry_of)
             if archived["request_digest"] != digest:
-                raise Conflict("idempotency key was used for a different instruction")
+                legacy = (archived["recipient_user"], archived["recipient_device"],
+                          archived["recipient_client"])
+                if (legacy[2] != "claude-code" or _address(legacy) != who or
+                        archived["request_digest"] != _request_digest(
+                            body, room_id, to_manager, legacy, retry_of)):
+                    raise Conflict("idempotency key was used for a different instruction")
             return {"id": archived["id"], "state": archived["state"], "archived": True}
         if retry_of is not None:
             old = tx.cur.execute("SELECT * FROM agent_instruction WHERE id=?",

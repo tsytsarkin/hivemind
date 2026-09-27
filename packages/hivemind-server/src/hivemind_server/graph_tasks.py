@@ -57,7 +57,7 @@ def enable(db: Database, agent_id: str, node_id: str, room_id: Optional[str] = N
             raise NotFound("task room does not exist; create it explicitly")
         if cur.execute("SELECT 1 FROM graph_task WHERE node_id=?", (node_id,)).fetchone():
             raise Conflict("node already marked as a task")
-        capabilities.register_in_transaction(cur, required, time.time())
+        capabilities.require_existing_approved(cur, required)
         props = cur.execute("SELECT props FROM node_version WHERE node_id=? AND tx_to=?",
                             (node_id, SENTINEL)).fetchone()
         if props is None:
@@ -101,7 +101,7 @@ def offer(db: Database, agent_id: str, room_name: str,
     from .graph import _create_node_tx, get_node
     with db.write(agent_id, "offer graph task") as tx:
         room_id = ChatStore(db)._lookup_room(tx.cur, room_name)
-        capabilities.register_in_transaction(tx.cur, required, time.time())
+        capabilities.require_existing_approved(tx.cur, required)
         props = {"title": title.strip(), "summary": summary.strip(),
                  "status": "unclaimed", "room_id": room_id}
         compatible = tx.cur.execute("SELECT 1 FROM node_type WHERE name='work_item' AND "
@@ -147,9 +147,11 @@ def _read(cur, node_id: str, t: float) -> dict:
     if live and task["room_id"] is not None:
         found = cur.execute("SELECT MAX(created_at) AS last_progress FROM chat_message "
                             "WHERE room_id=? AND task_node_id=? AND sender_user=? AND sender_device=? AND "
-                            "sender_client=? AND message_kind='progress' AND created_at>=?",
+                            "(sender_client=? OR (?='claude' AND sender_client='claude-code')) "
+                            "AND message_kind='progress' AND created_at>=?",
                             (task["room_id"], node_id, claim["holder_user"], claim["holder_device"],
-                             claim["holder_client"], claim["claimed_at"])).fetchone()
+                             claim["holder_client"], claim["holder_client"],
+                             claim["claimed_at"])).fetchone()
         progress = found["last_progress"] if found else None
     out = {"node_id": node_id, "room_id": task["room_id"], "status": task["status"],
             "status_mode": task["status_mode"],
@@ -235,7 +237,7 @@ def set_requirements(db: Database, agent_id: str, node_id: str,
     required = capabilities.normalize(names, limit=32)
     with db.write(agent_id, "update graph task capability requirements") as tx:
         task = _marker(tx.cur, node_id)
-        capabilities.register_in_transaction(tx.cur, required, time.time())
+        capabilities.require_existing_approved(tx.cur, required)
         if actor is not None:
             _authorize_requirements(tx, task, node_id, _address(actor),
                                     time.time() if now is None else float(now))

@@ -16,8 +16,10 @@ WHO = ("nik", "mac", "codex")
 
 def test_config_persists_and_limits_live_task_claims(db):
     assert agent_config.get(db, WHO)["max_parallel_tasks"] == 20
+    capabilities.define(db, "review", "Review code")
+    capabilities.replace(db, WHO, ["review"], managed_by_ui=True)
     saved = agent_config.update(db, WHO, max_parallel_tasks=2, auto_claim_enabled=False,
-                                capability_tags=["review"])
+                                capability_tags=None)
     assert saved["capabilities"] == ["review"] and saved["auto_claim_enabled"] is False
     assert agent_config.get(Database(db.path), WHO)["max_parallel_tasks"] == 2
     ChatStore(db).create_room("reviews", "Review", WHO)
@@ -41,12 +43,27 @@ async def test_agent_mcp_reads_and_updates_own_config(env):
         updated = _call(await _post(client, "", token, "tools/call", {
             "name": "agent_config_update", "arguments": {**args,
               "max_parallel_tasks": 3, "auto_claim_enabled": False,
-              "capabilities": ["python"], "expected_updated_at": initial["updated_at"]}}))
+              "expected_updated_at": initial["updated_at"]}}))
         current = _call(await _post(client, "", token, "tools/call", {
             "name": "agent_config_get", "arguments": args}))
     assert initial["max_parallel_tasks"] == 20 and initial["auto_claim_enabled"] is True
-    assert updated["max_parallel_tasks"] == 3 and current["capabilities"] == ["python"]
+    assert updated["max_parallel_tasks"] == 3 and current["capabilities"] == []
     assert current["auto_claim_enabled"] is False
+
+
+@pytest.mark.anyio
+async def test_agent_mcp_rejects_capability_parameter_atomically(env):
+    app, project, _ = env
+    token = IdentityStore(app.state.cfg.identities_path).mint("nik", "mac")
+    async with Lifespan(app), httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                               base_url="http://t", timeout=30) as client:
+        result = _call(await _post(client, "", token, "tools/call", {
+            "name": "agent_config_update", "arguments": {"project": project.name,
+              "client": "codex", "session_id": "one", "max_parallel_tasks": 3,
+              "auto_claim_enabled": False, "capabilities": ["review"]}}))
+    assert result["ok"] is False and "project user" in result["error"]
+    assert agent_config.get(project.db, WHO)["max_parallel_tasks"] == 20
+    assert capabilities.catalog(project.db)["capabilities"] == []
 
 
 @pytest.mark.anyio

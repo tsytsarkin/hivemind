@@ -21,7 +21,7 @@ def page(db: Database, hub, *, after: str | None = None, limit: int = 100) -> di
         except (ValueError, TypeError) as exc:
             raise Invalid("invalid agent cursor") from exc
     # Bound each indexed source before merging: a LIMIT outside a UNION would scan,
-    # deduplicate and sort every self-advertisement on every console refresh.
+    # deduplicate and sort every legacy pending grant on every console refresh.
     with db.read() as cur:
         candidates = set()
         for table in ("chat_session", "chat_subscription", "agent_capability", "agent_config"):

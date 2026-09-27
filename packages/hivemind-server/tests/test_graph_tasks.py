@@ -56,10 +56,12 @@ def _task(db):
 
 
 def test_marked_task_exposes_optional_required_capabilities(db):
-    from hivemind_server import graph, graph_tasks
+    from hivemind_server import capabilities, graph, graph_tasks
 
     node_id = _task(db)
     assert graph_tasks.read(db, node_id)["required_capabilities"] == []
+    capabilities.define(db, "review", "Review changes")
+    capabilities.define(db, "python", "Implement Python changes")
     second = graph.upsert_node(db, "nik", "finding", {"title": "audit tools"})["node_id"]
     graph_tasks.enable(db, "nik", second, required_capabilities=["review", "python", "review"])
     assert graph_tasks.read(Database(db.path), second)["required_capabilities"] == [
@@ -77,26 +79,41 @@ def test_required_capabilities_reject_wrong_type_instead_of_becoming_unrestricte
 def test_eligibility_checks_all_task_tags_against_agent_advertisement(db):
     from hivemind_server import capabilities, graph, graph_tasks
 
+    capabilities.define(db, "python", "Implement Python changes")
+    capabilities.define(db, "review", "Review changes")
     node_id = graph.upsert_node(db, "nik", "finding", {"title": "audit tools"})["node_id"]
     graph_tasks.enable(db, "nik", node_id, required_capabilities=["python", "review"])
     capabilities.replace(db, OWNER, ["python"])
     with db.read() as cur:
-        with pytest.raises(Invalid, match="missing required capabilities: review"):
+        with pytest.raises(Invalid, match="missing required capabilities: python, review"):
             graph_tasks.eligible(cur, node_id, OWNER)
-    capabilities.replace(db, OWNER, ["python", "review"])
+    capabilities.replace(db, OWNER, ["python", "review"], managed_by_ui=True)
     with db.read() as cur:
         graph_tasks.eligible(cur, node_id, OWNER)
 
 
 def test_offer_uses_builtin_graph_type_if_project_lacks_work_item(db):
+    from hivemind_server import capabilities
     from hivemind_server import graph_tasks
     from hivemind_server.chat import ChatStore
 
     ChatStore(db).create_room("review-work", "Tasks for reviewers", OWNER)
+    capabilities.define(db, "review", "Review changes")
     task = graph_tasks.offer(db, "nik", "review-work", "Audit change", "Review carefully",
                              required_capabilities=["review"])
     assert task["node_type"] == "hivemind_collab_task"
     assert graph_tasks.read(db, task["node_id"])["required_capabilities"] == ["review"]
+
+
+def test_task_offer_cannot_invent_required_capability(db):
+    from hivemind_server import capabilities, graph_tasks
+    from hivemind_server.chat import ChatStore
+
+    ChatStore(db).create_room("review-work", "Tasks for reviewers", OWNER)
+    with pytest.raises(Invalid, match="project capability"):
+        graph_tasks.offer(db, "nik", "review-work", "Audit change", "Review carefully",
+                          required_capabilities=["invented"])
+    assert capabilities.catalog(db)["capabilities"] == []
 
 
 def test_incompatible_custom_work_item_is_preserved_when_offering_task(db):
@@ -522,7 +539,9 @@ def test_requirements_cannot_be_used_to_strip_another_agents_claim(db):
     a tag nobody has and take someone else's in-progress work away."""
     from hivemind_server import capabilities, graph_tasks
     nid = _task(db)
-    capabilities.replace(db, OWNER, ["review"])
+    capabilities.define(db, "review", "Review changes")
+    capabilities.define(db, "python", "Implement Python changes")
+    capabilities.replace(db, OWNER, ["review"], managed_by_ui=True)
     graph_tasks.claim(db, "nik", nid, OWNER, now=1000)
     assert graph_tasks.read(db, nid, now=1001)["effective_status"] == "in_progress"
     with pytest.raises(Conflict):

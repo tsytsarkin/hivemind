@@ -58,6 +58,9 @@ async def handle(req, p, who, identities: IdentityStore):
             if path == ["capabilities"]:
                 return _answer(capabilities.catalog(db, after=req.query_params.get("after"),
                                                     limit=_page(req)))
+            if path == ["capabilities", "pending"]:
+                return _answer(capabilities.pending_assignments(
+                    db, after=req.query_params.get("after"), limit=_page(req)))
             if path == ["agents", "capabilities"]:
                 address = _recipient([req.query_params.get(part) for part in
                                       ("user", "device", "client")], identities, p)
@@ -86,7 +89,8 @@ async def handle(req, p, who, identities: IdentityStore):
                         "COALESCE((SELECT MAX(m.created_at) FROM chat_message m "
                         "WHERE m.room_id=t.room_id AND m.task_node_id=c.node_id AND "
                         "m.sender_user=c.holder_user AND m.sender_device=c.holder_device "
-                        "AND m.sender_client=c.holder_client AND m.message_kind='progress' "
+                        "AND (m.sender_client=c.holder_client OR (c.holder_client='claude' "
+                        "AND m.sender_client='claude-code')) AND m.message_kind='progress' "
                         "AND m.created_at>=c.claimed_at),c.claimed_at)+900<=?))",
                         (now, now, now)).fetchone()["n"]
                     queued = cur.execute("SELECT COUNT(*) AS n FROM agent_instruction "
@@ -192,8 +196,11 @@ async def handle(req, p, who, identities: IdentityStore):
                     capability_tags=data.get("capabilities"),
                     expected_capabilities_updated_at=data.get("expected_capabilities_updated_at")))
             if path == ["capabilities"]:
+                if "expected_updated_at" not in data:
+                    raise Invalid("expected_updated_at is required; refresh project capabilities")
                 return _answer(await ui_capabilities.define_and_notify(
-                    p, identities, who, data.get("name"), data.get("description")))
+                    p, identities, who, data.get("name"), data.get("description"),
+                    data["expected_updated_at"]))
             if path == ["rooms"]:
                 return _answer(store.create_room(data.get("name"), data.get("description"), actor), 201)
             if len(path) == 3 and path[0] == "rooms" and path[2] == "members":

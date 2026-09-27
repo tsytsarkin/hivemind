@@ -7,6 +7,15 @@ from hivemind_server.db import Conflict, Database, Invalid, NotFound
 from hivemind_server.identity import Identity
 
 
+def test_legacy_claude_client_uses_same_stable_mailbox_as_claude():
+    from hivemind_server.chat import _address, stable_identity
+
+    assert stable_identity(Identity("nik", "mac"), "claude-code", "old") == \
+        ("nik", "mac", "claude", "old")
+    assert _address(("nik", "mac", "claude-code")) == ("nik", "mac", "claude")
+    assert _address(("nik", "mac", "muse")) == ("nik", "mac", "muse")
+
+
 def test_existing_chat_session_survives_status_column_migration(tmp_path):
     from hivemind_server.chat import ChatStore
     path = tmp_path / "existing.sqlite"
@@ -21,7 +30,11 @@ def test_existing_chat_session_survives_status_column_migration(tmp_path):
     assert store.agents()[0]["model"] is None
     assert store.agents()[0]["work_status"] is None
     assert store.update_status(("nik", "mac", "claude"), "old", "Reviewing", "opus-4")["model"] == "opus-4"
-    assert ChatStore(Database(path)).agents()[0]["work_status"] == "Reviewing"
+    assert store.update_status(("nik", "mac", "claude"), "old", "Still reviewing")["model"] == "opus-4"
+    assert store.update_status(("nik", "mac", "claude"), "new", "Starting work")["model"] is None
+    assert {a["session_id"]: a["model"] for a in store.agents()} == {"old": "opus-4", "new": None}
+    assert {a["session_id"]: a["work_status"] for a in ChatStore(Database(path)).agents()} == {
+        "old": "Still reviewing", "new": "Starting work"}
 
 
 def test_room_is_explicit_and_stays_joinable_after_restart(db):

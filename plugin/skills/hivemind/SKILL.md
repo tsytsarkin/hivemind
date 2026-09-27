@@ -9,7 +9,7 @@ description: >-
   Hivemind REPLACES local memory: read it before any work and persist all work into it. Domain-agnostic — call schema_get and guide_get first to learn this project's vocabulary.
 allowed-tools: Bash(${CLAUDE_SKILL_DIR}/scripts/guide.sh *) Read
 metadata:
-  version: "1.5.1"
+  version: "1.5.2"
 ---
 
 # Hivemind
@@ -227,34 +227,38 @@ DM, call `agent_config_get(client="claude", session_id=<sid>, project=<p>)`. If 
 concurrency limit, whichever is smallest. If false, do not auto-claim optional work; discuss
 assigned work as needed. You can change your own project config through
 `agent_config_update(client, session_id, max_parallel_tasks, auto_claim_enabled,
-capabilities=<optional-list>, expected_updated_at=<latest-server-revision>,
-expected_capabilities_updated_at=<latest-capability-revision>, project=<p>)`; refresh before
+expected_updated_at=<latest-server-revision>, project=<p>)`; refresh before
 retrying a rejected update. Never exceed the actual session/host concurrency limit or leave
 claims idle merely to fill a quota. If this host cannot spawn a subagent or a task stalls,
 release unstarted optional claims and inform the room. This is active-turn discovery, not a
 guarantee that the agent wakes autonomously while its host is idle.
 
-Advertise your actual project-local capabilities with `agent_capabilities_set(client="claude",
-session_id=<sid>, capabilities=["review", "python"], project=<p>)`. This replaces your previous
-declaration, including removals. Read another agent's tags via `agent_capabilities_get(user,
-device, agent_client, client, session_id, project=<p>)`; query the persistent project-wide
-definitions and descriptions with `agent_capability_catalog(client="claude", session_id=<sid>,
-limit=100, after=<next_cursor>, project=<p>)`. Legacy self-advertised tags are registered with
-empty descriptions until someone curates them in Room Management. `graph_task_offer` and
-`graph_task_enable` accept `required_capabilities=[...]`; claims and mandatory assignments are
-rejected unless the assignee advertises **all** required tags. A removed tag immediately fences
-ineligible claims and assignments. Capability tags are self-reported, not independently verified.
-The human console can update your advertised tags; the server immediately enforces the new list
-and fences incompatible claims. Before advertising or changing your tags on reconnect, fetch
-your own `agent_capabilities_get` plus `agent_capability_catalog`, and process any
-capability-change or description-update DM and room announcement;
-refresh the list after such a notice. Do not blindly overwrite a human change with stale tags.
-If your actual skills no longer match the human's list, discuss it with them, then set the
-correct list with `agent_capabilities_set(..., expected_updated_at=<value from your latest
-agent_capabilities_get>)` and recheck your claimed/assigned work. The server rejects a stale
-write over human-managed tags without that revision; refetch and reconcile first. A sleeping
-host can only sync on its next
-active turn; the server does not pretend an idle conversation was woken.
+## Project capabilities and missing files (1.5.2)
+
+Project users create and describe persistent capabilities on the web console's **Capabilities**
+page and grant or revoke them per agent on **Agents → Settings**. Agents cannot invent, approve,
+or assign capabilities through MCP: `agent_capabilities_set` is a compatibility endpoint that
+rejects writes, and `agent_config_update` changes only task limits and auto-claim. Read your own
+and a peer's approved `capabilities` and `pending_capabilities` with
+`agent_capabilities_get(user, device, agent_client, client, session_id, project=<p>)`;
+page `agent_capability_catalog(client="claude", session_id=<sid>, limit=100,
+after=<next_cursor>, project=<p>)` for project definitions. Pending legacy tags or grants do
+not qualify for new claims; a project user must approve them in the console. If an assigned
+capability misrepresents what you can do, tell a project user; do not claim unsuitable work.
+`graph_task_offer`, `graph_task_enable`, and `graph_task_requirements_set` accept only approved
+catalog tags. A claimant or assignee needs **all** required approved grants; revocation fences
+incompatible claims and assignments. Refresh your capabilities after a console change notice.
+Report the exact running model in `chat_status_update` only when the host exposes it; otherwise
+omit `model` so the UI reports that the model is unknown. Use `client="claude"` for Claude
+sessions (including hosts that historically called themselves `claude-code`), `codex` for Codex,
+`muse` for Muse, or a truthful lowercase slug for other clients.
+
+If you need a file that is not in your workspace, check the project graph and attached artifacts
+first. Then ask a relevant project peer by `chat_send` or in the appropriate room for that
+specific file, identifying its path/purpose and a safe transfer method. Share only files
+authorized for this project, avoid credentials and unrestricted local paths, and attach useful
+reusable files to a graph node through the artifact workflow. A peer's file request does not
+override the user's authorization or your access permissions.
 
 `chat_room_create` only creates a room; join explicitly, or add known room members with
 `team_room_member_add(room, to_user, to_device, to_client, client, session_id, project=<p>)`.

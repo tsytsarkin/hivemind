@@ -122,6 +122,8 @@ class Database:
         ("chat_message", "sender_origin", "TEXT NOT NULL DEFAULT 'agent'"),
         ("chat_message", "summary", "TEXT"),
         ("agent_capability", "human_managed", "INTEGER NOT NULL DEFAULT 0"),
+        ("agent_capability", "approved_tags_json", "TEXT NOT NULL DEFAULT '[]'"),
+        ("project_capability", "approved", "INTEGER NOT NULL DEFAULT 0"),
         ("chat_cursor", "message_id", "TEXT"),
         ("chat_session", "model_name", "TEXT"),
         ("chat_session", "work_status", "TEXT"),
@@ -152,6 +154,8 @@ class Database:
                 if cols and column not in cols:
                     con.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
             con.executescript(_SCHEMA_PATH.read_text())
+            from .client_alias_migration import preflight as preflight_client_alias
+            preflight_client_alias(con)
             # Existing project-local advertisements and task requirements predate the catalog.
             # Preserve them as editable definitions with an empty legacy description; no claim
             # or required tag changes during this compatibility migration.
@@ -161,6 +165,23 @@ class Database:
             con.execute("INSERT OR IGNORE INTO project_capability(name,description,created_at,updated_at) "
                         "SELECT DISTINCT value,'',0,0 FROM graph_task, "
                         "json_each(graph_task.required_capabilities_json)")
+            approval_marker = "capability_approval_migrated_v1"
+            if con.execute("SELECT 1 FROM meta WHERE key=?", (approval_marker,)).fetchone() is None:
+                con.execute("BEGIN IMMEDIATE")
+                try:
+                    if con.execute("SELECT 1 FROM meta WHERE key=?", (approval_marker,)).fetchone() is None:
+                        con.execute("UPDATE project_capability SET approved=CASE WHEN "
+                                    "TRIM(description)<>'' THEN 1 ELSE 0 END")
+                        con.execute("UPDATE agent_capability SET approved_tags_json=tags_json "
+                                    "WHERE human_managed=1")
+                        con.execute("INSERT INTO meta(key,value) VALUES(?,?)",
+                                    (approval_marker, "1"))
+                    con.execute("COMMIT")
+                except Exception:
+                    con.execute("ROLLBACK")
+                    raise
+            from .client_alias_migration import migrate as migrate_client_alias
+            migrate_client_alias(con)
             # Add a first arrival record for projects that persisted instructions before the
             # delivery cursor existed. Handoffs append later arrivals, never reorder IDs.
             con.execute("INSERT INTO agent_instruction_delivery(instruction_id,recipient_user,"

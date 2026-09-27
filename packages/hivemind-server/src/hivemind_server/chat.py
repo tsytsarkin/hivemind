@@ -28,6 +28,11 @@ MESSAGE_OVERHEAD = 512
 _RETRY = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
+def canonical_client(client: str) -> str:
+    """Normalize the historical Claude Code client name at the trust boundary."""
+    return "claude" if client == "claude-code" else client
+
+
 def stable_identity(who: Optional[Identity], client: str, session_id: str) -> tuple[str, str, str, str]:
     """Bind the durable address to a real token identity, never a supplied username."""
     if who is None or who.legacy:
@@ -37,6 +42,7 @@ def stable_identity(who: Optional[Identity], client: str, session_id: str) -> tu
         raise Invalid("durable chat requires a lowercase device name in the user token")
     if not isinstance(client, str) or not _CLIENT.fullmatch(client):
         raise Invalid("client must be a 1–32 character lowercase slug")
+    client = canonical_client(client)
     if not isinstance(session_id, str) or not _SESSION.fullmatch(session_id):
         raise Invalid("session_id must be a 1–64 character lowercase slug")
     parts = who.user, who.device, client, session_id
@@ -54,7 +60,7 @@ def _address(stable: StableAddress) -> StableAddress:
         raise Invalid("device must be a 1–64 character lowercase slug")
     if not isinstance(client, str) or not _CLIENT.fullmatch(client):
         raise Invalid("client must be a 1–32 character lowercase slug")
-    return user, device, client
+    return user, device, canonical_client(client)
 
 
 def _room_name(name: str) -> str:
@@ -167,7 +173,7 @@ class ChatStore:
         return {"id": row["message_id"], "seq": row["seq"], "channel": row["channel"],
                 "room_id": row["room_id"], "task_node_id": row["task_node_id"],
                 "sender": (row["sender_user"],
-                row["sender_device"], row["sender_client"]),
+                row["sender_device"], canonical_client(row["sender_client"])),
                 "sender_session": row["sender_session"], "kind": row["message_kind"],
                 "sender_origin": row["sender_origin"],
                 "body": row["body"], "summary": row["summary"], "created_at": row["created_at"],
@@ -243,6 +249,11 @@ class ChatStore:
                 "SELECT * FROM chat_message WHERE sender_user=? AND sender_device=? "
                 "AND sender_client=? AND target_key=? AND retry_key=?",
                 (*who, target_key, idempotency_key)).fetchone()
+            if duplicate is None and who[2] == "claude":
+                duplicate = cur.execute(
+                    "SELECT * FROM chat_message WHERE sender_user=? AND sender_device=? "
+                    "AND sender_client=? AND target_key=? AND retry_key=?",
+                    (who[0], who[1], "claude-code", target_key, idempotency_key)).fetchone()
             if duplicate:
                 if (duplicate["body"] != body or duplicate["message_kind"] != kind or
                         duplicate["task_node_id"] != task_node_id or
@@ -339,8 +350,8 @@ class ChatStore:
             row = cur.execute("SELECT * FROM chat_message WHERE message_id=? "
                               "AND created_at>?", (message_id, t - MESSAGE_TTL)).fetchone()
         if row is None or (row["channel"] == "dm" and who not in (
-                (row["sender_user"], row["sender_device"], row["sender_client"]),
-                (row["target_user"], row["target_device"], row["target_client"]))):
+                _address((row["sender_user"], row["sender_device"], row["sender_client"])),
+                _address((row["target_user"], row["target_device"], row["target_client"])))):
             raise NotFound("message not found")
         return self._public(row)
 
@@ -428,6 +439,8 @@ class ChatStore:
         t = time.time()
         with self.db.write_light() as cur:
             self._touch(cur, who, session, t)
+            # A previously reported exact model remains known within this session
+            # even when later status-only updates omit the optional model field.
             cur.execute("UPDATE chat_session SET model_name=COALESCE(?,model_name), "
                         "work_status=?,work_updated_at=? WHERE user=? AND device=? "
                         "AND client=? AND session_id=?", (model, status.strip(), t, *who, session))

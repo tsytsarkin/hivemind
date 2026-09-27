@@ -158,7 +158,7 @@ def attach(mcp, identities) -> None:
                                  "manager_cancelled", expected_revision=expected_revision,
                                  manager_actor=who, confirm_displace=confirm_displace is True)
 
-    @mcp.tool(annotations=WRITE, description="Set a graph task's required self-advertised capability tags; ineligible holders and assignees are immediately fenced.")
+    @mcp.tool(annotations=WRITE, description="Set a graph task's required project-approved capability tags; ineligible holders and assignees are immediately fenced.")
     @_envelope
     def graph_task_requirements_set(node_id: str, required_capabilities: list[str],
                                     client: str, session_id: str) -> dict:

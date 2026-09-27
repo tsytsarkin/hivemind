@@ -56,7 +56,7 @@ def build_mcp(registry, identities, *, instructions: str = INSTRUCTIONS) -> MCPS
     # alternative was editing every one of them to take it as an argument. A body that needs the
     # project itself rather than its database adds `project = CurrentProject()` the same way.
     db = CurrentDb()
-    real = MCPServer(name="hivemind", instructions=instructions, version="1.5.1")
+    real = MCPServer(name="hivemind", instructions=instructions, version="1.5.2")
     # Registration goes through the proxy so a tool cannot be added without project resolution.
     mcp = ProjectAware(real)
 
@@ -370,7 +370,7 @@ def build_mcp(registry, identities, *, instructions: str = INSTRUCTIONS) -> MCPS
     chat_tools.attach(mcp, _config(), identities)
     from . import graph_task_tools  # graph-backed optional work, fenced lease sidecars
     graph_task_tools.attach(mcp, identities)
-    from . import capability_tools  # project-local self-advertised agent capabilities
+    from . import capability_tools  # project-local project-user-approved agent capabilities
     capability_tools.attach(mcp)
     from . import team_tools  # project rooms, membership and manager handoffs
     team_tools.attach(mcp, identities)

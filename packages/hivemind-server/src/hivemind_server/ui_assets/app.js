@@ -5,10 +5,11 @@ const $ = id => document.getElementById(id);
 // a native form submit. test_ui_assets.py only greps this file for substrings and the Playwright
 // spec needs npm and a live server, so nothing in the pytest suite noticed.
 const q = selector => document.querySelector(selector);
-const S = {csrf:null,project:null,epoch:0,conversationEpoch:0,view:"overview",rooms:[],roomOlder:null,agents:[],caps:[],catalog:[],catalogOlder:null,catalogPaged:false,roomAgentTags:null,roomAgentKey:null,roomAgentUpdatedAt:null,roomConfigUpdatedAt:null,roomConfigParallel:20,roomConfigAuto:true,roomConfigDraft:null,roomChoiceDraft:null,tasks:[],taskCounts:null,assignmentTasks:[],assignmentOlder:null,expandedTasks:new Set(),expandedMessages:new Set(),candidates:[],candidateTask:null,candidateOlder:null,candidateRequest:0,candidateMemberCount:0,instructions:[],olderCursor:null,taskOlder:null,instructionOlder:null,agentOlder:null,latestDisplayedSeq:null,hasHiddenUnseen:false};
+const S = {csrf:null,project:null,epoch:0,conversationEpoch:0,view:"overview",rooms:[],roomOlder:null,agents:[],caps:[],catalog:[],catalogOlder:null,catalogPaged:false,pendingAgents:[],pendingOlder:null,pendingPaged:false,pendingAgentTags:[],roomAgentTags:null,roomAgentKey:null,roomAgentUpdatedAt:null,roomConfigUpdatedAt:null,roomConfigParallel:20,roomConfigAuto:true,roomConfigDraft:null,roomChoiceDraft:null,tasks:[],taskCounts:null,assignmentTasks:[],assignmentOlder:null,expandedTasks:new Set(),expandedMessages:new Set(),candidates:[],candidateTask:null,candidateOlder:null,candidateRequest:0,candidateMemberCount:0,instructions:[],olderCursor:null,taskOlder:null,instructionOlder:null,agentOlder:null,latestDisplayedSeq:null,hasHiddenUnseen:false};
 const headings = {
   overview:["Overview","YOUR WORKSPACE, AT A GLANCE","The conversations and work moving through your project."],
   rooms:["Rooms","CONVERSATIONS BY TOPIC","Create focused spaces and put together the right team."],
+  capabilities:["Capabilities","PROJECT SKILL CATALOG","Define project capabilities and review legacy assignments."],
   agents:["Agents","PEOPLE & PRESENCE","See who is around, where they are working, and what they can do."],
   tasks:["Tasks","GRAPH-BACKED WORK","Assign work, track its status, and keep a clear owner."],
   instructions:["Instructions","HUMAN DIRECTION","Durable requests agents receive when they check in."],
@@ -32,6 +33,15 @@ function openAgentDm(agent){
   $("dm-form").scrollIntoView?.({behavior:"smooth",block:"center"});
   q('#dm-form [name="body"]')?.focus?.();
 }
+function openAgentSettings(agent){
+  const key=JSON.stringify(agent),select=$("capability-agent");
+  if(![...select.options].some(option=>option.value===key)){
+    const option=make("option","",label(agent));option.value=key;select.append(option);
+  }
+  select.value=key;S.roomAgentKey=null;S.roomAgentTags=null;S.pendingAgentTags=[];
+  switchView("agents");loadAgentCapabilities();
+  $("agent-config-form").scrollIntoView?.({behavior:"smooth",block:"center"});
+}
 function humanMessage(destination, recipient, room, body, key) {
   if(destination==="room")return {tail:"messages/room",data:{room,body,idempotency_key:key}};
   if(destination==="agent")return {tail:"dm",data:{address:JSON.parse(recipient),body,
@@ -41,6 +51,9 @@ function humanMessage(destination, recipient, room, body, key) {
 const when = t => t?new Date(t*1000).toLocaleString():"Not seen yet";
 const relative = t => !t?"not seen":Math.max(0,Math.round((Date.now()/1000-t)/60))+" min ago";
 function notice(msg,bad=false) { const n=$("notice"); n.textContent=msg; n.className=bad?"notice error":"notice"; n.hidden=!msg; }
+function showVersion(session){
+  $("server-version").textContent=session.version?"v"+session.version:"Version unavailable";
+}
 function empty(msg) { return make("p","empty",msg); }
 function item(title,detail,symbol,status,symbolClass="") {
   const card=make("article","item-card"),top=make("div","item-top"),head=make("div","row-title");
@@ -74,7 +87,8 @@ async function api(path,opts={}) {
 const url=tail=>"/api/projects/"+encodeURIComponent(S.project)+"/"+tail;
 function resetProjectState(){
   S.rooms=[];S.roomOlder=null;S.agents=[];S.agentOlder=null;S.caps=[];
-  S.catalog=[];S.catalogOlder=null;S.catalogPaged=false;S.roomAgentTags=null;S.roomAgentKey=null;
+  S.catalog=[];S.catalogOlder=null;S.catalogPaged=false;S.pendingAgents=[];S.pendingOlder=null;
+  S.pendingPaged=false;S.pendingAgentTags=[];S.roomAgentTags=null;S.roomAgentKey=null;
   S.roomAgentUpdatedAt=null;S.roomConfigUpdatedAt=null;S.roomConfigDraft=null;
   S.roomConfigParallel=20;S.roomConfigAuto=true;S.roomChoiceDraft=null;
   S.tasks=[];S.taskCounts=null;S.assignmentTasks=[];S.assignmentOlder=null;
@@ -91,7 +105,7 @@ function resetProjectState(){
     $(id).replaceChildren();
   for(const id of ["room-list","overview-rooms","agent-list","overview-agents",
     "task-list","task-counts","instruction-list","message-list","message-room-info",
-    "capability-catalog","capability-choices"])
+    "capability-catalog","capability-choices","agent-pending-choices","pending-agent-list"])
     $(id).replaceChildren();
   for(const id of ["stat-rooms","stat-agents","stat-tasks","stat-queue"])
     $(id).textContent="—";
@@ -159,41 +173,58 @@ function renderRooms(){
   const r=S.rooms.find(x=>x.name===$("message-room").value);
   $("message-room-info").replaceChildren(r?render(r):empty("Choose a room to see its context."));
   $("room-older").hidden=!S.roomOlder;
-  renderCatalog();renderRoomCapabilityEditor();
 }
 function renderCatalog(){
   const cards=S.catalog.map(cap=>{
-    const n=item(cap.name,cap.description||"Description needed (legacy tag)","◈");
-    const edit=make("button","text-button","Edit description");edit.type="button";
+    const n=item(cap.name,cap.description||"Description needed (legacy tag)","◈",
+      cap.approved?"approved":"pending");
+    const edit=make("button","text-button",cap.approved?"Edit description":"Approve capability");
+    edit.type="button";
     edit.addEventListener("click",()=>{
       q('#capability-create-form [name="name"]').value=cap.name;
       q('#capability-create-form [name="description"]').value=cap.description;
+      q('#capability-create-form [name="description"]').focus?.();
     });n.append(edit);return n;
   });
   $("capability-catalog").replaceChildren(...(cards.length?cards:[empty("Add a project capability with a description.")]));
   $("capability-older").hidden=!S.catalogOlder;
 }
-async function loadRoomAgentCapabilities(){
+function renderPendingAssignments(){
+  const cards=S.pendingAgents.map(agent=>{
+    const card=item(label(agent.address),agent.pending_capabilities.join(", "),"◎","pending");
+    const review=make("button","text-button","Review agent");review.type="button";
+    review.addEventListener("click",()=>openAgentSettings(agent.address));card.append(review);
+    return card;
+  });
+  $("pending-agent-list").replaceChildren(...(cards.length?cards:
+    [empty("No pending legacy assignments on this page.")]));
+  $("pending-agent-older").hidden=!S.pendingOlder;
+}
+async function loadAgentCapabilities(){
   const key=$("capability-agent").value,epoch=S.epoch;
   if(!key)return;
   try{
     const address=JSON.parse(key),params=new URLSearchParams(
       {user:address[0],device:address[1],client:address[2]});
-    const data=await api(url("agents/config?"+params));
+    const [data,grants]=await Promise.all([
+      api(url("agents/config?"+params)),api(url("agents/capabilities?"+params))]);
     if(epoch!==S.epoch||key!==$("capability-agent").value)return;
-    S.roomAgentTags=data.capabilities;
-    S.roomAgentUpdatedAt=data.capabilities_updated_at;
+    S.roomAgentTags=grants.capabilities;
+    S.pendingAgentTags=grants.pending_capabilities||[];
+    S.roomAgentUpdatedAt=grants.updated_at;
     S.roomConfigUpdatedAt=data.updated_at;
     S.roomConfigParallel=data.max_parallel_tasks;
     S.roomConfigAuto=data.auto_claim_enabled;
     S.roomAgentKey=key;
-    renderRoomCapabilityEditor();
+    renderAgentCapabilityEditor();
   }catch(e){if(epoch===S.epoch)notice(e.message,true);}
 }
-function renderRoomCapabilityEditor(){
-  const room=S.rooms.find(r=>r.name===$("capability-room").value);
+function renderAgentCapabilityEditor(){
   const memberSelect=$("capability-agent"),old=memberSelect.value;
-  const members=room?.members.filter(a=>!["human","webui"].includes(a[2]))||[];
+  const members=S.agents.map(a=>a.address).filter(a=>!["human","webui"].includes(a[2]));
+  if(old&&!members.some(a=>JSON.stringify(a)===old)){
+    try{members.push(JSON.parse(old));}catch(_){/* Drop malformed old selection. */}
+  }
   const options=members.map(a=>{const o=make("option","",label(a));o.value=JSON.stringify(a);return o;});
   memberSelect.replaceChildren(...options);
   memberSelect.value=options.some(o=>o.value===old)?old:(options[0]?.value||"");
@@ -201,10 +232,12 @@ function renderRoomCapabilityEditor(){
   if(S.roomAgentKey!==key){S.roomAgentTags=null;S.roomAgentUpdatedAt=null;
     S.roomConfigUpdatedAt=null;S.roomConfigDraft=null;
     S.roomAgentKey=key;S.roomChoiceDraft=null;
-    if(key)loadRoomAgentCapabilities();}
+    S.pendingAgentTags=[];
+    if(key)loadAgentCapabilities();}
   const choices=$("capability-choices");
   if(S.roomAgentTags===null){
-    choices.replaceChildren(empty(key?"Loading agent capabilities…":"Choose a room member."));
+    choices.replaceChildren(empty(key?"Loading agent settings…":"Choose a project agent."));
+    $("agent-pending-choices").replaceChildren();
     q('#capability-assign-form [type="submit"]').disabled=true;
     q('#agent-config-form [type="submit"]').disabled=true;
     return;
@@ -213,25 +246,33 @@ function renderRoomCapabilityEditor(){
   $("agent-config-parallel").value=draft?.parallel??S.roomConfigParallel;
   $("agent-config-auto-claim").checked=draft?.auto??S.roomConfigAuto;
   q('#agent-config-form [type="submit"]').disabled=false;
-  const selected=S.roomChoiceDraft?.key===key?S.roomChoiceDraft.tags:new Set(S.roomAgentTags);
+  const pending=new Set(S.pendingAgentTags);
+  const selected=S.roomChoiceDraft?.key===key?S.roomChoiceDraft.tags:
+    new Set(S.roomAgentTags.filter(tag=>!pending.has(tag)));
   choices.replaceChildren(...S.catalog.map(cap=>{
     const row=make("label","capability-choice"),input=make("input");input.type="checkbox";
-    input.value=cap.name;input.checked=selected.has(cap.name);
+    input.value=cap.name;input.checked=selected.has(cap.name)&&!!cap.approved;
+    input.disabled=!cap.approved;
     input.addEventListener("change",()=>{
       if(!S.roomChoiceDraft||S.roomChoiceDraft.key!==key)
-        S.roomChoiceDraft={key,tags:new Set(S.roomAgentTags)};
+        S.roomChoiceDraft={key,tags:new Set(S.roomAgentTags.filter(tag=>!pending.has(tag)))};
       if(input.checked)S.roomChoiceDraft.tags.add(cap.name);
       else S.roomChoiceDraft.tags.delete(cap.name);
     });
-    row.append(input,make("span","",cap.name+" — "+(cap.description||"description needed")));
+    row.append(input,make("span","",cap.name+" — "+
+      (cap.description||"description needed")+(pending.has(cap.name)?" · pending agent approval":"")+
+      (!cap.approved?" · approve definition first":"")));
     return row;
   }));
   if(!S.catalog.length)choices.replaceChildren(empty("Create a capability to assign to agents."));
+  $("agent-pending-choices").replaceChildren(...(pending.size?[
+    make("p","muted","Pending legacy tags: "+[...pending].join(", ")+
+      ". Check approved tags above to confirm them. Saving removes any unselected pending tags.")]:[]));
   q('#capability-assign-form [type="submit"]').disabled=false;
 }
-function selectedRoomCapabilities(){
+function selectedAgentCapabilities(){
   const selected=$("capability-agent").value;
-  if(!selected||S.roomAgentTags===null)throw Error("Choose a room agent first.");
+  if(!selected||S.roomAgentTags===null)throw Error("Choose a project agent first.");
   const visible=new Set(S.catalog.map(cap=>cap.name));
   const current=S.roomChoiceDraft?.key===selected?S.roomChoiceDraft.tags:
     new Set([...q('#capability-choices').querySelectorAll('input:checked')].map(input=>input.value));
@@ -271,7 +312,7 @@ function renderAgents(){
       const card=make("div","agent-session");
       card.append(make("small","",(session.online?"Online session: ":"Session: ")+
         a.address.join("-")+"-"+session.session_id+" · Model: "+
-        (session.model||"Model not reported")));
+        (session.model||"Model unknown")));
       if(session.work_status){
         const stale=!session.online||!session.work_updated_at||
           Date.now()/1000-session.work_updated_at>30*60;
@@ -291,6 +332,9 @@ function renderAgents(){
       const dm=make("button","text-button","DM");dm.type="button";
       dm.setAttribute("aria-label","DM "+label(a.address));
       dm.addEventListener("click",()=>openAgentDm(a.address));n.append(dm);
+      const settings=make("button","text-button","Settings");settings.type="button";
+      settings.setAttribute("aria-label","Settings for "+label(a.address));
+      settings.addEventListener("click",()=>openAgentSettings(a.address));n.append(settings);
     }
     return n;
   };
@@ -299,6 +343,7 @@ function renderAgents(){
   $("overview-agents").replaceChildren(...(list.length?list.slice(0,5).map(render):[empty("No agents seen yet.")]));
   $("agent-older").hidden=!S.agentOlder;
   renderAgentPickers();
+  renderAgentCapabilityEditor();
 }
 function renderAgentPickers(){
   const agents=S.agents.filter(a=>!["human","webui"].includes(a.address[2]));
@@ -349,7 +394,7 @@ function renderAssignmentCandidates(){
   $("assign-eligibility").textContent=task?
     (selected?.disabled&&select.value?"Selected member now lacks required tags; choose another. ":"")+
     eligible+" eligible of "+S.candidates.length+" shown ("+S.candidateMemberCount+" room members) · " +
-      "Capabilities are self-advertised; the server checks again when assigning.":
+      "Capabilities are assigned by project users; the server checks again when assigning.":
     "Choose an available task to see eligible room members.";
   $("candidate-older").hidden=!S.candidateOlder;
 }
@@ -492,7 +537,7 @@ async function messages({older=false}={}){
 async function refresh(){
   if(!S.project)return;const epoch=S.epoch,status=$("task-status-filter").value;
   try{
-    const [r,a,t,i,summary,unfiltered,catalog]=await Promise.all([
+    const [r,a,t,i,summary,unfiltered,catalog,pending]=await Promise.all([
       ...["rooms","agents","tasks?status="+encodeURIComponent(status),"instructions","summary"]
         .map(x=>api(url(x))),
       // brief=1: this second request exists only to keep the assignment dropdown showing every
@@ -500,7 +545,8 @@ async function refresh(){
       // all of which the listing already returns. Without it the server re-ran assignments.view
       // and graph_tasks.read per task, so a filtered view cost ~4 read transactions per task
       // twice over, every 20-second tick.
-      status==="all"?Promise.resolve(null):api(url("tasks?brief=1")),api(url("capabilities"))]);
+      status==="all"?Promise.resolve(null):api(url("tasks?brief=1")),
+      api(url("capabilities")),api(url("capabilities/pending"))]);
     if(epoch!==S.epoch||status!==$("task-status-filter").value)return;
     // Drop loaded pages at refresh: old cursors can skip inserted members and retain removed ones.
     S.rooms=r.rooms;S.roomOlder=r.older_cursor;
@@ -514,6 +560,10 @@ async function refresh(){
     // seen-filter dropped all of it. Once the user has paged, the cursor is theirs to advance —
     // including to null, which means they reached the end and must not be sent back to page two.
     if(!S.catalogPaged)S.catalogOlder=catalog.next_cursor;
+    const pendingByAddress=new Map(S.pendingAgents.map(agent=>[JSON.stringify(agent.address),agent]));
+    for(const agent of pending.agents)pendingByAddress.set(JSON.stringify(agent.address),agent);
+    S.pendingAgents=[...pendingByAddress.values()];
+    if(!S.pendingPaged)S.pendingOlder=pending.next_cursor;
     const selectedTask=$("task-select").value;
     const pinnedTask=S.assignmentTasks.find(task=>task.node_id===selectedTask);
     S.tasks=t.tasks;
@@ -528,8 +578,9 @@ async function refresh(){
     S.instructionOlder=i.older_cursor;
     $("breadcrumb-project").textContent=S.project.toUpperCase();
     $("refreshed").textContent="Updated "+new Date().toLocaleTimeString();
-    renderRooms();renderAgents();renderTasks();renderInstructions();
-    if(S.view==="rooms"&&S.roomAgentKey)await loadRoomAgentCapabilities();
+    renderRooms();renderCatalog();renderPendingAssignments();
+    renderAgents();renderTasks();renderInstructions();
+    if(S.view==="agents"&&S.roomAgentKey)await loadAgentCapabilities();
     $("stat-rooms").textContent=summary.online_agents;
     $("stat-agents").textContent=summary.waiting_assignments;
     $("stat-tasks").textContent=summary.overdue_updates;
@@ -589,6 +640,7 @@ function init(){
       const result=await api("/api/login",{method:"POST",body:JSON.stringify({token:d.get("token")})});
       if(epoch!==S.epoch)return;
       $("login-token").value="";S.csrf=result.csrf_token;
+      showVersion(result);
       $("sidebar-user").textContent=result.user+" / "+result.device;
       $("login-error").textContent="";$("login-screen").hidden=true;$("app-shell").hidden=false;
       await loadProjects();
@@ -628,11 +680,10 @@ function init(){
       renderRooms();renderAgents();
     }catch(e){notice(e.message,true);}
   });
-  $("capability-room").addEventListener("change",renderRoomCapabilityEditor);
   $("capability-agent").addEventListener("change",()=>{
     S.roomAgentKey=null;S.roomAgentTags=null;S.roomAgentUpdatedAt=null;
-    S.roomConfigUpdatedAt=null;S.roomConfigDraft=null;S.roomChoiceDraft=null;
-    renderRoomCapabilityEditor();
+    S.pendingAgentTags=[];S.roomConfigUpdatedAt=null;S.roomConfigDraft=null;
+    S.roomChoiceDraft=null;renderAgentCapabilityEditor();
   });
   const updateConfigDraft=()=>S.roomConfigDraft={key:$("capability-agent").value,
     parallel:$("agent-config-parallel").value,auto:$("agent-config-auto-claim").checked};
@@ -647,7 +698,18 @@ function init(){
       const seen=new Set(S.catalog.map(cap=>cap.name));
       S.catalog.push(...page.capabilities.filter(cap=>!seen.has(cap.name)));
       S.catalogOlder=page.next_cursor;S.catalogPaged=true;
-      renderCatalog();renderRoomCapabilityEditor();
+      renderCatalog();renderAgentCapabilityEditor();
+    }catch(e){notice(e.message,true);}
+  });
+  $("pending-agent-older").addEventListener("click",async()=>{
+    if(!S.pendingOlder)return;
+    const epoch=S.epoch,cursor=S.pendingOlder;
+    try{
+      const page=await api(url("capabilities/pending?after="+encodeURIComponent(cursor)));
+      if(epoch!==S.epoch||cursor!==S.pendingOlder)return;
+      const known=new Set(S.pendingAgents.map(agent=>JSON.stringify(agent.address)));
+      S.pendingAgents.push(...page.agents.filter(agent=>!known.has(JSON.stringify(agent.address))));
+      S.pendingOlder=page.next_cursor;S.pendingPaged=true;renderPendingAssignments();
     }catch(e){notice(e.message,true);}
   });
   $("task-select").addEventListener("change",()=>loadCandidates());
@@ -694,22 +756,29 @@ function init(){
   $("message-room").addEventListener("change",messages);
   $("message-older").addEventListener("click",()=>messages({older:true}));
   form("room-create-form",(f,d)=>mutate("rooms",{name:d.get("name").trim(),description:d.get("description").trim()},"Room created."));
-  form("capability-create-form",(f,d)=>mutate("capabilities",
-    {name:d.get("name").trim(),description:d.get("description").trim()},
-    "Project capability saved."));
+  form("capability-create-form",(f,d)=>{
+    const name=d.get("name").trim(),prior=S.catalog.find(cap=>cap.name===name);
+    return mutate("capabilities",{name,description:d.get("description").trim(),
+      expected_updated_at:prior?.updated_at??null},"Project capability saved.");
+  });
   form("capability-assign-form",(f,d)=>{
     let payload;
-    try{payload=selectedRoomCapabilities();}
+    try{payload=selectedAgentCapabilities();}
     catch(e){notice(e.message,true);return;}
+    const removed=S.pendingAgentTags.filter(tag=>!payload.capabilities.includes(tag));
+    if(removed.length&&!window.confirm("Discard unapproved legacy tags "+removed.join(", ")+
+      " for this agent?"))return;
     return mutate("agents/capabilities",payload,
       "Project-wide agent capabilities updated.",result=>{
         S.roomAgentTags=result.capabilities;
+        S.pendingAgentTags=result.pending_capabilities||[];
         S.roomAgentUpdatedAt=result.updated_at;S.roomChoiceDraft=null;
+        S.pendingAgents=[];S.pendingOlder=null;S.pendingPaged=false;
       });
   });
   form("agent-config-form",(f,d)=>{
     if(!$("capability-agent").value||S.roomAgentTags===null){
-      notice("Choose a room agent first.",true);return;
+      notice("Choose a project agent first.",true);return;
     }
     return mutate("agents/config",{address:JSON.parse($("capability-agent").value),
       max_parallel_tasks:Number($("agent-config-parallel").value),
@@ -761,6 +830,7 @@ function init(){
   api("/api/session").then(session=>{
     if(resumeEpoch!==S.epoch)return;
     S.csrf=session.csrf_token;$("sidebar-user").textContent=session.user+" / "+session.device;
+    showVersion(session);
     $("login-screen").hidden=true;$("app-shell").hidden=false;return loadProjects();
   }).catch(()=>{if(resumeEpoch===S.epoch)showLogin();});
 }

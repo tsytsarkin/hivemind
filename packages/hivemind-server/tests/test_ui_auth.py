@@ -2,10 +2,27 @@
 
 import httpx
 import pytest
+from importlib.metadata import version
 
 from hivemind_server import projects_meta
 from hivemind_server.config import Config
 from hivemind_server.identity import IdentityStore
+
+
+@pytest.mark.anyio
+async def test_authenticated_console_session_reports_running_server_version(env):
+    from hivemind_server.ui_app import build_ui_app
+
+    mcp, _, _ = env
+    ids = IdentityStore(mcp.state.cfg.identities_path)
+    token = ids.mint("nik", "mac")
+    ui = build_ui_app(mcp.state.cfg, mcp.state.registry, ids)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=ui),
+                                 base_url="http://testserver") as client:
+        await client.post("/api/login", json={"token": token})
+        current = await client.get("/api/session")
+    assert current.status_code == 200
+    assert current.json()["version"] == version("hivemind-server")
 
 
 @pytest.mark.anyio

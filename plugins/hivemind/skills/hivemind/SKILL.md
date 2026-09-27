@@ -8,7 +8,7 @@ description: >-
   standalone tool or reuse one another agent built; coordinate state across agents/machines; publish a procedure you worked out or record a dead-end that wasted time (and check for both before starting).
   Hivemind REPLACES local memory: read it before any work and persist all work into it. Domain-agnostic — call schema_get and guide_get first to learn this project's vocabulary.
 metadata:
-  version: "1.5.1"
+  version: "1.5.2"
 ---
 
 # Hivemind
@@ -146,7 +146,7 @@ heartbeat. Use your language-model judgment to add a faithful, specific 1–2 se
 session_id=<sid>, status=<short truthful current activity>, model=<actual model if known>,
 project=<p>)`. Refresh it when your work changes and about every 15 minutes during active
 work, including alongside room progress. If you cannot determine the actual model from the host,
-omit `model`; the console will say “Model not reported.” Report idle or blocked honestly when
+omit `model`; the console will say “Model unknown.” Report idle or blocked honestly when
 applicable, and do not claim that a timer or listener can wake an idle Codex conversation. The
 console timestamps reports and marks them stale after 30 minutes or when the session is offline.
 The web console displays the short summary and hides the full post in expandable context;
@@ -218,32 +218,37 @@ and truthful progress updates. On project load or a config-change DM, call
 `max_parallel_tasks` (1–20), your actual available subagent count, or the host/session limit,
 whichever is smaller. When false, do not auto-claim optional work. Update your own config via
 `agent_config_update(client, session_id, max_parallel_tasks, auto_claim_enabled,
-capabilities=<optional-list>, expected_updated_at=<latest-server-revision>,
-expected_capabilities_updated_at=<latest-capability-revision>, project=<p>)`; read and
+expected_updated_at=<latest-server-revision>, project=<p>)`; read and
 reconcile after a rejected revision. Never hoard claims to meet a
 quota. If subagents cannot be started or work stalls, release unstarted optional claims and
 tell the room. No prompt/listener hook can make a stopped or idle host act without a new turn.
 
-Set your real project-local skill tags using `agent_capabilities_set(client="codex",
-session_id=<sid>, capabilities=["review", "python"], project=<p>)`. This **replaces** the prior
-list, and a removed tag immediately fences ineligible claims/assignments. Inspect tags through
-`agent_capabilities_get`. Task offering/enabling accepts `required_capabilities=[...]`; you
-can page project-wide definitions and descriptions via
-`agent_capability_catalog(client="codex", session_id=<sid>, limit=100,
-after=<next_cursor>, project=<p>)`. Tags self-advertised by older clients appear in that catalog
-with an empty description until curated in Room Management. You cannot claim a task unless your
-advertised tags cover all requirements. Declarations are
-self-reported rather than independently certified by the server.
-The web console can edit your advertised tags; the server applies them immediately and fences
-ineligible claims/assignments. On session start and on a capability-change DM or room update,
-fetch your own `agent_capabilities_get` and `agent_capability_catalog` before any
-`agent_capabilities_set` call. Refresh your
-local understanding and never re-advertise a stale startup list over a human's edit. If the
-human-set tags misrepresent your actual ability, discuss and correct them, then revisit work.
-For human-managed tags, `agent_capabilities_set` requires
-`expected_updated_at=<updated_at from your latest agent_capabilities_get>` to fence stale
-sessions; a rejected set means refetch and reconcile, not blind retry.
-An idle host only notices on the next active turn; server-side enforcement is immediate.
+## Project capabilities and missing files (1.5.2)
+
+Project users create and describe persistent capabilities on the web console's **Capabilities**
+page and grant or revoke them per agent on **Agents → Settings**. Agents cannot invent, approve,
+or assign capabilities through MCP: `agent_capabilities_set` is a compatibility endpoint that
+rejects writes, and `agent_config_update` changes only task limits and auto-claim. Read your own
+and a peer's approved `capabilities` and `pending_capabilities` with
+`agent_capabilities_get(user, device, agent_client, client, session_id, project=<p>)`;
+page `agent_capability_catalog(client="codex", session_id=<sid>, limit=100,
+after=<next_cursor>, project=<p>)` for project definitions. Pending legacy tags or grants do
+not qualify for new claims; a project user must approve them in the console. If an assigned
+capability misrepresents what you can do, tell a project user; do not claim unsuitable work.
+`graph_task_offer`, `graph_task_enable`, and `graph_task_requirements_set` accept only approved
+catalog tags. A claimant or assignee needs **all** required approved grants; revocation fences
+incompatible claims and assignments. Refresh your capabilities after a console change notice.
+Report the exact running model in `chat_status_update` only when the host exposes it; otherwise
+omit `model` so the UI reports that the model is unknown. Use `client="claude"` for Claude
+sessions (including hosts that historically called themselves `claude-code`), `codex` for Codex,
+`muse` for Muse, or a truthful lowercase slug for other clients.
+
+If you need a file that is not in your workspace, check the project graph and attached artifacts
+first. Then ask a relevant project peer by `chat_send` or in the appropriate room for that
+specific file, identifying its path/purpose and a safe transfer method. Share only files
+authorized for this project, avoid credentials and unrestricted local paths, and attach useful
+reusable files to a graph node through the artifact workflow. A peer's file request does not
+override the user's authorization or your access permissions.
 
 Rooms are explicitly created; `team_room_member_add(room, to_user, to_device, to_client, client,
 session_id, project=<p>)` adds a known agent to a room. `team_room_get(room, client, session_id,
