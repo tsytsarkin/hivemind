@@ -49,10 +49,17 @@ def catalog(db: Database, *, after: str | None = None, limit: int = 100) -> dict
     if after is not None and (not isinstance(after, str) or not _TAG.fullmatch(after)):
         raise Invalid("invalid capability cursor")
     with db.read() as cur:
+        # Revision FIRST. db.read() hands out a bare cursor with no BEGIN, so these two
+        # statements see independent snapshots: a retire committing between them would pair
+        # pre-retire rows with the post-retire revision, and because the console MERGES the
+        # catalog and never drops entries, the retired capability would sit in the UI looking
+        # grantable — its buttons 409ing — until some unrelated edit moved the revision again.
+        # Read this way round the race can only under-report the revision, which costs one
+        # harmless extra invalidation instead of a stale row that never clears.
+        revision = cur.execute("SELECT MAX(updated_at) FROM project_capability").fetchone()[0]
         rows = cur.execute("SELECT name,description,updated_at,approved FROM project_capability "
                            "WHERE name>? AND deleted_at IS NULL ORDER BY name LIMIT ?",
                            (after or "", limit + 1)).fetchall()
-        revision = cur.execute("SELECT MAX(updated_at) FROM project_capability").fetchone()[0]
     more = len(rows) > limit
     rows = rows[:limit]
     return {"capabilities": [{**dict(row), "approved": bool(row["approved"])} for row in rows],

@@ -314,3 +314,27 @@ def test_upgrade_keeps_an_agent_able_to_finish_work_it_already_holds(db, tmp_pat
         "a tag the agent's own live claim depends on must stay approved"
     with Database(db.path).read() as cur:
         graph_tasks.eligible(cur, nid, OWNER)        # must not raise
+
+
+def test_catalog_never_pairs_stale_rows_with_a_newer_revision(db):
+    """db.read() yields a bare cursor with no BEGIN, so the rows query and the revision query see
+    independent snapshots. Read rows-then-revision, a retire committing in between returns
+    pre-retire rows stamped with the post-retire revision — and because the console merges the
+    catalog and never drops entries, that retired tag stays on screen looking grantable until
+    some unrelated edit moves the revision again. Reading the revision first can only
+    under-report it, which costs one harmless extra invalidation."""
+    from hivemind_server import capabilities
+
+    created = capabilities.define(db, "review", "Review source code")
+    capabilities.define(db, "swift", "Swift work")
+    seen = capabilities.catalog(db)
+    assert [c["name"] for c in seen["capabilities"]] == ["review", "swift"]
+
+    capabilities.retire(db, "review", expected_updated_at=created["updated_at"])
+    after = capabilities.catalog(db)
+    assert [c["name"] for c in after["capabilities"]] == ["swift"]
+    assert after["revision"] > seen["revision"], \
+        "the revision must move so the console drops its cached pages"
+    # The ordering invariant itself: whatever the revision reports, it can never be NEWER than
+    # the rows it is returned with, which is what made a stale row survive invalidation.
+    assert after["revision"] >= max(c["updated_at"] for c in after["capabilities"])

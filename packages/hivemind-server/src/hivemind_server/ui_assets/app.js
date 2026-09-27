@@ -495,7 +495,10 @@ function renderOverviewTasks(){
   const recent=S.overviewTasks.filter(t=>t.state!=="complete").slice(0,5).map(task=>{
     const room=S.rooms.find(r=>r.room_id===task.room_id);
     const context=(room?"# "+room.name+" · ":"")+Array.from(task.summary||"").slice(0,120).join("");
-    return item(task.title,context,"☷",task.state.replaceAll("_"," "));
+    // ||node_id as every other task render site does: task_listing takes `title` straight from
+    // props, which is absent on a node that never set one, and make() stringifies — so this
+    // card read literally "null" while the Tasks page showed the id for the same task.
+    return item(task.title||task.node_id,context,"☷",task.state.replaceAll("_"," "));
   });
   $("overview-task-list").replaceChildren(...(recent.length?recent:[empty("No open tasks right now.")]));
 }
@@ -579,7 +582,7 @@ async function refresh(){
       // twice over, every 20-second tick.
       status==="all"?Promise.resolve(null):api(url("tasks?brief=1")),
       api(url("capabilities")),api(url("capabilities/pending")),
-      api(url("tasks?status=open&brief=1&limit=5"))]);
+      api(url("tasks?status=open&brief=1&limit=5&counts=0"))]);
     if(epoch!==S.epoch||status!==$("task-status-filter").value)return;
     // Drop loaded pages at refresh: old cursors can skip inserted members and retain removed ones.
     S.rooms=r.rooms;S.roomOlder=r.older_cursor;

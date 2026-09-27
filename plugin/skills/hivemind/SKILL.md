@@ -233,7 +233,7 @@ claims idle merely to fill a quota. If this host cannot spawn a subagent or a ta
 release unstarted optional claims and inform the room. This is active-turn discovery, not a
 guarantee that the agent wakes autonomously while its host is idle.
 
-## Project capabilities and missing files (1.5.2)
+## Project capabilities and missing files (1.5.3)
 
 Project users create and describe persistent capabilities on the web console's **Capabilities**
 page and grant or revoke them per agent on **Agents → Settings**. Agents cannot invent, approve,
@@ -245,6 +245,15 @@ page `agent_capability_catalog(client="claude", session_id=<sid>, limit=100,
 after=<next_cursor>, project=<p>)` for project definitions. Pending legacy tags or grants do
 not qualify for new claims; a project user must approve them in the console. If an assigned
 capability misrepresents what you can do, tell a project user; do not claim unsuitable work.
+A capability can also be **retired**. A project user retires it on the console once no open task
+still requires it; the definition leaves the catalog, every agent's grant of it is removed, and
+any claim or assignment that depended on it is fenced. Completed task history keeps the tag.
+So a tag you hold can disappear between turns without you doing anything: re-read
+`agent_capabilities_get` after a change notice rather than assuming a cached list still holds,
+and if a claim or assignment you were relying on is gone, that is why. Re-advertising a retired
+tag does not bring it back — it sits pending and cannot be approved until a project user
+recreates the definition.
+
 `graph_task_offer`, `graph_task_enable`, and `graph_task_requirements_set` accept only approved
 catalog tags. A claimant or assignee needs **all** required approved grants; revocation fences
 incompatible claims and assignments. Refresh your capabilities after a console change notice.

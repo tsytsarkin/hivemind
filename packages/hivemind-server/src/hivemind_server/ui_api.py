@@ -138,8 +138,13 @@ async def handle(req, p, who, identities: IdentityStore):
                                 "member_count": page["member_count"]})
             if path == ["tasks"]:
                 limit = _page(req)
+                # counts=0 skips the task_states CTE and its GROUP BY over every task. The
+                # console's Overview preview asks for five rows and renders its chips from
+                # S.taskCounts — the counts on the main list request — so computing them a
+                # second time here was a full aggregate per 20-second tick, thrown away.
                 page = task_listing.page(db, status=req.query_params.get("status", "all"),
-                    before_id=req.query_params.get("before_id"), limit=limit, with_counts=True)
+                    before_id=req.query_params.get("before_id"), limit=limit,
+                    with_counts=req.query_params.get("counts") != "0")
                 # The enrichment below costs two further read transactions PER TASK on top of
                 # the get_node already inside task_listing.page. brief=1 skips it for callers
                 # that only need what the listing returns (node_id, room, state, title,
