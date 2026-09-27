@@ -21,4 +21,4 @@ hivemind-admin --project default apply-pack packs/research-workflow/schema.json
 ```
 Re-applying is idempotent: a byte-identical type is skipped, so a re-apply reports it `unchanged`
 rather than inflating its version — which is also how this pack was checked against the project it
-was captured from. See [../../docs/packs.md](../../docs/packs.md).
+was captured from. See the packs guide in the Hivemind graph (**Documentation** in the root README.md).

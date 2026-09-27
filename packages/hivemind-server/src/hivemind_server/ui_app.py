@@ -128,13 +128,16 @@ def build_ui_app(cfg, registry, identities: IdentityStore) -> Starlette:
 
     async def asset(req: Request):
         name = req.path_params["name"]
+        # FONTS-LICENSE is served, not just shipped: the woff2 files below go out over HTTP,
+        # and the OFL asks that its notice travel with them. One filename makes it reachable.
         if name not in ("styles.css", "app.js", "theme.js", "claude.svg", "codex.svg",
                         "red-emblem.svg", "oxanium-latin.woff2",
                         "rajdhani-regular-latin.woff2", "rajdhani-semibold-latin.woff2",
-                        "rajdhani-bold-latin.woff2"):
+                        "rajdhani-bold-latin.woff2", "FONTS-LICENSE"):
             return _json({"error": "not found"}, 404)
         media_type = ("text/css" if name.endswith(".css") else "image/svg+xml" if
                       name.endswith(".svg") else "font/woff2" if name.endswith(".woff2")
+                      else "text/plain; charset=utf-8" if name == "FONTS-LICENSE"
                       else "text/javascript")
         return FileResponse(ASSETS / name, media_type=media_type)
 

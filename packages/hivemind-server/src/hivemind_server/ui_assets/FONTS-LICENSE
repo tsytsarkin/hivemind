@@ -4,7 +4,16 @@ Copyright 2019 The Oxanium Project Authors (https://github.com/sevmeyer/oxanium)
 Rajdhani (Latin subset): https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;600;700
 Copyright (c) 2014, Indian Type Foundry (info@indiantypefoundry.com).
 
-Both fonts are distributed, unmodified, under the SIL Open Font License, Version 1.1.
+Both fonts are distributed under the SIL Open Font License, Version 1.1.
+
+These files are MODIFIED copies, not the upstream originals: each is a Latin-subset WOFF2 build
+produced by the Google Fonts CSS API, carrying only the glyphs this console renders (14–16 KB
+each, against megabytes for the full families). `oxanium-latin.woff2` is additionally a variable
+font spanning weights 400–700, which is why styles.css declares `font-weight:400 700` for it
+rather than three static faces. Subsetting and format conversion are modifications under the
+OFL; neither font's Reserved Font Name is used for these builds, and the license text below
+travels with them.
+
 Upstream license texts:
 https://github.com/google/fonts/blob/main/ofl/oxanium/OFL.txt
 https://github.com/google/fonts/blob/main/ofl/rajdhani/OFL.txt

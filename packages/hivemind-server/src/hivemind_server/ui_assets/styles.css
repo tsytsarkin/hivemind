@@ -274,6 +274,11 @@ textarea { resize:vertical; min-height:88px }
 :root[data-theme="red"] .chip.online,
 :root[data-theme="red"] .chip.complete,
 :root[data-theme="red"] .chip.available { background:#1c392c; color:#a8efbd }
+/* The harness badges were the two swatches the Red block missed: a Codex badge stayed teal
+   (#a8e4cf on #254b43) against a #2b1d22 card, which is the one place the Blue palette showed
+   through on the Agents page. */
+:root[data-theme="red"] .harness-icon.harness-claude { color:#f0c3b3; background:#5a3129 }
+:root[data-theme="red"] .harness-icon.harness-codex { color:#eed4ce; background:#4b262d }
 
 @media(max-width:1150px) {
   .stats-grid { grid-template-columns:repeat(2,minmax(0,1fr)) }

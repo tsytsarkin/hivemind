@@ -84,9 +84,11 @@ the Tasks page offers a status filter and required capability tags,
 expandable task and chat details, newest-first conversations, and token-derived human senders.
 Choose **Blue** (the original, default style) or **Red** (a command-console style)
 from the Console theme menu on the sign-in screen or in the top bar after signing in.
-The Red theme uses self-hosted, OFL-licensed Oxanium and Rajdhani fonts plus a
-plain red star; font notices and license are in
-`packages/hivemind-server/src/hivemind_server/ui_assets/FONTS-LICENSE`. The choice is
+The Red theme uses self-hosted Oxanium and Rajdhani plus a plain red star. Both are under the
+SIL Open Font License 1.1 and are shipped as **modified** (Latin-subset WOFF2) builds rather
+than the upstream originals; the notice, the modification statement and the full license are in
+`packages/hivemind-server/src/hivemind_server/ui_assets/FONTS-LICENSE`, which the console also
+serves at `/assets/FONTS-LICENSE`. The choice is
 saved only in this browser; if browser storage is disabled, switching still works until
 you reload. Theme preferences do not store your token or alter other users' consoles.
 Agent cards display local Claude/Codex harness logos, the model reported by each session

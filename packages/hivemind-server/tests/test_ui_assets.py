@@ -83,3 +83,35 @@ def test_the_id_helper_is_never_handed_a_css_selector():
     source = (pathlib.Path(ui_app.__file__).parent / "ui_assets" / "app.js").read_text()
     offenders = re.findall(r"\$\(\s*['\"][#.\[][^'\"]*['\"]", source)
     assert offenders == [], f"$ takes an element id, not a selector — use q(): {offenders}"
+
+
+@pytest.mark.anyio
+async def test_the_theme_token_agrees_between_the_script_and_the_stylesheet(env):
+    """theme.js writes a token into data-theme and styles.css is the only thing that reads it, so
+    nothing but a browser notices when the two disagree. 89f6026 renamed red-alert -> red in both;
+    had it missed the stylesheet, every pytest and node test would still have passed and Red would
+    have shipped as a silent no-op identical to Blue. The Playwright spec that would catch it needs
+    npm and a live server, which is exactly the gap this closes.
+    """
+    import re
+    app, _, _ = env
+    ui = build_ui_app(app.state.cfg, app.state.registry, app.state.identities)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=ui),
+                                 base_url="http://localhost") as client:
+        css = await client.get("/assets/styles.css")
+        script = await client.get("/assets/theme.js")
+        shell = await client.get("/")
+        licence = await client.get("/assets/FONTS-LICENSE")
+    written = set(re.findall(r"""['"]([a-z-]+)['"]\s*:\s*['"]blue['"]""", script.text)) | \
+        set(re.findall(r"value === '([a-z-]+)'", script.text))
+    applied = set(re.findall(r'\[data-theme="([a-z-]+)"\]', css.text))
+    assert "red" in applied, "the stylesheet defines no Red rules; the theme would be a no-op"
+    for token in ("red",):
+        assert token in written, f"theme.js no longer produces {token!r}"
+    # every token the stylesheet styles must be one the script can actually emit
+    assert applied <= {"red", "blue"}, applied
+    # picker options must offer exactly the tokens the script accepts
+    assert '<option value="red">' in shell.text and '<option value="blue">' in shell.text
+    # the OFL notice is reachable beside the fonts it covers
+    assert licence.status_code == 200 and "Open Font License" in licence.text
+    assert "MODIFIED" in licence.text, "subset builds must not be described as unmodified"
