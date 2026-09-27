@@ -2,4 +2,4 @@
 from .client import Client, HivemindError
 
 __all__ = ["Client", "HivemindError"]
-__version__ = "1.5.3"
+__version__ = "1.5.4"

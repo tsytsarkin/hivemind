@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import datetime
 
 from . import capabilities, graph
 from .chat import ChatStore, StableAddress
@@ -12,7 +13,7 @@ STATES = ("available", "assigned_waiting", "in_progress", "complete")
 
 _STATES_SQL = """
 WITH task_states AS (
-  SELECT t.node_id,t.room_id,r.name AS room,t.status_mode,
+  SELECT t.node_id,t.room_id,r.name AS room,t.status_mode,t.created_tx,
          t.required_capabilities_json,
          CASE WHEN t.status='complete' THEN 'complete'
               WHEN c.token_digest IS NOT NULL AND
@@ -58,7 +59,10 @@ def page(db: Database, *, status: str = "all", before_id: str | None = None,
                         "AS required WHERE required.value NOT IN "
                         "(SELECT value FROM json_each(?)))")
             values.append(json.dumps(tags))
-        rows = cur.execute(_STATES_SQL + "SELECT * FROM task_states WHERE "
+        # Task creation is the marker's original transaction, even when an older node was
+        # enabled later. Joining here leaves the project-wide counts query unchanged.
+        rows = cur.execute(_STATES_SQL + "SELECT task_states.*,tx.tx_time AS created_at "
+                           "FROM task_states JOIN tx ON tx.tx_id=task_states.created_tx WHERE "
                            "(?='all' OR (?='open' AND state!='complete') OR state=?) "
                            "AND node_id<?" + room_filter + eligible + " ORDER BY node_id DESC LIMIT ?",
                            (*values, limit + 1)).fetchall()
@@ -71,6 +75,7 @@ def page(db: Database, *, status: str = "all", before_id: str | None = None,
         items.append({"node_id": row["node_id"], "room_id": row["room_id"],
                       "room": row["room"], "state": row["state"],
                       "status_mode": row["status_mode"],
+                      "created_at": datetime.fromisoformat(row["created_at"]).timestamp(),
                       "required_capabilities": json.loads(row["required_capabilities_json"]),
                       "title": props.get("title"), "summary": props.get("summary")})
     return {"tasks": items, "older_cursor": rows[-1]["node_id"] if has_older else None,

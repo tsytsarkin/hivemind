@@ -8,6 +8,7 @@ test('console themes persist through login and reload and keep presence distinct
   expect(await background()).toBe('rgb(13, 21, 35)');
   await page.locator('#login-theme').selectOption('red');
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'red');
+  await expect(page.locator('#login-screen h1')).toHaveText('Our missions.One united purpose.');
   expect(await background()).toBe('rgb(16, 13, 16)');
   await expect(page.locator('body')).toHaveCSS('font-family', /Rajdhani/);
   await expect(page.locator('#login-screen h1')).toHaveCSS('font-family', /Oxanium/);
@@ -25,6 +26,17 @@ test('console themes persist through login and reload and keep presence distinct
   await page.locator('#login-token').fill(process.env.HIVEMIND_TEST_TOKEN);
   await page.locator('#login-form button').click();
   await expect(page.locator('#toolbar-theme')).toHaveValue('red');
+  await expect(page.locator('#page-title')).toHaveText('Command Briefing');
+  await expect(page.locator('#sidebar-user')).toHaveText('Welcome, Comrade nikt');
+  await expect(page.locator('#project-switcher')).toHaveAttribute('aria-label', 'Active mission');
+  await expect(page.locator('[data-view="agents"]')).toContainText('Agents');
+  await expect(page.locator('[data-view="rooms"]')).toContainText('Collectives');
+  await expect(page.locator('[data-view="instructions"]')).toContainText('Directives');
+  await expect(page.locator('#manager-form button')).toHaveText('Promote general');
+  await page.locator('[data-view="tasks"]').click();
+  await expect(page.locator('#page-title')).toHaveText('Assignments');
+  await page.locator('#task-create-form [name=title]').fill('Messages for the manager');
+  await page.locator('#task-create-form [name=summary]').fill('Keep projects and tasks as written');
   await expect(page.locator('.panel').first()).toHaveCSS('background-color', 'rgb(35, 25, 28)');
   const online = await page.evaluate(() => {
     const badge = document.createElement('span'); badge.className = 'chip online';
@@ -39,6 +51,10 @@ test('console themes persist through login and reload and keep presence distinct
   await expect(page.locator('#toolbar-theme')).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.locator('#toolbar-theme').selectOption('blue');
+  await expect(page.locator('#page-title')).toHaveText('Tasks');
+  await expect(page.locator('#sidebar-user')).toHaveText('nikt');
+  await expect(page.locator('#task-create-form [name=title]')).toHaveValue('Messages for the manager');
+  await expect(page.locator('#task-create-form [name=summary]')).toHaveValue('Keep projects and tasks as written');
   expect(await background()).toBe('rgb(13, 21, 35)');
   await expect(page.locator('#app-shell .brand-mark')).not.toHaveCSS(
     'background-image', /red-emblem\.svg/);
@@ -54,13 +70,13 @@ test('token login, teams, tasks and mobile controls', async ({ page }) => {
   await expect(page.getByText('Your projects.')).toBeVisible();
   await page.locator('#login-token').fill(process.env.HIVEMIND_TEST_TOKEN);
   await page.locator('#login-form button').click();
-  await expect(page).toHaveTitle('Hivemind · Orchestrator Console');
+  await expect(page).toHaveTitle('Hivemind · Commander Console');
   await expect(page.locator('#page-title')).toHaveText('Overview');
   await expect(page.locator('#project-switcher')).toHaveValue('default');
   await expect(page.locator('#server-version')).toHaveText(/^v\d+\.\d+\.\d+/);
   await page.getByRole('button', {name: 'Rooms', exact: true}).click();
   await page.locator('#room-create-form [name=name]').fill('release-review');
-  await page.locator('#room-create-form [name=description]').fill('Coordinating the 1.5.3 release');
+  await page.locator('#room-create-form [name=description]').fill('Coordinating the 1.5.4 release');
   await page.locator('#room-create-form button').click();
   await expect(page.locator('#room-list')).toContainText('release-review');
   await page.locator('#member-form [name=address_user]').fill('nikt');
@@ -95,6 +111,11 @@ test('token login, teams, tasks and mobile controls', async ({ page }) => {
   await page.locator('#task-create-form button').click();
   await expect(page.locator('#task-list')).toContainText('Check release notes');
   await expect(page.locator('#task-counts')).toContainText('1 Unclaimed');
+  const creationTime = page.locator('#task-list .task-created time').first();
+  await expect(creationTime).toBeVisible();
+  const createdAt = await creationTime.getAttribute('datetime');
+  expect(Date.now() - Date.parse(createdAt)).toBeGreaterThanOrEqual(0);
+  expect(Date.now() - Date.parse(createdAt)).toBeLessThan(60_000);
   await expect(page.locator('#task-list details .body')).toBeHidden();
   await page.locator('#task-list summary').first().click();
   await expect(page.locator('#task-list details .body')).toBeVisible();
@@ -111,6 +132,7 @@ test('token login, teams, tasks and mobile controls', async ({ page }) => {
   await page.getByRole('button', {name: 'Overview', exact: true}).click();
   await expect(page.locator('#overview-task-counts')).toContainText('1 Unclaimed');
   await expect(page.locator('#overview-task-list')).toContainText('Check release notes');
+  await expect(page.locator('#overview-task-list .task-created time').first()).toBeVisible();
   await page.getByRole('button', {name: 'Instructions', exact: true}).click();
   await page.locator('#instruction-form [name=to_manager]').check();
   await page.locator('#instruction-form [name=body]').fill('Queue up the release reviews');

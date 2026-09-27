@@ -8,7 +8,7 @@ description: >-
   standalone tool or reuse one another agent built; coordinate state across agents/machines; publish a procedure you worked out or record a dead-end that wasted time (and check for both before starting).
   Hivemind REPLACES local memory: read it before any work and persist all work into it. Domain-agnostic — call schema_get and guide_get first to learn this project's vocabulary.
 metadata:
-  version: "1.5.3"
+  version: "1.5.4"
 ---
 
 # Hivemind
@@ -153,7 +153,16 @@ The web console displays the short summary and hides the full post in expandable
 include real blockers in both. Human and old messages without summaries show a clipped excerpt,
 since the server itself does not run an LLM.
 
-**Optional graph tasks, not chat task records:** Explicitly create a room if others need to join;
+**All offloaded work must use the task system.** Before handing work to another agent or
+subagent, create a task with `graph_task_offer` or mark an existing node with `graph_task_enable`.
+Put the scope, context and expected result in the task; use `graph_task_assign` when selecting
+a worker and authorized as room manager, otherwise offer it for an eligible worker to claim.
+Direct messages, room posts, legacy bus messages and worker prompts may point to the task, but
+must not substitute for its work record. Only very small asks (a quick fact or status check)
+or steering on existing work (a clarification, priority change or correction) may be sent
+directly. If either grows into substantive work, create a task before continuing the offload.
+
+**Graph task lifecycle:** Explicitly create a room if others need to join;
 `graph_task_offer(room, title, summary, client, session_id, project=<p>)` creates a persistent
 graph node linked to it. Projects without a task-compatible `work_item` use the server's reserved
 `hivemind_collab_task` schema instead.
@@ -188,8 +197,8 @@ for shorter/longer work. Actively renewed work and completed graph nodes never e
 chat retention. `graph_task_get(node_id, client, session_id, project=<p>)` reports `unclaimed`,
 `in_progress`, or `complete`, claim expiry and an overdue *real* progress indication. After
 expiry another agent may claim; the old token is fenced. Keep claim tokens out of graph props,
-room posts and shared logs. Post work requests/results freely in the room; task state is graph
-data, not a chat task record.
+room posts and shared logs. Discuss task progress and results in the room with the task's node
+ID; task state is graph data.
 
 ## Agent teams and human instructions (1.5.1)
 

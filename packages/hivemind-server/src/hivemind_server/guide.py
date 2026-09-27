@@ -142,6 +142,18 @@ Before building a tool or working out a procedure: `tool_search` / `tool_catalog
 publish what you built. If something is almost right, publish a NEW VERSION of it rather than a
 near-duplicate — the registries refuse look-alike new ids.
 
+## Offload work through tasks
+
+All offloaded work must use the Hivemind task system. Before handing work to another agent or
+subagent, create a task with `graph_task_offer` or mark an existing node with `graph_task_enable`.
+Put the scope, context and expected result in the task; use `graph_task_assign` when selecting
+a worker and authorized as room manager, otherwise offer it for an eligible worker to claim.
+Messages and worker prompts may point to the task, but must not substitute for its work record.
+Only very small asks (a quick fact or status check) or steering on existing work (a clarification,
+priority change or correction) may be sent directly. If either grows into substantive work,
+create a task before continuing the offload. Track progress and completion on the task and
+inspect the result before accepting it.
+
 ## Procedures and dead-ends
 
 - `skill_search` / `skill_get` before working out a non-obvious procedure; `skill_publish` it once

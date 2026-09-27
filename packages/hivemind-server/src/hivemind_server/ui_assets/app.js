@@ -5,6 +5,7 @@ const $ = id => document.getElementById(id);
 // a native form submit. test_ui_assets.py only greps this file for substrings and the Playwright
 // spec needs npm and a live server, so nothing in the pytest suite noticed.
 const q = selector => document.querySelector(selector);
+const {copy,setText:setCopy,setAttribute:setCopyAttribute} = window.HivemindTheme;
 const S = {csrf:null,project:null,epoch:0,conversationEpoch:0,view:"overview",rooms:[],roomOlder:null,agents:[],caps:[],catalog:[],catalogOlder:null,catalogPaged:false,catalogRevision:null,capabilityEditBase:null,pendingAgents:[],pendingOlder:null,pendingPaged:false,pendingAgentTags:[],roomAgentTags:null,roomAgentKey:null,roomAgentUpdatedAt:null,roomConfigUpdatedAt:null,roomConfigParallel:20,roomConfigAuto:true,roomConfigDraft:null,roomChoiceDraft:null,tasks:[],taskCounts:null,overviewTasks:[],assignmentTasks:[],assignmentOlder:null,expandedTasks:new Set(),expandedMessages:new Set(),candidates:[],candidateTask:null,candidateOlder:null,candidateRequest:0,candidateMemberCount:0,instructions:[],olderCursor:null,taskOlder:null,instructionOlder:null,agentOlder:null,latestDisplayedSeq:null,hasHiddenUnseen:false};
 const headings = {
   overview:["Overview","YOUR WORKSPACE, AT A GLANCE","The conversations and work moving through your project."],
@@ -17,7 +18,7 @@ const headings = {
 };
 function make(tag,cls,value) {
   const n=document.createElement(tag); if(cls)n.className=cls;
-  if(value!==undefined)n.textContent=String(value); return n;
+  if(value!==undefined)setCopy(n,value); return n;
 }
 const address = form => ["user","device","client"].map(x=>form.querySelector('[name="address_'+x+'"]').value.trim());
 const label = a => Array.isArray(a)?a.join(" · "):"Unassigned";
@@ -46,27 +47,32 @@ function humanMessage(destination, recipient, room, body, key) {
   if(destination==="room")return {tail:"messages/room",data:{room,body,idempotency_key:key}};
   if(destination==="agent")return {tail:"dm",data:{address:JSON.parse(recipient),body,
                                                      idempotency_key:key}};
-  throw Error("Choose an agent or a room.");
+  throw Error(copy`Choose an agent or a room.`);
 }
 const when = t => t?new Date(t*1000).toLocaleString():"Not seen yet";
 const relative = t => !t?"not seen":Math.max(0,Math.round((Date.now()/1000-t)/60))+" min ago";
-function notice(msg,bad=false) { const n=$("notice"); n.textContent=msg; n.className=bad?"notice error":"notice"; n.hidden=!msg; }
+function notice(msg,bad=false) { const n=$("notice"); setCopy(n,msg); n.className=bad?"notice error":"notice"; n.hidden=!msg; }
 function showVersion(session){
   $("server-version").textContent=session.version?"v"+session.version:"Version unavailable";
 }
-function empty(msg) { return make("p","empty",msg); }
+function showUser(session){
+  if(!session){setCopy($("sidebar-user"),"Signed in");return;}
+  setCopy($("sidebar-user"),session.user,
+    copy`Welcome, Comrade ${session.user}`);
+}
+function empty(msg) { return make("p","empty",copy(msg)); }
 function item(title,detail,symbol,status,symbolClass="") {
   const card=make("article","item-card"),top=make("div","item-top"),head=make("div","row-title");
   head.append(make("span","symbol "+symbolClass,symbol),make("h3","",title));top.append(head);
-  if(status)top.append(make("span","chip "+status.replaceAll(" ","_"),status));
+  if(status)top.append(make("span","chip "+status.replaceAll(" ","_"),copy(status)));
   card.append(top);if(detail)card.append(make("p","",detail));return card;
 }
 function expandedDetail(card, body, id, opened, name, preview) {
-  const detail=make("details","expandable"),content=String(body||"");
-  const short=Array.from(String(preview||content)),max=preview?160:96;
-  const summary=make("summary","preview",short.slice(0,max).join("")+
-    (short.length>max?"…":""));
-  summary.setAttribute("aria-label","Expand full "+name);
+  const detail=make("details","expandable"),content=body||"";
+  const previewText=preview||content,short=Array.from(String(previewText)),max=preview?160:96;
+  const summary=make("summary","preview",short.length>max?
+    short.slice(0,max).join("")+"…":previewText);
+  setCopyAttribute(summary,"aria-label",copy`Expand full ${name}`);
   detail.append(summary,make("p","body",content));
   detail.open=opened.has(id);
   detail.addEventListener("toggle",()=>{
@@ -110,7 +116,7 @@ function resetProjectState(){
     $(id).replaceChildren();
   for(const id of ["stat-rooms","stat-agents","stat-tasks","stat-queue"])
     $(id).textContent="—";
-  $("breadcrumb-project").textContent="PROJECT";
+  setCopy($("breadcrumb-project"),copy`PROJECT`);
   $("refreshed").textContent="";notice("");
   $("message-unread").hidden=true;$("message-unread").textContent="";
   $("message-channel").value="room";
@@ -119,18 +125,19 @@ function resetProjectState(){
   switchView("overview");
 }
 function showLogin(){S.csrf=null;S.project=null;S.epoch++;resetProjectState();
+  showUser(null);
   $("project-switcher").replaceChildren();
   $("login-screen").hidden=false;$("app-shell").hidden=true;$("login-token").value="";}
 function switchView(v) {
   if(!headings[v])return;S.view=v;
   for(const panel of document.querySelectorAll(".view"))panel.hidden=panel.id!=="view-"+v;
   for(const nav of document.querySelectorAll("[data-view]"))nav.classList.toggle("selected",nav.dataset.view===v);
-  [$("page-title"),$("page-kicker"),$("page-subtitle")].forEach((n,i)=>n.textContent=headings[v][i]);
+  [$("page-title"),$("page-kicker"),$("page-subtitle")].forEach((n,i)=>setCopy(n,copy(headings[v][i])));
   if(v==="messages")messages();
 }
 function selectOptions(node,values,optional=false,preserveUnknown=false){
   const old=node.value,options=[];
-  if(optional){const x=make("option","","No room");x.value="";options.push(x);}
+  if(optional){const x=make("option","",copy`No room`);x.value="";options.push(x);}
   for(const value of values){const x=make("option","",value);x.value=value;options.push(x);}
   if(preserveUnknown&&old&&!values.includes(old)){
     const x=make("option","",old+" (selected; rechecked on submit)");
@@ -142,13 +149,13 @@ function selectOptions(node,values,optional=false,preserveUnknown=false){
 function renderRooms(){
   const render=r=>{
     const n=item("# "+r.name,r.description,"▦",r.manager?"managed":"unmanaged");
-    n.append(make("small","","Manager: "+label(r.manager)+" · "+r.member_count+" members"));
+    n.append(make("small","",copy`Manager: ${label(r.manager)} · ${r.member_count} members`));
     const tags=make("div","metadata");
     for(const a of r.members){
       const member=make("span","chip",label(a)+" ");
       if(!["human","webui"].includes(a[2])){
-        const dm=make("button","chip-remove","DM");dm.type="button";
-        dm.setAttribute("aria-label","DM "+label(a));
+        const dm=make("button","chip-remove",copy`DM`);dm.type="button";
+        setCopyAttribute(dm,"aria-label",copy`DM ${label(a)}`);
         dm.addEventListener("click",()=>openAgentDm(a));member.append(dm);
       }
       const remove=make("button","chip-remove","×");remove.type="button";
@@ -156,7 +163,7 @@ function renderRooms(){
       remove.addEventListener("click",()=>{
         if(window.confirm("Remove "+label(a)+" from #"+r.name+"?"))
           mutate("rooms/"+encodeURIComponent(r.name)+"/members/remove",
-            {address:a},"Agent removed from room.");
+            {address:a},copy`Agent removed from room.`);
       });
       member.append(remove);tags.append(member);
     }
@@ -179,7 +186,7 @@ function renderCatalog(){
   const cards=S.catalog.map(cap=>{
     const n=item(cap.name,cap.description||"Description needed (legacy tag)","◈",
       cap.approved?"approved":"pending");
-    const edit=make("button","text-button",cap.approved?"Edit description":"Approve capability");
+    const edit=make("button","text-button",cap.approved?"Edit description":copy`Approve capability`);
     edit.type="button";
     edit.addEventListener("click",()=>{
       q('#capability-create-form [name="name"]').value=cap.name;
@@ -187,12 +194,11 @@ function renderCatalog(){
       q('#capability-create-form [name="description"]').focus?.();
     });
     const remove=make("button","text-button danger-button","Delete");remove.type="button";
-    remove.setAttribute("aria-label","Delete capability "+cap.name);
+    setCopyAttribute(remove,"aria-label",copy`Delete capability ${cap.name}`);
     remove.addEventListener("click",async()=>{
-      if(!window.confirm("Delete capability "+cap.name+"? This removes it from agents; " +
-        "open tasks requiring it must be completed first."))return;
+      if(!window.confirm(copy`Delete capability ${cap.name}? This removes it from agents; open tasks requiring it must be completed first.`))return;
       await mutate("capabilities/delete",{name:cap.name,expected_updated_at:cap.updated_at},
-        "Capability "+cap.name+" deleted.");
+        copy`Capability ${cap.name} deleted.`);
     });
     const actions=make("div","catalog-actions");actions.append(edit,remove);n.append(actions);
     return n;
@@ -289,7 +295,7 @@ function renderAgentCapabilityEditor(){
 }
 function selectedAgentCapabilities(){
   const selected=$("capability-agent").value;
-  if(!selected||S.roomAgentTags===null)throw Error("Choose a project agent first.");
+  if(!selected||S.roomAgentTags===null)throw Error(copy`Choose a project agent first.`);
   const visible=new Set(S.catalog.map(cap=>cap.name));
   const current=S.roomChoiceDraft?.key===selected?S.roomChoiceDraft.tags:
     new Set([...q('#capability-choices').querySelectorAll('input:checked')].map(input=>input.value));
@@ -347,8 +353,8 @@ function renderAgents(){
     n.append(tags);
     if(!["human","webui"].includes(a.address[2])){
       const actions=make("div","agent-actions");
-      const dm=make("button","text-button","DM");dm.type="button";
-      dm.setAttribute("aria-label","DM "+label(a.address));
+      const dm=make("button","text-button",copy`DM`);dm.type="button";
+      setCopyAttribute(dm,"aria-label",copy`DM ${label(a.address)}`);
       dm.addEventListener("click",()=>openAgentDm(a.address));actions.append(dm);
       const settings=make("button","text-button","Settings");settings.type="button";
       settings.setAttribute("aria-label","Settings for "+label(a.address));
@@ -393,7 +399,7 @@ function updateMessageDestination(){
 function renderAssignmentCandidates(){
   const task=S.assignmentTasks.find(t=>t.node_id===$("task-select").value);
   const select=$("assignee-select"),prior=select.value,options=[];
-  const placeholder=make("option","","Choose an eligible room member");
+  const placeholder=make("option","",copy`Choose an eligible room member`);
   placeholder.value="";placeholder.disabled=true;options.push(placeholder);
   let eligible=0;
   for(const candidate of S.candidates){
@@ -410,11 +416,9 @@ function renderAssignmentCandidates(){
   const selected=options.find(option=>option.value===select.value);
   $("task-assign-form").querySelector('[type="submit"]').disabled=
     !selected||selected.disabled;
-  $("assign-eligibility").textContent=task?
-    (selected?.disabled&&select.value?"Selected member now lacks required tags; choose another. ":"")+
-    eligible+" eligible of "+S.candidates.length+" shown ("+S.candidateMemberCount+" room members) · " +
-      "Capabilities are assigned by project users; the server checks again when assigning.":
-    "Choose an available task to see eligible room members.";
+  setCopy($("assign-eligibility"),task?
+    copy`${selected?.disabled&&select.value?"Selected member now lacks required tags; choose another. ":""}${eligible} eligible of ${S.candidates.length} shown (${S.candidateMemberCount} room members) · Capabilities are assigned by project users; the server checks again when assigning.`:
+    copy`Choose an available task to see eligible room members.`);
   $("candidate-older").hidden=!S.candidateOlder;
 }
 async function loadCandidates({older=false}={}){
@@ -444,26 +448,33 @@ async function loadCandidates({older=false}={}){
     renderAssignmentCandidates();
   }catch(e){if(epoch===S.epoch)notice(e.message,true);}
 }
+function taskCreationTime(task){
+  const line=make("small","task-created","Created: ");
+  if(!Number.isFinite(task.created_at)){line.append("Unknown");return line;}
+  const date=new Date(task.created_at*1000);
+  const timestamp=make("time","",date.toLocaleString());
+  timestamp.dateTime=date.toISOString();
+  line.append(timestamp);return line;
+}
 function renderTasks(){
   const totals=$("task-counts"),counts=S.taskCounts||{};
   totals.replaceChildren(...[["available","Unclaimed"],["assigned_waiting","Assigned"],
     ["in_progress","Claimed"],["complete","Completed"]].map(([state,title])=>
-    make("span","chip "+state,(counts[state]||0)+" "+title)));
+    make("span","chip "+state,copy`${counts[state]||0} ${copy(title)}`)));
   renderOverviewTasks();
   const render=t=>{
     const r=S.rooms.find(r=>r.room_id===t.room_id);
     const n=item(t.title||t.node_id,null,"☷",t.state.replaceAll("_"," "));
-    n.append(make("small","","Room: "+(r?.name||"—")+" · Assignee: "+label(t.assignee)));
-    const detail=expandedDetail(n,t.summary||"Graph task",t.node_id,S.expandedTasks,
-                                "task details for "+(t.title||t.node_id));
+    n.append(make("small","",copy`Room: ${r?.name||"—"} · Assignee: ${label(t.assignee)}`));
+    n.append(taskCreationTime(t));
+    const detail=expandedDetail(n,t.summary||copy`Graph task`,t.node_id,S.expandedTasks,
+                                copy`task details for ${t.title||t.node_id}`);
     if(t.claim){
-      const timing=make("small","","Heartbeat: "+when(t.claim.last_beat_at)+
-        " · Claim expires: "+when(t.claim.expires_at)+
-        (t.claim.progress_overdue?" · Room progress overdue":""));
+      const timing=make("small","",copy`Heartbeat: ${when(t.claim.last_beat_at)} · Claim expires: ${when(t.claim.expires_at)}${t.claim.progress_overdue?copy` · Room progress overdue`:""}`);
       detail.append(timing);
     }
     const tags=make("div","metadata");
-    tags.append(make("span","muted tiny","Required capabilities: "));
+    tags.append(make("span","muted tiny",copy`Required capabilities: `));
     for(const cap of t.required_capabilities||[])tags.append(make("span","chip",cap));
     if(!t.required_capabilities?.length)tags.append(make("span","muted tiny","none"));
     n.append(tags);
@@ -491,14 +502,15 @@ function renderOverviewTasks(){
   const counts=S.taskCounts||{};
   $("overview-task-counts").replaceChildren(...[["available","Unclaimed"],
     ["assigned_waiting","Assigned"],["in_progress","Claimed"],["complete","Completed"]]
-    .map(([state,title])=>make("span","chip "+state,(counts[state]||0)+" "+title)));
+    .map(([state,title])=>make("span","chip "+state,copy`${counts[state]||0} ${copy(title)}`)));
   const recent=S.overviewTasks.filter(t=>t.state!=="complete").slice(0,5).map(task=>{
     const room=S.rooms.find(r=>r.room_id===task.room_id);
     const context=(room?"# "+room.name+" · ":"")+Array.from(task.summary||"").slice(0,120).join("");
     // ||node_id as every other task render site does: task_listing takes `title` straight from
     // props, which is absent on a node that never set one, and make() stringifies — so this
     // card read literally "null" while the Tasks page showed the id for the same task.
-    return item(task.title||task.node_id,context,"☷",task.state.replaceAll("_"," "));
+    const card=item(task.title||task.node_id,context,"☷",task.state.replaceAll("_"," "));
+    card.append(taskCreationTime(task));return card;
   });
   $("overview-task-list").replaceChildren(...(recent.length?recent:[empty("No open tasks right now.")]));
 }
@@ -508,10 +520,10 @@ function renderInstructions(){
     n.append(make("small","",when(i.created_at)));
     if(i.result)n.append(make("p","body",i.result));
     if(i.state==="queued"){
-      const b=make("button","text-button","Cancel instruction");b.type="button";
+      const b=make("button","text-button",copy`Cancel instruction`);b.type="button";
       b.addEventListener("click",()=>{
-        if(window.confirm("Cancel instruction to "+label(i.recipient)+": "+i.body.slice(0,80)+"?"))
-          mutate("instructions/"+encodeURIComponent(i.id)+"/cancel",{},"Instruction cancelled.");
+        if(window.confirm(copy`Cancel instruction to ${label(i.recipient)}: ${i.body.slice(0,80)}?`))
+          mutate("instructions/"+encodeURIComponent(i.id)+"/cancel",{},copy`Instruction cancelled.`);
       });
       n.append(b);
     }
@@ -545,7 +557,7 @@ async function messages({older=false}={}){
       const from=m.sender_origin==="human_ui"?m.sender[0]+" · human":label(m.sender);
       const n=item(from,null,m.channel==="dm"?"✉":"◌",
         m.kind==="progress"?"progress":"");
-      expandedDetail(n,m.body,m.id,S.expandedMessages,"message from "+from,m.summary);
+      expandedDetail(n,m.body,m.id,S.expandedMessages,copy`message from ${from}`,m.summary);
       n.append(make("small","",when(m.created_at)+(m.recipient?" · To "+label(m.recipient):"")+
         (m.sender_origin==="human_ui"?" · Human":"")));return n;
     });
@@ -553,7 +565,7 @@ async function messages({older=false}={}){
     else $("message-list").replaceChildren(...(cards.length?cards:[empty("No recent messages here.")]));
     S.olderCursor=data.older_cursor;
     $("message-older").hidden=!S.olderCursor;
-    if(data.history_gap)notice("Earlier messages expired after 24 hours.");
+    if(data.history_gap)notice(copy`Earlier messages expired after 24 hours.`);
     if(!older){
       const unread=data.unread_count;
       S.hasHiddenUnseen=unread>data.messages.filter(m=>m.seq>data.last_read_seq).length;
@@ -622,7 +634,7 @@ async function refresh(){
       S.assignmentTasks.push(pinnedTask);
     S.instructions=i.instructions;S.taskCounts=t.counts;S.taskOlder=t.older_cursor;
     S.instructionOlder=i.older_cursor;
-    $("breadcrumb-project").textContent=S.project.toUpperCase();
+    setCopy($("breadcrumb-project"),S.project.toUpperCase());
     $("refreshed").textContent="Updated "+new Date().toLocaleTimeString();
     renderRooms();renderCatalog();renderPendingAssignments();
     renderAgents();renderTasks();renderInstructions();
@@ -642,7 +654,7 @@ async function loadProjects(){
   $("project-switcher").replaceChildren();
   selectOptions($("project-switcher"),p.projects);
   S.project=$("project-switcher").value||null;S.epoch++;
-  if(S.project)await refresh();else notice("No accessible projects. Ask a project owner to share one.",true);
+  if(S.project)await refresh();else notice(copy`No accessible projects. Ask a project owner to share one.`,true);
 }
 async function mutate(tail,data,success,onSuccess){
   const epoch=S.epoch;
@@ -651,11 +663,11 @@ async function mutate(tail,data,success,onSuccess){
     if(onSuccess)onSuccess(result);
     const warning=result.assignment_warning||
       (result.assignment_notification!==undefined&&result.assignment_notification!=="stored"?
-        "Agent notification "+result.assignment_notification:null)||
+        copy`Agent notification ${result.assignment_notification}`:null)||
       (result.room_notification!==undefined&&result.room_notification!=="stored"?
-        "Room notification "+result.room_notification:null)||
+        copy`Room notification ${result.room_notification}`:null)||
       (result.notification_warnings?.length?result.notification_warnings.join("; "):null);
-    notice(warning?success+" Warning: "+warning:success,!!warning);await refresh();}
+    notice(warning?copy`${success} Warning: ${warning}`:success,!!warning);await refresh();}
   catch(e){if(epoch===S.epoch)notice(e.message,true);}
 }
 function form(id,handler){
@@ -687,7 +699,7 @@ function init(){
       if(epoch!==S.epoch)return;
       $("login-token").value="";S.csrf=result.csrf_token;
       showVersion(result);
-      $("sidebar-user").textContent=result.user+" / "+result.device;
+      showUser(result);
       $("login-error").textContent="";$("login-screen").hidden=true;$("app-shell").hidden=false;
       await loadProjects();
     }catch(e){if(epoch===S.epoch)$("login-error").textContent=e.message;}
@@ -801,7 +813,7 @@ function init(){
   $("message-channel").addEventListener("change",messages);
   $("message-room").addEventListener("change",messages);
   $("message-older").addEventListener("click",()=>messages({older:true}));
-  form("room-create-form",(f,d)=>mutate("rooms",{name:d.get("name").trim(),description:d.get("description").trim()},"Room created."));
+  form("room-create-form",(f,d)=>mutate("rooms",{name:d.get("name").trim(),description:d.get("description").trim()},copy`Room created.`));
   // Snapshot the revision when editing STARTS. refresh() rewrites S.catalog every 20s, so
   // reading it at submit time meant silently adopting whatever another operator had saved in
   // between and overwriting them — the server's compare-and-swap can only protect a revision
@@ -818,7 +830,7 @@ function init(){
       : S.catalog.find(cap=>cap.name===name)?.updated_at??null;
     S.capabilityEditBase=null;
     return mutate("capabilities",{name,description:d.get("description").trim(),
-      expected_updated_at:base},"Project capability saved.");
+      expected_updated_at:base},copy`Project capability saved.`);
   });
   form("capability-assign-form",(f,d)=>{
     let payload;
@@ -828,7 +840,7 @@ function init(){
     if(removed.length&&!window.confirm("Discard unapproved legacy tags "+removed.join(", ")+
       " for this agent?"))return;
     return mutate("agents/capabilities",payload,
-      "Project-wide agent capabilities updated.",result=>{
+      copy`Project-wide agent capabilities updated.`,result=>{
         S.roomAgentTags=result.capabilities;
         S.pendingAgentTags=result.pending_capabilities||[];
         S.roomAgentUpdatedAt=result.updated_at;S.roomChoiceDraft=null;
@@ -838,12 +850,12 @@ function init(){
   });
   form("agent-config-form",(f,d)=>{
     if(!$("capability-agent").value||S.roomAgentTags===null){
-      notice("Choose a project agent first.",true);return;
+      notice(copy`Choose a project agent first.`,true);return;
     }
     return mutate("agents/config",{address:JSON.parse($("capability-agent").value),
       max_parallel_tasks:Number($("agent-config-parallel").value),
       auto_claim_enabled:$("agent-config-auto-claim").checked,
-      expected_updated_at:S.roomConfigUpdatedAt},"Agent config updated.",result=>{
+      expected_updated_at:S.roomConfigUpdatedAt},copy`Agent config updated.`,result=>{
         S.roomConfigUpdatedAt=result.updated_at;S.roomConfigParallel=result.max_parallel_tasks;
         S.roomConfigAuto=result.auto_claim_enabled;S.roomConfigDraft=null;
       });
@@ -855,16 +867,16 @@ function init(){
       const room=d.get("room"),current=await api(url("rooms/"+encodeURIComponent(room)+"/manager"));
       if(epoch!==S.epoch)return;
       return mutate("rooms/"+encodeURIComponent(room)+"/manager",
-        {address:target,expected_revision:current.revision},"Manager promoted.");
+        {address:target,expected_revision:current.revision},copy`Manager promoted.`);
     }catch(e){if(epoch===S.epoch)notice(e.message,true);}
   });
   form("task-create-form",(f,d)=>mutate("tasks",{room:d.get("room"),title:d.get("title").trim(),
     summary:d.get("summary").trim(),assign_to_manager:d.get("assign_to_manager")==="on",
-    required_capabilities:d.get("capabilities").split(",").map(s=>s.trim()).filter(Boolean)},"Graph task created."));
+    required_capabilities:d.get("capabilities").split(",").map(s=>s.trim()).filter(Boolean)},copy`Graph task created.`));
   form("task-assign-form",(f,d)=>{
     const task=S.assignmentTasks.find(t=>t.node_id===d.get("node_id"));
     const selected=d.get("recipient");
-    if(!selected||!task){notice("Choose a task and an eligible room member.",true);return;}
+    if(!selected||!task){notice(copy`Choose a task and an eligible room member.`,true);return;}
     const target=JSON.parse(selected);
     let confirmDisplace=false;
     if(task.state==="in_progress" && JSON.stringify(task.assignee)!==selected){
@@ -874,22 +886,22 @@ function init(){
     }
     return mutate("tasks/"+encodeURIComponent(d.get("node_id"))+"/assign",
       {address:target,expected_revision:task?.revision??0,
-       confirm_displace:confirmDisplace},"Task assigned.");
+       confirm_displace:confirmDisplace},copy`Task assigned.`);
   });
   form("instruction-form",(f,d)=>mutate("instructions",{room:d.get("room")||null,
     to_manager:d.get("to_manager")==="on",
     address:d.get("to_manager")==="on"?null:JSON.parse(d.get("recipient")),
-    body:d.get("body").trim(),idempotency_key:crypto.randomUUID()},"Instruction queued."));
+    body:d.get("body").trim(),idempotency_key:crypto.randomUUID()},copy`Instruction queued.`));
   form("dm-form",(f,d)=>{
     const target=humanMessage(d.get("destination"),d.get("recipient"),d.get("room"),
       d.get("body").trim(),crypto.randomUUID());
-    return mutate(target.tail,target.data,"Message sent.");
+    return mutate(target.tail,target.data,copy`Message sent.`);
   });
   setInterval(()=>{if(S.project&&!$("app-shell").hidden)refresh();},20000);
   const resumeEpoch=S.epoch;
   api("/api/session").then(session=>{
     if(resumeEpoch!==S.epoch)return;
-    S.csrf=session.csrf_token;$("sidebar-user").textContent=session.user+" / "+session.device;
+    S.csrf=session.csrf_token;showUser(session);
     showVersion(session);
     $("login-screen").hidden=true;$("app-shell").hidden=false;return loadProjects();
   }).catch(()=>{if(resumeEpoch===S.epoch)showLogin();});

@@ -9,7 +9,7 @@ description: >-
   Hivemind REPLACES local memory: read it before any work and persist all work into it. Domain-agnostic — call schema_get and guide_get first to learn this project's vocabulary.
 allowed-tools: Bash(${CLAUDE_SKILL_DIR}/scripts/guide.sh *) Read
 metadata:
-  version: "1.5.3"
+  version: "1.5.4"
 ---
 
 # Hivemind
@@ -155,7 +155,16 @@ never guess. Report idle or blocked honestly when applicable. The console timest
 and labels them stale after 30 minutes or when the session goes offline; the notification
 listener does not generate work reports and cannot wake an idle conversation to produce one.
 
-**Optional structured work lives on the graph, not in chat records.** When multiple agents should
+**All offloaded work must use the task system.** Before handing work to another agent or
+subagent, create a task with `graph_task_offer` or mark an existing node with `graph_task_enable`.
+Put the scope, context and expected result in the task; use `graph_task_assign` when selecting
+a worker and authorized as room manager, otherwise offer it for an eligible worker to claim.
+Direct messages, room posts, legacy bus messages and worker prompts may point to the task, but
+must not substitute for its work record. Only very small asks (a quick fact or status check)
+or steering on existing work (a clarification, priority change or correction) may be sent
+directly. If either grows into substantive work, create a task before continuing the offload.
+
+**Structured work lives on the graph.** When multiple agents should
 join, explicitly create a topic room first, then `graph_task_offer(room, title, summary, client,
 session_id, project=<p>)` creates a persistent graph node. If the project's `work_item` schema
 cannot support tasks, the server provisions its reserved `hivemind_collab_task` type instead.
@@ -192,8 +201,8 @@ expiry 1 hour after the last beat; an agent may choose interval 30 seconds–8 h
 tasks have **no** 24-hour lifetime. `graph_task_get(node_id, client, session_id, project=<p>)`
 reports `unclaimed`, `in_progress`, or `complete`, owner, expiry and whether a real progress post
 is overdue. Expired claims are immediately available; a stale token cannot complete after
-takeover. Keep claim tokens out of room posts, graph props and shared notes. Respond to task
-requests in the room as freeform messages; the graph is the source of task status.
+takeover. Keep claim tokens out of room posts, graph props and shared notes. Discuss task
+progress and results in the room with the task's node ID; the graph is the source of task status.
 
 ## Agent teams and human instructions (1.5.1)
 

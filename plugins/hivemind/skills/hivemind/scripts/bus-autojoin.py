@@ -147,7 +147,7 @@ def _rpc(url, token, name, arguments):
     params = {"name": name, "arguments": arguments,
               "_meta": {"io.modelcontextprotocol/protocolVersion": PROTO,
                         "io.modelcontextprotocol/clientInfo": {"name": "hivemind-bus-autojoin",
-                                                             "version": "1.4.0"},
+                                                             "version": "1.5.4"},
                         "io.modelcontextprotocol/clientCapabilities": {}}}
     body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
                        "params": params}).encode()
