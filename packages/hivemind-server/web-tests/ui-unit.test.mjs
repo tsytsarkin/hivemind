@@ -45,8 +45,8 @@ function app(fetch) {
 
 test('console version uses authenticated server metadata and has an unknown fallback', () => {
   const {ids, run} = app();
-  run("showVersion({version:'1.5.3'})");
-  assert.equal(ids.get('server-version').textContent, 'v1.5.3');
+  run("showVersion({version:'1.5.4'})");
+  assert.equal(ids.get('server-version').textContent, 'v1.5.4');
   run('showVersion({version:null})');
   assert.equal(ids.get('server-version').textContent, 'Version unavailable');
 });
@@ -55,7 +55,8 @@ test('task cards hide full summary while preserving visible status and required 
   const {ids, run} = app();
   run(`S.rooms=[{room_id:'r1',name:'reviews'}];
     S.tasks=[{node_id:'task1',title:'Audit',summary:'a long private detail meant to be expanded',
-      state:'available',required_capabilities:['review'],room_id:'r1',assignee:null}];
+      state:'available',required_capabilities:['review'],room_id:'r1',assignee:null,
+      created_at:1790512496.125}];
     S.taskCounts={available:1,assigned_waiting:0,in_progress:0,complete:0};
     renderTasks();`);
   const card = ids.get('task-list').children[0];
@@ -64,6 +65,9 @@ test('task cards hide full summary while preserving visible status and required 
   assert.match(card.textContent, /Required capabilities.*review/);
   assert.match(ids.get('task-counts').textContent, /1.*[Uu]nclaimed/);
   assert.equal(detail.open, false);
+  const created = card.children.find(n => n.className === 'task-created');
+  assert.equal(created.textContent, 'Created: '+new Date(1790512496125).toLocaleString());
+  assert.equal(created.children[0].dateTime, '2026-09-27T12:34:56.125Z');
   detail.open = true;
   detail.events.toggle?.();
   run('renderTasks()');
@@ -139,7 +143,7 @@ test('filtered task list keeps unfiltered assignment choices and server-wide cou
 
 test('overview shows global task counts and recent open work even with Tasks filtered', async () => {
   const sample = [
-    {node_id:'t2',title:'Implement fix',state:'in_progress',room_id:'room-1'},
+    {node_id:'t2',title:'Implement fix',state:'in_progress',room_id:'room-1',created_at:1790512496.125},
     {node_id:'t1',title:'Review fix',state:'available',room_id:'room-1'},
     {node_id:'t0',title:'Finished fix',state:'complete',room_id:'room-1'},
   ];
@@ -158,6 +162,9 @@ test('overview shows global task counts and recent open work even with Tasks fil
   assert.match(ids.get('overview-task-counts').textContent, /1 Unclaimed.*1 Claimed.*1 Completed/);
   assert.match(ids.get('overview-task-list').textContent, /Implement fix.*Review fix/);
   assert.doesNotMatch(ids.get('overview-task-list').textContent, /Finished fix/);
+  assert.ok(ids.get('overview-task-list').children[0].textContent.includes(
+    'Created: '+new Date(1790512496125).toLocaleString()));
+  assert.match(ids.get('overview-task-list').children[1].textContent, /Created: Unknown/);
 });
 
 test('a catalog revision change drops cached deleted capabilities', async () => {
@@ -210,9 +217,9 @@ test('agent card groups DM and Settings in a dedicated actions row', () => {
   assert.deepEqual(row?.children.map(child=>child.textContent),['DM','Settings']);
 });
 
-test('console browser title and sidebar show Orchestrator Console', () => {
-  assert.match(shell, /<title>Hivemind · Orchestrator Console<\/title>/);
-  assert.match(shell, /class="brand-caption">ORCHESTRATOR CONSOLE<\/span>/);
+test('console browser title and sidebar show Commander Console', () => {
+  assert.match(shell, /<title>Hivemind · Commander Console<\/title>/);
+  assert.match(shell, /class="brand-caption">COMMANDER CONSOLE<\/span>/);
 });
 
 test('human message destination picks the proper project endpoint without a supplied sender', () => {

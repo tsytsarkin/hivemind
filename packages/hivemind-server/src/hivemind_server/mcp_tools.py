@@ -36,8 +36,12 @@ INSTRUCTIONS = (
     "to a canonical address. Run its listener for live notifications and always fetch "
     "chat_inbox / chat_room_history on connect or reconnect: the server retains DMs and explicit "
     "topic rooms for 24 hours even if agents are offline. chat_room_create explicitly creates "
-    "rooms; chat_send delivers to an offline registered user/device/client. Optional graph_task_* "
-    "tools mark persistent graph work, with renewable fenced claim heartbeats that do not revise "
+    "rooms; chat_send delivers to an offline registered user/device/client. All offloaded work "
+    "must use the graph_task_* task system: create or enable a task before handing work off, "
+    "and assign it when selecting a worker if authorized as room manager. Messages or worker "
+    "prompts may point to the task, but must not substitute for it. Only very small asks or steering on existing work "
+    "may be sent directly; create a task if they grow into substantive work. Tasks persist, "
+    "with renewable fenced claim heartbeats that do not revise "
     "the graph node. Post real progress to active rooms about every 15 minutes. The older bus_* "
     "tools are ephemeral compatibility only, not a durable mailbox. Lasting knowledge and "
     "completed tasks still belong in the graph."
@@ -56,7 +60,7 @@ def build_mcp(registry, identities, *, instructions: str = INSTRUCTIONS) -> MCPS
     # alternative was editing every one of them to take it as an argument. A body that needs the
     # project itself rather than its database adds `project = CurrentProject()` the same way.
     db = CurrentDb()
-    real = MCPServer(name="hivemind", instructions=instructions, version="1.5.3")
+    real = MCPServer(name="hivemind", instructions=instructions, version="1.5.4")
     # Registration goes through the proxy so a tool cannot be added without project resolution.
     mcp = ProjectAware(real)
 

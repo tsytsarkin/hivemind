@@ -54,13 +54,13 @@ test('token login, teams, tasks and mobile controls', async ({ page }) => {
   await expect(page.getByText('Your projects.')).toBeVisible();
   await page.locator('#login-token').fill(process.env.HIVEMIND_TEST_TOKEN);
   await page.locator('#login-form button').click();
-  await expect(page).toHaveTitle('Hivemind · Orchestrator Console');
+  await expect(page).toHaveTitle('Hivemind · Commander Console');
   await expect(page.locator('#page-title')).toHaveText('Overview');
   await expect(page.locator('#project-switcher')).toHaveValue('default');
   await expect(page.locator('#server-version')).toHaveText(/^v\d+\.\d+\.\d+/);
   await page.getByRole('button', {name: 'Rooms', exact: true}).click();
   await page.locator('#room-create-form [name=name]').fill('release-review');
-  await page.locator('#room-create-form [name=description]').fill('Coordinating the 1.5.3 release');
+  await page.locator('#room-create-form [name=description]').fill('Coordinating the 1.5.4 release');
   await page.locator('#room-create-form button').click();
   await expect(page.locator('#room-list')).toContainText('release-review');
   await page.locator('#member-form [name=address_user]').fill('nikt');
@@ -95,6 +95,11 @@ test('token login, teams, tasks and mobile controls', async ({ page }) => {
   await page.locator('#task-create-form button').click();
   await expect(page.locator('#task-list')).toContainText('Check release notes');
   await expect(page.locator('#task-counts')).toContainText('1 Unclaimed');
+  const creationTime = page.locator('#task-list .task-created time').first();
+  await expect(creationTime).toBeVisible();
+  const createdAt = await creationTime.getAttribute('datetime');
+  expect(Date.now() - Date.parse(createdAt)).toBeGreaterThanOrEqual(0);
+  expect(Date.now() - Date.parse(createdAt)).toBeLessThan(60_000);
   await expect(page.locator('#task-list details .body')).toBeHidden();
   await page.locator('#task-list summary').first().click();
   await expect(page.locator('#task-list details .body')).toBeVisible();
@@ -111,6 +116,7 @@ test('token login, teams, tasks and mobile controls', async ({ page }) => {
   await page.getByRole('button', {name: 'Overview', exact: true}).click();
   await expect(page.locator('#overview-task-counts')).toContainText('1 Unclaimed');
   await expect(page.locator('#overview-task-list')).toContainText('Check release notes');
+  await expect(page.locator('#overview-task-list .task-created time').first()).toBeVisible();
   await page.getByRole('button', {name: 'Instructions', exact: true}).click();
   await page.locator('#instruction-form [name=to_manager]').check();
   await page.locator('#instruction-form [name=body]').fill('Queue up the release reviews');

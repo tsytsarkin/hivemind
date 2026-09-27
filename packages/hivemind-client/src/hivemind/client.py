@@ -98,7 +98,7 @@ class Client:
         params = {"name": tool, "arguments": arguments,
                   "_meta": {"io.modelcontextprotocol/protocolVersion": PROTO,
                             "io.modelcontextprotocol/clientInfo": {"name": "hivemind-client",
-                                                                    "version": "0.1.0"},
+                                                                    "version": "1.5.4"},
                             "io.modelcontextprotocol/clientCapabilities": {}}}
         body = {"jsonrpc": "2.0", "id": _id, "method": "tools/call", "params": params}
         headers = {"Content-Type": "application/json",

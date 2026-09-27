@@ -11,6 +11,46 @@ from hivemind_server.ui_app import build_ui_app
 
 
 @pytest.mark.anyio
+async def test_task_creation_time_survives_edits_and_claims_in_full_and_brief_lists(env):
+    from hivemind_server import graph, graph_tasks
+    from hivemind_server.chat import ChatStore
+
+    mcp, project, _ = env
+    ids = IdentityStore(mcp.state.cfg.identities_path)
+    token = ids.mint("nik", "mac")
+    who = ("nik", "mac", "codex")
+    ChatStore(project.db).create_room("reviews", "Review work", who)
+    offered = graph_tasks.offer(project.db, "setup", "reviews", "Review patch", "Check it")
+    existing = graph.upsert_node(project.db, "setup", offered["node_type"],
+                                {**offered["current"]["props"], "title": "Older node"})
+    graph_tasks.enable(project.db, "setup", existing["node_id"])
+    node_ids = [offered["node_id"], existing["node_id"]]
+    # Distinguish task creation from the older node's creation and later task updates.
+    with project.db.write("test", "set distinct creation times") as tx:
+        tx.cur.execute("UPDATE tx SET tx_time='2020-01-01T00:00:00+00:00' "
+                       "WHERE tx_id=(SELECT created_tx FROM node WHERE node_id=?)",
+                       (existing["node_id"],))
+        for node_id in node_ids:
+            tx.cur.execute("UPDATE tx SET tx_time='2026-09-27T12:34:56.125000+00:00' "
+                           "WHERE tx_id=(SELECT created_tx FROM graph_task WHERE node_id=?)",
+                           (node_id,))
+    props = {**offered["current"]["props"], "summary": "Updated review scope"}
+    graph.upsert_node(project.db, "setup", offered["node_type"], props,
+                      node_id=offered["node_id"])
+    graph_tasks.claim(project.db, "setup", offered["node_id"], who)
+    app = build_ui_app(mcp.state.cfg, mcp.state.registry, ids)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                 base_url="http://testserver") as client:
+        await client.post("/api/login", json={"token": token})
+        for params in ({}, {"brief": "1", "status": "open", "counts": "0"}):
+            response = await client.get(f"/api/projects/{project.name}/tasks", params=params)
+            assert response.status_code == 200, response.text
+            tasks = response.json()["tasks"]
+            assert {task["node_id"] for task in tasks} == set(node_ids)
+            assert all(task["created_at"] == 1790512496.125 for task in tasks)
+
+
+@pytest.mark.anyio
 async def test_console_creates_team_assigns_task_and_queues_manager_instruction(env, monkeypatch):
     from hivemind_server import ui_chat
     mcp, project, _ = env

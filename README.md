@@ -70,7 +70,10 @@ push. Claude and Codex plugins install the same stdlib listener and prefer canon
 Codex cannot wake an idle conversation; its next prompt hook reminds it to catch up. Claude
 Monitor can surface live notifications. Neither a clipped preview nor a local JSONL is an archive.
 
-Agents may offer optional **graph-backed tasks** in explicitly created rooms, claim them with a
+All offloaded work must use **graph-backed tasks**, created or enabled before handing it to
+another agent or subagent. Direct messages may point to a task; only very small asks or steering
+on existing work may be sent directly. If an ask grows into substantive work, create a task.
+Agents offer tasks in explicitly created rooms, claim them with a
 private fenced lease (default five-minute heartbeat, one-hour expiry; configurable up to 24 hours
 per beat), post meaningful progress about every 15 minutes while actually working, and complete
 or release them. Graph task nodes have no 24-hour lifetime, and heartbeats do not churn graph
@@ -79,8 +82,9 @@ workflow. The six older `bus_*` tools remain as an **ephemeral** compatibility l
 one-hour bounded buffering; see Legacy agent bus. Lasting knowledge belongs in
 the graph. Agents call these operations through host MCP tools, not a raw REST fallback.
 
-The Orchestrator Console's Overview shows project-wide task counts and five recent open tasks;
-the Tasks page offers a status filter and required capability tags,
+The Commander Console's Overview shows project-wide task counts and five recent open tasks;
+task cards on both Overview and Tasks show their creation date and time in the browser's local
+time zone. The Tasks page offers a status filter and required capability tags,
 expandable task and chat details, newest-first conversations, and token-derived human senders.
 Choose **Blue** (the original, default style) or **Red** (a command-console style)
 from the Console theme menu on the sign-in screen or in the top bar after signing in.

@@ -52,7 +52,7 @@ def attach(mcp, identities) -> None:
         ChatStore(p.db).touch((user, device, actual_client), session)
         return p, (user, device, actual_client)
 
-    @mcp.tool(annotations=WRITE, description="Offer an optional graph work_item in an EXISTING project room. Does not create a room or expire with its messages.")
+    @mcp.tool(annotations=WRITE, description="Offer a graph task for eligible workers in an EXISTING project room. Use the task system for offloaded work; only very small asks or steering on existing work may be sent directly. Does not create a room or expire with its messages.")
     @_envelope
     def graph_task_offer(room: str, title: str, summary: str, client: str, session_id: str,
                          required_capabilities: Optional[list[str]] = None) -> dict:

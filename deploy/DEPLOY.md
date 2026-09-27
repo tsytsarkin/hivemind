@@ -1,10 +1,18 @@
 # Deploying Hivemind
 
+## Upgrading to 1.5.4
+
+The Commander Console (formerly Orchestrator Console) shows task creation dates and times on
+Tasks and Overview cards. Creation time comes from existing transaction history; this release
+adds no database migration. Updated agent instructions require the task system for offloaded
+work, except very small asks or steering on existing work. Update the server and both agent
+plugins together to pick up the release guidance.
+
 ## Upgrading to 1.5.3
 
 Back up each project database before upgrading (see [Backups](#backups)). On first open the
 server adds a nullable retirement marker to project capabilities; existing definitions and
-grants remain unchanged. The Orchestrator Console can retire a capability after all open tasks
+grants remain unchanged. The Commander Console can retire a capability after all open tasks
 requiring it are completed. Retirement removes current agent grants, prevents legacy clients
 from recreating the definition, and leaves completed task history intact. The Overview now shows
 project-wide task counts and recent open work.

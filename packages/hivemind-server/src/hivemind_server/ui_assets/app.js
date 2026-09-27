@@ -444,6 +444,14 @@ async function loadCandidates({older=false}={}){
     renderAssignmentCandidates();
   }catch(e){if(epoch===S.epoch)notice(e.message,true);}
 }
+function taskCreationTime(task){
+  const line=make("small","task-created","Created: ");
+  if(!Number.isFinite(task.created_at)){line.append("Unknown");return line;}
+  const date=new Date(task.created_at*1000);
+  const timestamp=make("time","",date.toLocaleString());
+  timestamp.dateTime=date.toISOString();
+  line.append(timestamp);return line;
+}
 function renderTasks(){
   const totals=$("task-counts"),counts=S.taskCounts||{};
   totals.replaceChildren(...[["available","Unclaimed"],["assigned_waiting","Assigned"],
@@ -454,6 +462,7 @@ function renderTasks(){
     const r=S.rooms.find(r=>r.room_id===t.room_id);
     const n=item(t.title||t.node_id,null,"☷",t.state.replaceAll("_"," "));
     n.append(make("small","","Room: "+(r?.name||"—")+" · Assignee: "+label(t.assignee)));
+    n.append(taskCreationTime(t));
     const detail=expandedDetail(n,t.summary||"Graph task",t.node_id,S.expandedTasks,
                                 "task details for "+(t.title||t.node_id));
     if(t.claim){
@@ -498,7 +507,8 @@ function renderOverviewTasks(){
     // ||node_id as every other task render site does: task_listing takes `title` straight from
     // props, which is absent on a node that never set one, and make() stringifies — so this
     // card read literally "null" while the Tasks page showed the id for the same task.
-    return item(task.title||task.node_id,context,"☷",task.state.replaceAll("_"," "));
+    const card=item(task.title||task.node_id,context,"☷",task.state.replaceAll("_"," "));
+    card.append(taskCreationTime(task));return card;
   });
   $("overview-task-list").replaceChildren(...(recent.length?recent:[empty("No open tasks right now.")]));
 }
