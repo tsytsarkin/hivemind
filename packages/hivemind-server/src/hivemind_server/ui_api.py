@@ -201,6 +201,11 @@ async def handle(req, p, who, identities: IdentityStore):
                 return _answer(await ui_capabilities.define_and_notify(
                     p, identities, who, data.get("name"), data.get("description"),
                     data["expected_updated_at"]))
+            if path == ["capabilities", "delete"]:
+                if "expected_updated_at" not in data:
+                    raise Invalid("expected_updated_at is required; refresh project capabilities")
+                return _answer(await ui_capabilities.retire_and_notify(
+                    p, identities, who, data.get("name"), data["expected_updated_at"]))
             if path == ["rooms"]:
                 return _answer(store.create_room(data.get("name"), data.get("description"), actor), 201)
             if len(path) == 3 and path[0] == "rooms" and path[2] == "members":

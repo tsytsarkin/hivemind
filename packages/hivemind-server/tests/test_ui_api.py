@@ -259,6 +259,41 @@ async def test_console_capability_definition_rejects_concurrent_edit(env):
 
 
 @pytest.mark.anyio
+async def test_console_retires_capability_and_notifies_affected_agent_and_room(env):
+    from hivemind_server import capabilities
+    from hivemind_server.chat import ChatStore
+
+    mcp, project, _ = env
+    ids = IdentityStore(mcp.state.cfg.identities_path)
+    nik, _ = ids.mint("nik", "mac"), ids.mint("ana", "laptop")
+    peer = ("ana", "laptop", "claude")
+    created = capabilities.define(project.db, "review", "Review code")
+    capabilities.replace(project.db, peer, ["review"], managed_by_ui=True)
+    store = ChatStore(project.db)
+    store.create_room("reviews", "Review work", ("nik", "mac", "codex"))
+    store.join("reviews", peer)
+    ui = build_ui_app(mcp.state.cfg, mcp.state.registry, ids)
+    path = f"/api/projects/{project.name}/capabilities/delete"
+    body = {"name": "review", "expected_updated_at": created["updated_at"]}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=ui),
+                                 base_url="http://testserver") as c:
+        csrf = (await c.post("/api/login", json={"token": nik})).json()["csrf_token"]
+        denied = await c.post(path, json=body)
+        deleted = await c.post(path, json=body, headers={"x-csrf-token": csrf})
+        catalog = await c.get(f"/api/projects/{project.name}/capabilities")
+        repeat = await c.post(path, json=body, headers={"x-csrf-token": csrf})
+    assert denied.status_code == 403
+    assert deleted.status_code == 200, deleted.text
+    assert deleted.json()["affected_agent_count"] == 1
+    assert "affected_agents" not in deleted.json()
+    assert catalog.json()["capabilities"] == []
+    assert repeat.status_code in (404, 409)
+    assert capabilities.get(project.db, peer)["capabilities"] == []
+    assert "review" in store.inbox(peer)["messages"][0]["body"].lower()
+    assert "review" in store.history("reviews")["messages"][0]["body"].lower()
+
+
+@pytest.mark.anyio
 async def test_console_pages_pending_agent_capabilities_without_room_membership(env):
     from hivemind_server import capabilities
 
@@ -512,6 +547,30 @@ async def test_task_counts_and_filter_use_effective_states_across_all_pages(env)
     assert all(t["state"] == "available" for t in first["tasks"] + second["tasks"])
     assert [t["node_id"] for t in claimed["tasks"]] == [nodes[2]]
     assert invalid.status_code == 422
+
+
+@pytest.mark.anyio
+async def test_overview_open_task_page_skips_newer_completed_work(env):
+    from hivemind_server import graph_tasks
+    from hivemind_server.chat import ChatStore
+
+    mcp, project, _ = env
+    ids = IdentityStore(mcp.state.cfg.identities_path)
+    token = ids.mint("nik", "mac")
+    who = ("nik", "mac", "codex")
+    ChatStore(project.db).create_room("reviews", "Review", who)
+    older = graph_tasks.offer(project.db, "setup", "reviews", "Review patch", "Needs attention")
+    finished = graph_tasks.offer(project.db, "setup", "reviews", "Completed patch", "Done")
+    claim = graph_tasks.claim(project.db, "setup", finished["node_id"], who)
+    graph_tasks.complete(project.db, "setup", finished["node_id"], claim["claim_token"], who)
+    ui = build_ui_app(mcp.state.cfg, mcp.state.registry, ids)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=ui),
+                                 base_url="http://testserver") as c:
+        await c.post("/api/login", json={"token": token})
+        result = await c.get(f"/api/projects/{project.name}/tasks",
+                             params={"status": "open", "brief": "1", "limit": 1})
+    assert result.status_code == 200, result.text
+    assert [t["node_id"] for t in result.json()["tasks"]] == [older["node_id"]]
 
 
 @pytest.mark.anyio

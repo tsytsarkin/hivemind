@@ -221,8 +221,10 @@ CREATE TABLE IF NOT EXISTS project_capability (
   description TEXT NOT NULL,
   created_at  REAL NOT NULL,
   updated_at  REAL NOT NULL,
-  approved    INTEGER NOT NULL DEFAULT 0 CHECK (approved IN (0,1))
+  approved    INTEGER NOT NULL DEFAULT 0 CHECK (approved IN (0,1)),
+  deleted_at  REAL
 );
+CREATE INDEX IF NOT EXISTS ix_project_capability_updated ON project_capability(updated_at);
 CREATE TABLE IF NOT EXISTS chat_usage (
   id            INTEGER PRIMARY KEY CHECK (id=1),
   counted_bytes INTEGER NOT NULL,

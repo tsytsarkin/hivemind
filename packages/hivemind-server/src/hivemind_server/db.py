@@ -124,6 +124,7 @@ class Database:
         ("agent_capability", "human_managed", "INTEGER NOT NULL DEFAULT 0"),
         ("agent_capability", "approved_tags_json", "TEXT NOT NULL DEFAULT '[]'"),
         ("project_capability", "approved", "INTEGER NOT NULL DEFAULT 0"),
+        ("project_capability", "deleted_at", "REAL"),
         ("chat_cursor", "message_id", "TEXT"),
         ("chat_session", "model_name", "TEXT"),
         ("chat_session", "work_status", "TEXT"),

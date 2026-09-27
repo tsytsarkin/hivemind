@@ -8,7 +8,7 @@ description: >-
   standalone tool or reuse one another agent built; coordinate state across agents/machines; publish a procedure you worked out or record a dead-end that wasted time (and check for both before starting).
   Hivemind REPLACES local memory: read it before any work and persist all work into it. Domain-agnostic — call schema_get and guide_get first to learn this project's vocabulary.
 metadata:
-  version: "1.5.2"
+  version: "1.5.3"
 ---
 
 # Hivemind

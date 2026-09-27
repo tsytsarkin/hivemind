@@ -5,7 +5,7 @@ const $ = id => document.getElementById(id);
 // a native form submit. test_ui_assets.py only greps this file for substrings and the Playwright
 // spec needs npm and a live server, so nothing in the pytest suite noticed.
 const q = selector => document.querySelector(selector);
-const S = {csrf:null,project:null,epoch:0,conversationEpoch:0,view:"overview",rooms:[],roomOlder:null,agents:[],caps:[],catalog:[],catalogOlder:null,catalogPaged:false,capabilityEditBase:null,pendingAgents:[],pendingOlder:null,pendingPaged:false,pendingAgentTags:[],roomAgentTags:null,roomAgentKey:null,roomAgentUpdatedAt:null,roomConfigUpdatedAt:null,roomConfigParallel:20,roomConfigAuto:true,roomConfigDraft:null,roomChoiceDraft:null,tasks:[],taskCounts:null,assignmentTasks:[],assignmentOlder:null,expandedTasks:new Set(),expandedMessages:new Set(),candidates:[],candidateTask:null,candidateOlder:null,candidateRequest:0,candidateMemberCount:0,instructions:[],olderCursor:null,taskOlder:null,instructionOlder:null,agentOlder:null,latestDisplayedSeq:null,hasHiddenUnseen:false};
+const S = {csrf:null,project:null,epoch:0,conversationEpoch:0,view:"overview",rooms:[],roomOlder:null,agents:[],caps:[],catalog:[],catalogOlder:null,catalogPaged:false,catalogRevision:null,capabilityEditBase:null,pendingAgents:[],pendingOlder:null,pendingPaged:false,pendingAgentTags:[],roomAgentTags:null,roomAgentKey:null,roomAgentUpdatedAt:null,roomConfigUpdatedAt:null,roomConfigParallel:20,roomConfigAuto:true,roomConfigDraft:null,roomChoiceDraft:null,tasks:[],taskCounts:null,overviewTasks:[],assignmentTasks:[],assignmentOlder:null,expandedTasks:new Set(),expandedMessages:new Set(),candidates:[],candidateTask:null,candidateOlder:null,candidateRequest:0,candidateMemberCount:0,instructions:[],olderCursor:null,taskOlder:null,instructionOlder:null,agentOlder:null,latestDisplayedSeq:null,hasHiddenUnseen:false};
 const headings = {
   overview:["Overview","YOUR WORKSPACE, AT A GLANCE","The conversations and work moving through your project."],
   rooms:["Rooms","CONVERSATIONS BY TOPIC","Create focused spaces and put together the right team."],
@@ -87,11 +87,11 @@ async function api(path,opts={}) {
 const url=tail=>"/api/projects/"+encodeURIComponent(S.project)+"/"+tail;
 function resetProjectState(){
   S.rooms=[];S.roomOlder=null;S.agents=[];S.agentOlder=null;S.caps=[];
-  S.catalog=[];S.catalogOlder=null;S.catalogPaged=false;S.capabilityEditBase=null;S.pendingAgents=[];S.pendingOlder=null;
+  S.catalog=[];S.catalogOlder=null;S.catalogPaged=false;S.catalogRevision=null;S.capabilityEditBase=null;S.pendingAgents=[];S.pendingOlder=null;
   S.pendingPaged=false;S.pendingAgentTags=[];S.roomAgentTags=null;S.roomAgentKey=null;
   S.roomAgentUpdatedAt=null;S.roomConfigUpdatedAt=null;S.roomConfigDraft=null;
   S.roomConfigParallel=20;S.roomConfigAuto=true;S.roomChoiceDraft=null;
-  S.tasks=[];S.taskCounts=null;S.assignmentTasks=[];S.assignmentOlder=null;
+  S.tasks=[];S.taskCounts=null;S.overviewTasks=[];S.assignmentTasks=[];S.assignmentOlder=null;
   S.expandedTasks.clear();S.expandedMessages.clear();
   S.taskOlder=null;S.candidates=[];S.candidateTask=null;
   S.candidateOlder=null;S.candidateMemberCount=0;S.candidateRequest++;
@@ -104,7 +104,8 @@ function resetProjectState(){
   for(const id of ["task-select","assignee-select","dm-recipient","instruction-recipient"])
     $(id).replaceChildren();
   for(const id of ["room-list","overview-rooms","agent-list","overview-agents",
-    "task-list","task-counts","instruction-list","message-list","message-room-info",
+    "task-list","task-counts","overview-task-counts","overview-task-list",
+    "instruction-list","message-list","message-room-info",
     "capability-catalog","capability-choices","agent-pending-choices","pending-agent-list"])
     $(id).replaceChildren();
   for(const id of ["stat-rooms","stat-agents","stat-tasks","stat-queue"])
@@ -184,7 +185,17 @@ function renderCatalog(){
       q('#capability-create-form [name="name"]').value=cap.name;
       q('#capability-create-form [name="description"]').value=cap.description;
       q('#capability-create-form [name="description"]').focus?.();
-    });n.append(edit);return n;
+    });
+    const remove=make("button","text-button danger-button","Delete");remove.type="button";
+    remove.setAttribute("aria-label","Delete capability "+cap.name);
+    remove.addEventListener("click",async()=>{
+      if(!window.confirm("Delete capability "+cap.name+"? This removes it from agents; " +
+        "open tasks requiring it must be completed first."))return;
+      await mutate("capabilities/delete",{name:cap.name,expected_updated_at:cap.updated_at},
+        "Capability "+cap.name+" deleted.");
+    });
+    const actions=make("div","catalog-actions");actions.append(edit,remove);n.append(actions);
+    return n;
   });
   $("capability-catalog").replaceChildren(...(cards.length?cards:[empty("Add a project capability with a description.")]));
   $("capability-older").hidden=!S.catalogOlder;
@@ -335,12 +346,14 @@ function renderAgents(){
       tags.append(make("span","chip",cap));
     n.append(tags);
     if(!["human","webui"].includes(a.address[2])){
+      const actions=make("div","agent-actions");
       const dm=make("button","text-button","DM");dm.type="button";
       dm.setAttribute("aria-label","DM "+label(a.address));
-      dm.addEventListener("click",()=>openAgentDm(a.address));n.append(dm);
+      dm.addEventListener("click",()=>openAgentDm(a.address));actions.append(dm);
       const settings=make("button","text-button","Settings");settings.type="button";
       settings.setAttribute("aria-label","Settings for "+label(a.address));
-      settings.addEventListener("click",()=>openAgentSettings(a.address));n.append(settings);
+      settings.addEventListener("click",()=>openAgentSettings(a.address));actions.append(settings);
+      n.append(actions);
     }
     return n;
   };
@@ -436,6 +449,7 @@ function renderTasks(){
   totals.replaceChildren(...[["available","Unclaimed"],["assigned_waiting","Assigned"],
     ["in_progress","Claimed"],["complete","Completed"]].map(([state,title])=>
     make("span","chip "+state,(counts[state]||0)+" "+title)));
+  renderOverviewTasks();
   const render=t=>{
     const r=S.rooms.find(r=>r.room_id===t.room_id);
     const n=item(t.title||t.node_id,null,"☷",t.state.replaceAll("_"," "));
@@ -472,6 +486,18 @@ function renderTasks(){
   $("task-older").hidden=!S.taskOlder;
   $("task-select-older").hidden=!S.assignmentOlder;
   loadCandidates();
+}
+function renderOverviewTasks(){
+  const counts=S.taskCounts||{};
+  $("overview-task-counts").replaceChildren(...[["available","Unclaimed"],
+    ["assigned_waiting","Assigned"],["in_progress","Claimed"],["complete","Completed"]]
+    .map(([state,title])=>make("span","chip "+state,(counts[state]||0)+" "+title)));
+  const recent=S.overviewTasks.filter(t=>t.state!=="complete").slice(0,5).map(task=>{
+    const room=S.rooms.find(r=>r.room_id===task.room_id);
+    const context=(room?"# "+room.name+" · ":"")+Array.from(task.summary||"").slice(0,120).join("");
+    return item(task.title,context,"☷",task.state.replaceAll("_"," "));
+  });
+  $("overview-task-list").replaceChildren(...(recent.length?recent:[empty("No open tasks right now.")]));
 }
 function renderInstructions(){
   const render=i=>{
@@ -543,7 +569,7 @@ async function messages({older=false}={}){
 async function refresh(){
   if(!S.project)return;const epoch=S.epoch,status=$("task-status-filter").value;
   try{
-    const [r,a,t,i,summary,unfiltered,catalog,pending]=await Promise.all([
+    const [r,a,t,i,summary,unfiltered,catalog,pending,preview]=await Promise.all([
       ...["rooms","agents","tasks?status="+encodeURIComponent(status),"instructions","summary"]
         .map(x=>api(url(x))),
       // brief=1: this second request exists only to keep the assignment dropdown showing every
@@ -552,11 +578,18 @@ async function refresh(){
       // and graph_tasks.read per task, so a filtered view cost ~4 read transactions per task
       // twice over, every 20-second tick.
       status==="all"?Promise.resolve(null):api(url("tasks?brief=1")),
-      api(url("capabilities")),api(url("capabilities/pending"))]);
+      api(url("capabilities")),api(url("capabilities/pending")),
+      api(url("tasks?status=open&brief=1&limit=5"))]);
     if(epoch!==S.epoch||status!==$("task-status-filter").value)return;
     // Drop loaded pages at refresh: old cursors can skip inserted members and retain removed ones.
     S.rooms=r.rooms;S.roomOlder=r.older_cursor;
     S.agents=a.agents;S.caps=a.capabilities;S.agentOlder=a.older_cursor;
+    // A changed project catalog may retire a tag on a previously loaded page.
+    // Drop cached pages only when its global revision changes, not every 20s refresh.
+    if(S.catalogRevision!==null&&S.catalogRevision!==catalog.revision){
+      S.catalog=[];S.catalogPaged=false;S.catalogOlder=null;
+    }
+    S.catalogRevision=catalog.revision;
     const existing=new Map(S.catalog.map(cap=>[cap.name,cap]));
     for(const cap of catalog.capabilities)existing.set(cap.name,cap);
     S.catalog=[...existing.values()].sort((left,right)=>left.name.localeCompare(right.name));
@@ -567,7 +600,7 @@ async function refresh(){
     // including to null, which means they reached the end and must not be sent back to page two.
     if(!S.catalogPaged)S.catalogOlder=catalog.next_cursor;
     // Replace and drop loaded pages, exactly as the rooms and tasks lists do. The catalog above
-    // merges because capability DEFINITIONS are append-only, so a kept page cannot go stale;
+    // merges between revision changes; retired definitions invalidate old pages above.
     // pending assignments are the opposite — they disappear the moment anyone approves them.
     // Merging kept advertising an agent as pending, with its old tags, after another console
     // session (or this one's own config form) had already confirmed it.
@@ -579,6 +612,7 @@ async function refresh(){
     // Copy, never alias: with no status filter `unfiltered` is null and both fields pointed at
     // the SAME array, so pushing the pinned task below — or "Load more assignable tasks", which
     // pushes a whole page — silently appended into the rendered Tasks list the user is reading.
+    S.overviewTasks=preview.tasks;
     S.assignmentTasks=[...(unfiltered||t).tasks];
     S.assignmentOlder=(unfiltered||t).older_cursor;
     if(pinnedTask&&!S.assignmentTasks.some(task=>task.node_id===selectedTask))

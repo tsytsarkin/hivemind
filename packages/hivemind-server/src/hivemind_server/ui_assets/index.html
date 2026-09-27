@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#101928">
-  <title>Hivemind · Project console</title>
+  <title>Hivemind · Orchestrator Console</title>
   <link rel="stylesheet" href="/assets/styles.css">
   <script src="/assets/app.js" type="module"></script>
 </head>
@@ -29,7 +29,7 @@
 
   <div id="app-shell" class="app-shell" hidden>
     <aside class="sidebar" aria-label="Main navigation">
-      <div class="sidebar-brand"><div class="brand-mark" aria-hidden="true">✣</div><div><span class="brand-name">hivemind</span><span class="brand-caption">PROJECT CONSOLE</span></div></div>
+      <div class="sidebar-brand"><div class="brand-mark" aria-hidden="true">✣</div><div><span class="brand-name">hivemind</span><span class="brand-caption">ORCHESTRATOR CONSOLE</span></div></div>
       <div class="sidebar-section-label">WORKSPACE</div>
       <label class="project-label" for="project-switcher">Active project</label>
       <select id="project-switcher" aria-label="Active project"></select>
@@ -54,6 +54,7 @@
         <section id="view-overview" class="view" aria-label="Overview">
           <div class="stats-grid"><article class="stat-card"><span>ONLINE AGENTS</span><strong id="stat-rooms">—</strong><small>Connected right now</small></article><article class="stat-card"><span>WAITING ASSIGNMENTS</span><strong id="stat-agents">—</strong><small>Reserved until check-in</small></article><article class="stat-card"><span>OVERDUE UPDATES</span><strong id="stat-tasks">—</strong><small>Heartbeat or room progress</small></article><article class="stat-card"><span>QUEUED / STALLED</span><strong id="stat-queue">—</strong><small>Human instructions</small></article></div>
           <div class="overview-grid"><section class="panel"><div class="panel-heading"><div><span class="eyebrow">COLLABORATION</span><h2>Rooms in motion</h2></div><button type="button" class="text-button" data-go="rooms">View rooms ↗</button></div><div id="overview-rooms" class="stack"></div></section><section class="panel"><div class="panel-heading"><div><span class="eyebrow">PRESENCE</span><h2>Your agents</h2></div><button type="button" class="text-button" data-go="agents">View agents ↗</button></div><div id="overview-agents" class="stack"></div></section></div>
+          <section class="panel separated"><div class="panel-heading"><div><span class="eyebrow">GRAPH WORK ITEMS</span><h2>Task summary</h2></div><button type="button" class="text-button" data-go="tasks">View tasks ↗</button></div><div id="overview-task-counts" class="metadata" aria-live="polite"></div><div id="overview-task-list" class="stack"></div></section>
         </section>
 
         <section id="view-rooms" class="view" aria-label="Rooms" hidden>

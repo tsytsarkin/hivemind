@@ -131,6 +131,66 @@ async def define_and_notify(project, identities, author: Identity,
             "notification_warnings": warnings}
 
 
+async def retire_and_notify(project, identities, author: Identity,
+                            name: str, expected_updated_at: float) -> dict:
+    db = project.db
+    retired = capabilities.retire(db, name, expected_updated_at=expected_updated_at)
+    store = ChatStore.for_project(db, project.dir)
+    source = (author.user, author.device, "human")
+    key = "capability-retired-" + ulid()
+    warnings = []
+    rooms = set()
+    try:
+        with db.read() as cur:
+            for holder in retired["affected_agents"]:
+                rows = cur.execute("SELECT r.name FROM chat_subscription s JOIN chat_room r "
+                                   "ON r.room_id=s.room_id WHERE s.user=? AND s.device=? "
+                                   "AND s.client=?", holder).fetchall()
+                rooms.update(row["name"] for row in rows)
+            rows = cur.execute("SELECT DISTINCT r.name FROM graph_task t "
+                               "JOIN chat_room r ON r.room_id=t.room_id, "
+                               "json_each(t.required_capabilities_json) tag "
+                               "WHERE tag.value=?", (name,)).fetchall()
+            rooms.update(row["name"] for row in rows)
+    except Exception:
+        log.exception("capability retired but room lookup failed: %s", name)
+        warnings.append("room lookup failed; retirement remains applied")
+    delivered = 0
+    for holder in retired["affected_agents"]:
+        if not identities.has_device(holder[0], holder[1]) or not can_access(
+                Identity(holder[0], holder[1]), project.meta):
+            continue
+        try:
+            message = store.send("dm", holder, source,
+                f"Project capability {name} was retired by {author.user}. "
+                "It has been removed from your grants. Refresh agent_capabilities_get "
+                "and agent_capability_catalog before taking new work.",
+                key, sender_origin="human_ui")
+            await ui_chat.notify_human_dm(project.dir, holder, message)
+            delivered += 1
+        except Exception:
+            log.exception("capability retirement DM failed for %s", holder)
+            warnings.append("agent DM could not be stored for " + ".".join(holder))
+    posted = 0
+    for room in sorted(rooms):
+        try:
+            message = store.send("room", room, source,
+                f"Project capability {name} was retired by {author.user}. "
+                "Agents should refresh their server-defined capabilities; completed task history "
+                "is unchanged.", key, sender_origin="human_ui")
+            await ui_chat.notify_human_room(project.dir, db, project.meta, identities,
+                                            room, message)
+            posted += 1
+        except Exception:
+            log.exception("capability retirement room notice failed: %s", room)
+            warnings.append("room notice could not be stored for " + room)
+    return {"name": retired["name"], "retired": True,
+            "updated_at": retired["updated_at"],
+            "affected_agent_count": len(retired["affected_agents"]),
+            "notified_agents": delivered, "notified_rooms": posted,
+            "notification_warnings": warnings}
+
+
 async def update_agent_config(project, identities, author: Identity, target: StableAddress, *,
                               max_parallel_tasks: int, auto_claim_enabled: bool,
                               expected_updated_at: float | None,

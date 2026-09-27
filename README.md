@@ -79,7 +79,8 @@ workflow. The six older `bus_*` tools remain as an **ephemeral** compatibility l
 one-hour bounded buffering; see Legacy agent bus. Lasting knowledge belongs in
 the graph. Agents call these operations through host MCP tools, not a raw REST fallback.
 
-The web console shows project-wide task counts with a status filter, required capability tags,
+The Orchestrator Console's Overview shows project-wide task counts and five recent open tasks;
+the Tasks page offers a status filter and required capability tags,
 expandable task and chat details, newest-first conversations, and token-derived human senders.
 Agent cards display local Claude/Codex harness logos, the model reported by each session
 (or “Model not reported” when unavailable), and the session's latest short work status with its
@@ -103,16 +104,19 @@ notifies its subscribers. Portal assignments send a durable DM to the assignee, 
 task-creation form can assign directly to the room's current manager. Assignments remain
 authoritative if chat notification is unavailable, and the portal reports that failure.
 
-Room Management contains a project-wide capability catalog with persistent descriptions. A
-project user can add/edit definitions and assign or remove those tags for a room member; the
-member's tags apply across every room in that project. Agents can page definitions and
+The Capabilities view contains a project-wide catalog with persistent descriptions. A project
+user can add/edit a definition, or delete one when no open task requires it. Deletion removes
+the tag from agents, notifies affected agents and rooms, and does not erase completed task
+history or allow legacy advertisements to recreate the retired definition on restart. Define
+the tag anew in the console if needed again. The Agents view can assign or remove those tags;
+an agent's tags apply across every room in that project. Agents can page definitions and
 descriptions via `agent_capability_catalog`. The server enforces tag edits immediately (including
 fencing ineligible claims), sends the agent a durable DM with descriptions, and posts an update
 to every room the agent has joined. Updated definitions are DM'd to agents holding that tag.
 An idle agent refreshes its tags and the catalog on its next active turn; no server can force an
 idle coding session to wake up. Agent writes over human-managed tags require the latest
 `expected_updated_at` revision, so stale startup advertisements cannot undo portal changes.
-Room Management also exposes each member's persistent project agent config: maximum parallel
+The Agents view also exposes each member's persistent project agent config: maximum parallel
 task claims (1–20) and automatic task pickup. Agents read/change their own settings through
 `agent_config_get` and `agent_config_update`; server-side claim limits are enforced, while
 actual concurrency may be lower because of the agent host's subagent limit. Agents are instructed

@@ -31,7 +31,7 @@ WITH task_states AS (
 def page(db: Database, *, status: str = "all", before_id: str | None = None,
          limit: int = 100, eligible_for: StableAddress | None = None,
          with_counts: bool = False, room: str | None = None) -> dict:
-    if status not in ("all", *STATES):
+    if status not in ("all", "open", *STATES):
         raise Invalid("unknown task status")
     if type(limit) is not int or not 1 <= limit <= 100:
         raise Invalid("limit must be 1–100")
@@ -48,7 +48,7 @@ def page(db: Database, *, status: str = "all", before_id: str | None = None,
                                    (t, room_id) if room_id is not None else (t,)):
                 counts[row["state"]] = row["n"]
         eligible = ""
-        values = [t, status, status, before_id or "Z"]
+        values = [t, status, status, status, before_id or "Z"]
         room_filter = " AND room_id=?" if room_id is not None else ""
         if room_id is not None:
             values.append(room_id)
@@ -58,7 +58,8 @@ def page(db: Database, *, status: str = "all", before_id: str | None = None,
                         "AS required WHERE required.value NOT IN "
                         "(SELECT value FROM json_each(?)))")
             values.append(json.dumps(tags))
-        rows = cur.execute(_STATES_SQL + "SELECT * FROM task_states WHERE (?='all' OR state=?) "
+        rows = cur.execute(_STATES_SQL + "SELECT * FROM task_states WHERE "
+                           "(?='all' OR (?='open' AND state!='complete') OR state=?) "
                            "AND node_id<?" + room_filter + eligible + " ORDER BY node_id DESC LIMIT ?",
                            (*values, limit + 1)).fetchall()
     has_older = len(rows) > limit

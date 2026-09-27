@@ -6,12 +6,13 @@ test('token login, teams, tasks and mobile controls', async ({ page }) => {
   await expect(page.getByText('Your projects.')).toBeVisible();
   await page.locator('#login-token').fill(process.env.HIVEMIND_TEST_TOKEN);
   await page.locator('#login-form button').click();
+  await expect(page).toHaveTitle('Hivemind · Orchestrator Console');
   await expect(page.locator('#page-title')).toHaveText('Overview');
   await expect(page.locator('#project-switcher')).toHaveValue('default');
   await expect(page.locator('#server-version')).toHaveText(/^v\d+\.\d+\.\d+/);
   await page.getByRole('button', {name: 'Rooms', exact: true}).click();
   await page.locator('#room-create-form [name=name]').fill('release-review');
-  await page.locator('#room-create-form [name=description]').fill('Coordinating the 1.5.2 release');
+  await page.locator('#room-create-form [name=description]').fill('Coordinating the 1.5.3 release');
   await page.locator('#room-create-form button').click();
   await expect(page.locator('#room-list')).toContainText('release-review');
   await page.locator('#member-form [name=address_user]').fill('nikt');
@@ -59,6 +60,9 @@ test('token login, teams, tasks and mobile controls', async ({ page }) => {
   await page.locator('#task-create-form [name=assign_to_manager]').check();
   await page.locator('#task-create-form button').click();
   await expect(page.locator('#task-counts')).toContainText('1 Assigned');
+  await page.getByRole('button', {name: 'Overview', exact: true}).click();
+  await expect(page.locator('#overview-task-counts')).toContainText('1 Unclaimed');
+  await expect(page.locator('#overview-task-list')).toContainText('Check release notes');
   await page.getByRole('button', {name: 'Instructions', exact: true}).click();
   await page.locator('#instruction-form [name=to_manager]').check();
   await page.locator('#instruction-form [name=body]').fill('Queue up the release reviews');
@@ -67,6 +71,9 @@ test('token login, teams, tasks and mobile controls', async ({ page }) => {
   await page.getByRole('button', {name: 'Agents', exact: true}).click();
   await expect(page.getByText('DMs are visible')).toBeVisible();
   await expect(page.locator('#agent-list')).toContainText('python');
+  const actionGap = await page.locator('#agent-list .agent-actions').first().evaluate(
+    el => parseFloat(getComputedStyle(el).columnGap));
+  expect(actionGap).toBeGreaterThanOrEqual(8);
   await page.locator('#agent-list button[aria-label="DM nikt · macbook · codex"]').click();
   await expect(page.locator('#dm-recipient')).toHaveValue('["nikt","macbook","codex"]');
   await page.locator('#dm-form [name=body]').fill('Ready for review');
@@ -86,6 +93,10 @@ test('token login, teams, tasks and mobile controls', async ({ page }) => {
   await expect(page.locator('#message-list details .body').first()).toBeHidden();
   await page.locator('#message-list summary').first().click();
   await expect(page.locator('#message-list details .body').first()).toBeVisible();
+  await page.getByRole('button', {name: 'Capabilities', exact: true}).click();
+  page.once('dialog', dialog => dialog.accept());
+  await page.getByRole('button', {name: 'Delete capability review'}).click();
+  await expect(page.locator('#capability-catalog')).not.toContainText('review');
   const badgeColors = await page.evaluate(() => {
     const online = document.createElement('span'), offline = document.createElement('span');
     online.className = 'chip online'; offline.className = 'chip offline';

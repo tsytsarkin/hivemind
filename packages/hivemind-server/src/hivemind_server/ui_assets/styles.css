@@ -30,6 +30,8 @@ p { line-height:1.55 }
 .button.ghost { background:transparent; border-color:var(--line); color:var(--ink); padding:.55rem .8rem; font-weight:500 }
 .text-button { border:0; background:none; color:var(--accent); font-weight:700; text-align:left; padding:.35rem 0 }
 .text-button:hover { text-decoration:underline }
+.agent-actions, .catalog-actions { display:flex; flex-wrap:wrap; gap:.5rem .85rem; margin-top:10px }
+.danger-button { color:var(--red) }
 .form-error { color:var(--red); min-height:1.5em }
 .login-screen { display:grid; grid-template-columns:minmax(320px,1fr) minmax(300px,1fr); min-height:100vh }
 .login-panel { max-width:490px; width:100%; align-self:center; justify-self:center; padding:4rem 2.5rem }

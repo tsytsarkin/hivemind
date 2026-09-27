@@ -7,7 +7,7 @@ import re
 import time
 
 from .chat import StableAddress, _address
-from .db import Conflict, Database, Invalid
+from .db import Conflict, Database, Invalid, NotFound
 
 
 _TAG = re.compile(r"^[a-z][a-z0-9_.:-]{0,63}$")
@@ -26,16 +26,18 @@ def define(db: Database, name: str, description: str, *,
         raise Invalid("expected_updated_at must be a server timestamp")
     t = time.time()
     with db.write("project-capabilities", "define project-wide capability") as tx:
-        prior = tx.cur.execute("SELECT updated_at FROM project_capability WHERE name=?",
+        prior = tx.cur.execute("SELECT updated_at,deleted_at FROM project_capability WHERE name=?",
                                (name,)).fetchone()
-        revision = prior["updated_at"] if prior else None
+        revision = prior["updated_at"] if prior and prior["deleted_at"] is None else None
         if enforce_revision and revision != expected_updated_at:
             raise Conflict("project capability changed; refresh and retry")
-        if revision is not None and t <= revision:
-            t = math.nextafter(revision, math.inf)
-        tx.cur.execute("INSERT INTO project_capability(name,description,created_at,updated_at,approved) "
-                       "VALUES(?,?,?,?,1) ON CONFLICT(name) DO UPDATE SET "
-                       "description=excluded.description,updated_at=excluded.updated_at,approved=1",
+        last = tx.cur.execute("SELECT MAX(updated_at) FROM project_capability").fetchone()[0]
+        if last is not None and t <= last:
+            t = math.nextafter(last, math.inf)
+        tx.cur.execute("INSERT INTO project_capability(name,description,created_at,updated_at,"
+                       "approved,deleted_at) VALUES(?,?,?,?,1,NULL) ON CONFLICT(name) DO UPDATE SET "
+                       "description=excluded.description,updated_at=excluded.updated_at,"
+                       "approved=1,deleted_at=NULL",
                        (name, description.strip(), t, t))
     return {"name": name, "description": description.strip(), "updated_at": t,
             "approved": True}
@@ -48,18 +50,68 @@ def catalog(db: Database, *, after: str | None = None, limit: int = 100) -> dict
         raise Invalid("invalid capability cursor")
     with db.read() as cur:
         rows = cur.execute("SELECT name,description,updated_at,approved FROM project_capability "
-                           "WHERE name>? ORDER BY name LIMIT ?", (after or "", limit + 1)).fetchall()
+                           "WHERE name>? AND deleted_at IS NULL ORDER BY name LIMIT ?",
+                           (after or "", limit + 1)).fetchall()
+        revision = cur.execute("SELECT MAX(updated_at) FROM project_capability").fetchone()[0]
     more = len(rows) > limit
     rows = rows[:limit]
     return {"capabilities": [{**dict(row), "approved": bool(row["approved"])} for row in rows],
-            "next_cursor": rows[-1]["name"] if more else None}
+            "next_cursor": rows[-1]["name"] if more else None, "revision": revision or 0}
+
+
+def retire(db: Database, name: str, *, expected_updated_at: float | None) -> dict:
+    """Retire a definition without losing completed task history or resurrecting legacy tags."""
+    if not isinstance(name, str) or not _TAG.fullmatch(name):
+        raise Invalid("capability name must be a lowercase ASCII slug")
+    if type(expected_updated_at) not in (int, float) or not math.isfinite(expected_updated_at):
+        raise Invalid("expected_updated_at must be the current catalog revision")
+    with db.write("project-capabilities", "retire project capability") as tx:
+        cur = tx.cur
+        row = cur.execute("SELECT updated_at FROM project_capability WHERE name=? AND "
+                          "deleted_at IS NULL", (name,)).fetchone()
+        if row is None:
+            raise NotFound("project capability not found")
+        if row["updated_at"] != expected_updated_at:
+            raise Conflict("project capability changed; refresh and retry")
+        task = cur.execute("SELECT t.node_id FROM graph_task t, "
+                           "json_each(t.required_capabilities_json) tag WHERE "
+                           "tag.value=? AND t.status!='complete' LIMIT 1", (name,)).fetchone()
+        if task:
+            raise Conflict("capability is required by an open task; update or complete the task first")
+        holders = cur.execute("SELECT a.* FROM agent_capability a WHERE EXISTS "
+                              "(SELECT 1 FROM json_each(a.tags_json) tag WHERE tag.value=?) "
+                              "ORDER BY a.user,a.device,a.client", (name,)).fetchall()
+        t = time.time()
+        latest = cur.execute("SELECT MAX(updated_at) FROM project_capability").fetchone()[0]
+        if t <= latest:
+            t = math.nextafter(latest, math.inf)
+        cur.execute("UPDATE project_capability SET approved=0,deleted_at=?,updated_at=? "
+                    "WHERE name=?", (t, t, name))
+        from . import assignments
+        addresses = []
+        for holder in holders:
+            who = (holder["user"], holder["device"], holder["client"])
+            tags = [tag for tag in json.loads(holder["tags_json"]) if tag != name]
+            approved = [tag for tag in json.loads(holder["approved_tags_json"]) if tag != name]
+            stamp = time.time()
+            if stamp <= holder["updated_at"]:
+                stamp = math.nextafter(holder["updated_at"], math.inf)
+            cur.execute("UPDATE agent_capability SET tags_json=?,approved_tags_json=?,updated_at=? "
+                        "WHERE user=? AND device=? AND client=?",
+                        (json.dumps(tags, separators=(",", ":")),
+                         json.dumps(approved, separators=(",", ":")), stamp, *who))
+            assignments.invalidate_for_agent(tx, who)
+            addresses.append(who)
+    return {"name": name, "retired": True, "affected_agents": addresses,
+            "updated_at": t}
 
 
 def descriptions(db: Database, tags: list[str]) -> dict[str, str]:
     if not tags:
         return {}
     with db.read() as cur:
-        rows = cur.execute("SELECT name,description FROM project_capability WHERE name IN (" +
+        rows = cur.execute("SELECT name,description FROM project_capability "
+                           "WHERE deleted_at IS NULL AND name IN (" +
                            ",".join("?" for _ in tags) + ")", tags).fetchall()
     return {row["name"]: row["description"] for row in rows}
 
@@ -81,7 +133,8 @@ def normalize(tags: list[str], *, limit: int = MAX_TAGS) -> list[str]:
 def require_existing_approved(cur, tags: list[str]) -> None:
     if not tags:
         return
-    rows = cur.execute("SELECT name FROM project_capability WHERE approved=1 AND name IN (" +
+    rows = cur.execute("SELECT name FROM project_capability WHERE approved=1 AND "
+                       "deleted_at IS NULL AND name IN (" +
                        ",".join("?" for _ in tags) + ")", tags).fetchall()
     missing = sorted(set(tags) - {row["name"] for row in rows})
     if missing:
@@ -96,7 +149,8 @@ def _split_tags(cur, row) -> tuple[list[str], list[str]]:
     if not tags or not confirmed:
         return [], tags
     allowed = {r["name"] for r in cur.execute(
-        "SELECT name FROM project_capability WHERE approved=1 AND name IN (" +
+        "SELECT name FROM project_capability WHERE approved=1 AND deleted_at IS NULL "
+        "AND name IN (" +
         ",".join("?" for _ in tags) + ")", tags)}
     effective = [tag for tag in tags if tag in confirmed and tag in allowed]
     return effective, [tag for tag in tags if tag not in effective]

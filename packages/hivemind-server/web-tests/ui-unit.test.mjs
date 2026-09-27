@@ -45,8 +45,8 @@ function app(fetch) {
 
 test('console version uses authenticated server metadata and has an unknown fallback', () => {
   const {ids, run} = app();
-  run("showVersion({version:'1.5.2'})");
-  assert.equal(ids.get('server-version').textContent, 'v1.5.2');
+  run("showVersion({version:'1.5.3'})");
+  assert.equal(ids.get('server-version').textContent, 'v1.5.3');
   run('showVersion({version:null})');
   assert.equal(ids.get('server-version').textContent, 'Version unavailable');
 });
@@ -137,6 +137,84 @@ test('filtered task list keeps unfiltered assignment choices and server-wide cou
   assert.match(ids.get('task-counts').textContent, /1 Assigned/);
 });
 
+test('overview shows global task counts and recent open work even with Tasks filtered', async () => {
+  const sample = [
+    {node_id:'t2',title:'Implement fix',state:'in_progress',room_id:'room-1'},
+    {node_id:'t1',title:'Review fix',state:'available',room_id:'room-1'},
+    {node_id:'t0',title:'Finished fix',state:'complete',room_id:'room-1'},
+  ];
+  const {ids, run} = app(async path => ({ok:true,json:async()=>path.includes('/tasks')?
+    {tasks:path.includes('status=available')?[sample[1]]:
+      path.includes('status=open')?sample.filter(t=>t.state!=='complete'):sample,
+      counts:{available:1,assigned_waiting:0,in_progress:1,complete:1},older_cursor:null}:
+    path.includes('/rooms')?{rooms:[{room_id:'room-1',name:'reviews',members:[]}],older_cursor:null}:
+    path.includes('/agents')?{agents:[],capabilities:[],older_cursor:null}:
+    path.includes('/capabilities/pending')?{agents:[],next_cursor:null}:
+    path.includes('/capabilities')?{capabilities:[],next_cursor:null,revision:0}:
+    path.includes('/instructions')?{instructions:[],older_cursor:null}:
+    {online_agents:0,waiting_assignments:0,overdue_updates:0,queued_instructions:0,stalled_instructions:0}}));
+  run(`S.project='default'; $('task-status-filter').value='available';`);
+  await run('refresh()');
+  assert.match(ids.get('overview-task-counts').textContent, /1 Unclaimed.*1 Claimed.*1 Completed/);
+  assert.match(ids.get('overview-task-list').textContent, /Implement fix.*Review fix/);
+  assert.doesNotMatch(ids.get('overview-task-list').textContent, /Finished fix/);
+});
+
+test('a catalog revision change drops cached deleted capabilities', async () => {
+  const {ids, run} = app(async path => ({ok:true,json:async()=>path.includes('/capabilities/pending')?
+    {agents:[],next_cursor:null}:path.includes('/capabilities')?
+    {capabilities:[{name:'python',description:'Python',approved:true}],next_cursor:null,revision:2}:
+    path.includes('/tasks')?{tasks:[],counts:{available:0,assigned_waiting:0,in_progress:0,complete:0},older_cursor:null}:
+    path.includes('/rooms')?{rooms:[],older_cursor:null}:
+    path.includes('/agents')?{agents:[],capabilities:[],older_cursor:null}:
+    path.includes('/instructions')?{instructions:[],older_cursor:null}:
+    {online_agents:0,waiting_assignments:0,overdue_updates:0,queued_instructions:0,stalled_instructions:0}}));
+  run(`S.project='default';S.catalog=[{name:'python',approved:true},{name:'review',approved:true}];
+    S.catalogRevision=1;S.catalogPaged=true;`);
+  await run('refresh()');
+  assert.match(ids.get('capability-catalog').textContent, /python/);
+  assert.doesNotMatch(ids.get('capability-catalog').textContent, /review/);
+  assert.equal(run('S.catalogPaged'), false);
+});
+
+test('capability cards offer deletion with the server revision', async () => {
+  const requests=[];
+  const {ids, run}=app(async (path, options) => {
+    requests.push({path,options});
+    return {ok:true,json:async()=>path.endsWith('/capabilities/delete')?
+      {name:'review',notification_warnings:[]}:
+      path.includes('/capabilities/pending')?{agents:[],next_cursor:null}:
+      path.includes('/capabilities')?{capabilities:[],next_cursor:null,revision:43}:
+      path.includes('/tasks')?{tasks:[],counts:{available:0,assigned_waiting:0,in_progress:0,complete:0},older_cursor:null}:
+      path.includes('/rooms')?{rooms:[],older_cursor:null}:
+      path.includes('/agents')?{agents:[],capabilities:[],older_cursor:null}:
+      path.includes('/instructions')?{instructions:[],older_cursor:null}:
+      {online_agents:0,waiting_assignments:0,overdue_updates:0,queued_instructions:0,stalled_instructions:0}};
+  });
+  run(`S.project='default'; S.catalog=[{name:'review',description:'Review code',
+    approved:true,updated_at:42}];S.catalogRevision=42;window.confirm=()=>true;renderCatalog();`);
+  const card=ids.get('capability-catalog').children[0];
+  const actions=card.children.find(child=>child.className==='catalog-actions');
+  const button=actions?.children.find(child=>child.tagName==='button'&&child.textContent==='Delete');
+  assert.ok(button);
+  await button.events.click();
+  const request=requests.find(r=>r.path.endsWith('/capabilities/delete'));
+  assert.deepEqual(JSON.parse(request.options.body),{name:'review',expected_updated_at:42});
+  assert.doesNotMatch(ids.get('capability-catalog').textContent,/review/);
+});
+
+test('agent card groups DM and Settings in a dedicated actions row', () => {
+  const {ids,run}=app();
+  run(`S.agents=[{address:['nik','mac','codex'],online:true,sessions:[]}];S.rooms=[];renderAgents();`);
+  const row=ids.get('agent-list').children[0].children.find(child=>child.className==='agent-actions');
+  assert.deepEqual(row?.children.map(child=>child.textContent),['DM','Settings']);
+});
+
+test('console browser title and sidebar show Orchestrator Console', () => {
+  assert.match(shell, /<title>Hivemind · Orchestrator Console<\/title>/);
+  assert.match(shell, /class="brand-caption">ORCHESTRATOR CONSOLE<\/span>/);
+});
+
 test('human message destination picks the proper project endpoint without a supplied sender', () => {
   const {run} = app();
   const dm = run(`humanMessage('agent','["ana","laptop","claude"]','',
@@ -162,7 +240,8 @@ test('Agent settings works for roster agents outside rooms and reviews pending t
     S.roomAgentTags=['review','swift'];
     S.pendingAgentTags=['swift']; renderAgents();`);
   const card=ids.get('agent-list').children[0];
-  assert.ok(card.children.some(n=>n.tagName==='button' && n.textContent==='Settings'));
+  assert.ok(card.children.find(n=>n.className==='agent-actions')?.children.some(
+    n=>n.tagName==='button' && n.textContent==='Settings'));
   assert.equal(ids.get('capability-agent').options[0].value,'["ana","laptop","claude"]');
   const choices=ids.get('capability-choices').children;
   assert.match(choices[0].textContent, /python.*Implement Python/);
@@ -182,7 +261,8 @@ test('agent card opens a direct DM with the correct stable recipient preselected
   run(`S.agents=[{address:['ana','laptop','claude'],online:true,sessions:[]}];
     S.rooms=[]; renderAgents();`);
   const card=ids.get('agent-list').children[0];
-  const quick=card.children.find(n=>n.tagName==='button' && n.textContent==='DM');
+  const quick=card.children.find(n=>n.className==='agent-actions')?.children.find(
+    n=>n.tagName==='button' && n.textContent==='DM');
   assert.ok(quick);
   quick.events.click();
   assert.equal(ids.get('dm-destination').value,'agent');

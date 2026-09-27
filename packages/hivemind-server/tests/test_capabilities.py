@@ -40,6 +40,54 @@ def test_catalog_definitions_are_project_global_persistent_and_pageable(db, tmp_
     assert capabilities.catalog(Database(tmp_path / "other.db"))["capabilities"] == []
 
 
+def test_retired_capability_removes_grants_and_cannot_resurrect_on_restart(db):
+    from hivemind_server import capabilities
+
+    created = capabilities.define(db, "review", "Review source code")
+    capabilities.replace(db, OWNER, ["review"], managed_by_ui=True)
+    capabilities.replace(db, PEER, ["review", "swift"])
+    retired = capabilities.retire(db, "review", expected_updated_at=created["updated_at"])
+    assert retired["affected_agents"] == [PEER, OWNER]
+    assert capabilities.get(db, OWNER)["capabilities"] == []
+    assert capabilities.get(db, PEER)["pending_capabilities"] == ["swift"]
+    assert [c["name"] for c in capabilities.catalog(db)["capabilities"]] == ["swift"]
+    reopened = Database(db.path)
+    capabilities.replace(reopened, PEER, ["review"])
+    assert "review" not in [c["name"] for c in capabilities.catalog(Database(db.path))["capabilities"]]
+    restored = capabilities.define(reopened, "review", "Review source code",
+                                    expected_updated_at=None, enforce_revision=True)
+    assert restored["approved"] is True
+    assert capabilities.get(reopened, PEER)["capabilities"] == []
+
+
+def test_retiring_capability_blocks_open_tasks_and_preserves_completed_task_history(db):
+    from hivemind_server import capabilities, graph_tasks
+    from hivemind_server.chat import ChatStore
+
+    created = capabilities.define(db, "review", "Review patches")
+    capabilities.replace(db, OWNER, ["review"], managed_by_ui=True)
+    ChatStore(db).create_room("reviews", "Review patches", OWNER)
+    task = graph_tasks.offer(db, "nik", "reviews", "Review patch", "Verify correctness",
+                             required_capabilities=["review"])
+    with pytest.raises(Conflict, match="open task"):
+        capabilities.retire(db, "review", expected_updated_at=created["updated_at"])
+    assert capabilities.get(db, OWNER)["capabilities"] == ["review"]
+    claim = graph_tasks.claim(db, "nik", task["node_id"], OWNER)
+    graph_tasks.complete(db, "nik", task["node_id"], claim["claim_token"], OWNER)
+    capabilities.retire(db, "review", expected_updated_at=created["updated_at"])
+    assert graph_tasks.read(db, task["node_id"])["required_capabilities"] == ["review"]
+
+
+def test_retiring_capability_rejects_stale_revision_without_changing_definition(db):
+    from hivemind_server import capabilities
+
+    initial = capabilities.define(db, "review", "Review patches")
+    capabilities.define(db, "review", "Review patches and tests")
+    with pytest.raises(Conflict, match="refresh"):
+        capabilities.retire(db, "review", expected_updated_at=initial["updated_at"])
+    assert capabilities.catalog(db)["capabilities"][0]["approved"] is True
+
+
 def test_project_user_catalog_update_rejects_stale_revision(db):
     from hivemind_server import capabilities
 

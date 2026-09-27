@@ -1,5 +1,14 @@
 # Deploying Hivemind
 
+## Upgrading to 1.5.3
+
+Back up each project database before upgrading (see [Backups](#backups)). On first open the
+server adds a nullable retirement marker to project capabilities; existing definitions and
+grants remain unchanged. The Orchestrator Console can retire a capability after all open tasks
+requiring it are completed. Retirement removes current agent grants, prevents legacy clients
+from recreating the definition, and leaves completed task history intact. The Overview now shows
+project-wide task counts and recent open work.
+
 ## Upgrading to 1.5.2
 
 Before starting the new server, stop writes and make a verified SQLite **online backup** of
