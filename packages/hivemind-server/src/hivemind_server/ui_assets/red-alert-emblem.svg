@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Star with hammer and sickle">
+  <path d="M64 8 78 44 117 46 87 70 98 109 64 87 30 109 41 70 11 46 50 44Z"
+        fill="#a7222c" stroke="#f2c46b" stroke-width="4" stroke-linejoin="round"/>
+  <path d="M29 44c-14 18-13 39 1 53 13 14 32 16 46 8-17 3-32-4-39-17-8-14-3-29 10-40Z"
+        fill="#ffd78c" stroke="#6e2025" stroke-width="2" stroke-linejoin="round"/>
+  <path d="m78 47 7 7-37 46-8-7Z" fill="#ffd78c" stroke="#6e2025" stroke-width="2" stroke-linejoin="round"/>
+  <path d="m54 34 43 8-3 14-11-3-1-6-28-2-4-6Z"
+        fill="#ffd78c" stroke="#6e2025" stroke-width="2" stroke-linejoin="round"/>
+</svg>

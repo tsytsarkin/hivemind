@@ -5,6 +5,22 @@
   --warn: #f1c177; --red: #ed9c96;
   font-family: "Avenir Next", "Segoe UI", system-ui, sans-serif;
 }
+@font-face {
+  font-family:"Oxanium"; font-style:normal; font-weight:400 700; font-display:swap;
+  src:url("/assets/oxanium-latin.woff2") format("woff2");
+}
+@font-face {
+  font-family:"Rajdhani"; font-style:normal; font-weight:400; font-display:swap;
+  src:url("/assets/rajdhani-regular-latin.woff2") format("woff2");
+}
+@font-face {
+  font-family:"Rajdhani"; font-style:normal; font-weight:600; font-display:swap;
+  src:url("/assets/rajdhani-semibold-latin.woff2") format("woff2");
+}
+@font-face {
+  font-family:"Rajdhani"; font-style:normal; font-weight:700; font-display:swap;
+  src:url("/assets/rajdhani-bold-latin.woff2") format("woff2");
+}
 * { box-sizing: border-box }
 body { margin: 0; background: var(--bg); color: var(--ink); min-height: 100vh }
 button, input, select, textarea { font: inherit }
@@ -151,7 +167,7 @@ textarea { resize:vertical; min-height:88px }
   --bg:#100d10; --side:#191114; --panel:#23191c; --line:#59343a;
   --ink:#f8ece6; --muted:#c7aba9; --accent:#ff646b; --mint:#9ce7b6;
   --warn:#f8c27e; --red:#ffa1a1;
-  font-family:"Trebuchet MS","Segoe UI",system-ui,sans-serif;
+  font-family:"Rajdhani","Segoe UI",system-ui,sans-serif;
 }
 :root[data-theme="red-alert"] body {
   background:radial-gradient(circle at 84% 0%,#34171c 0,transparent 360px),var(--bg);
@@ -163,17 +179,32 @@ textarea { resize:vertical; min-height:88px }
 :root[data-theme="red-alert"] h2,
 :root[data-theme="red-alert"] .brand-name,
 :root[data-theme="red-alert"] .stat-card strong {
-  font-family:"Arial Narrow","Trebuchet MS",system-ui,sans-serif; letter-spacing:.035em;
+  font-family:"Oxanium","Trebuchet MS",system-ui,sans-serif; letter-spacing:.035em;
 }
 :root[data-theme="red-alert"] h1,
 :root[data-theme="red-alert"] h2 { text-transform:uppercase }
+:root[data-theme="red-alert"] .nav-link,
+:root[data-theme="red-alert"] .eyebrow,
+:root[data-theme="red-alert"] .sidebar-section-label,
+:root[data-theme="red-alert"] .brand-caption,
+:root[data-theme="red-alert"] .chip {
+  font-family:"Oxanium","Trebuchet MS",system-ui,sans-serif;
+}
+:root[data-theme="red-alert"] .nav-link,
+:root[data-theme="red-alert"] .button { text-transform:uppercase; letter-spacing:.055em }
+:root[data-theme="red-alert"] .nav-link { font-size:.79rem }
+:root[data-theme="red-alert"] .button { font-size:.96rem }
+:root[data-theme="red-alert"] h3 { font-family:"Rajdhani",system-ui,sans-serif; letter-spacing:.01em }
 :root[data-theme="red-alert"] .sidebar { background:var(--side); box-shadow:inset -3px 0 #341b20 }
 :root[data-theme="red-alert"] .sidebar::before {
   content:""; position:absolute; top:0; left:0; right:0; height:4px;
   background:repeating-linear-gradient(110deg,#d73d42 0 12px,#291518 12px 21px,#d8a256 21px 25px);
 }
 :root[data-theme="red-alert"] .brand-mark {
-  border-radius:3px; background:linear-gradient(135deg,#f34c52,#a4212e); color:#fff4e8;
+  border-radius:3px;
+  background:url("/assets/red-alert-emblem.svg") center / 88% no-repeat,
+    linear-gradient(135deg,#a82330,#36171e);
+  color:#fff4e8; font-size:0;
   clip-path:polygon(0 0,82% 0,100% 18%,100% 100%,18% 100%,0 82%);
   box-shadow:0 0 18px #a527334d;
 }
@@ -205,7 +236,8 @@ textarea { resize:vertical; min-height:88px }
 :root[data-theme="red-alert"] .nav-link.selected span { color:var(--warn) }
 :root[data-theme="red-alert"] .stat-card,
 :root[data-theme="red-alert"] .panel {
-  background:var(--panel); border-color:var(--line); border-radius:4px;
+  background:linear-gradient(135deg,#62394140,transparent 44%),var(--panel);
+  border-color:var(--line); border-radius:4px;
   box-shadow:inset 0 1px #b46e6040,0 8px 26px #0b070a4d;
 }
 :root[data-theme="red-alert"] .stat-card { border-top:2px solid #a83b42 }
@@ -226,10 +258,16 @@ textarea { resize:vertical; min-height:88px }
 :root[data-theme="red-alert"] .notice.error { background:#432329; border-color:#a45156; color:#ffd0c9 }
 :root[data-theme="red-alert"] .privacy-warning { background:#33241f; border-color:#795044; color:#f3c8aa }
 :root[data-theme="red-alert"] .login-aside {
-  background:radial-gradient(circle at 50% 38%,#73303a 0,#341a20 38%,#160d12 80%);
+  background:repeating-linear-gradient(90deg,transparent 0 39px,#ffab810b 40px 41px),
+    repeating-linear-gradient(0deg,transparent 0 39px,#ffab810b 40px 41px),
+    radial-gradient(circle at 50% 38%,#73303a 0,#341a20 38%,#160d12 80%);
 }
 :root[data-theme="red-alert"] .orbit { border-color:#e5717166 }
-:root[data-theme="red-alert"] .orbit-center { text-shadow:0 0 55px #d6404e99 }
+:root[data-theme="red-alert"] .orbit-center {
+  width:156px; height:156px; font-size:0; text-shadow:none;
+  background:url("/assets/red-alert-emblem.svg") center / contain no-repeat;
+  filter:drop-shadow(0 0 30px #d6404e99);
+}
 :root[data-theme="red-alert"] .chip.waiting,
 :root[data-theme="red-alert"] .chip.queued,
 :root[data-theme="red-alert"] .chip.stalled,

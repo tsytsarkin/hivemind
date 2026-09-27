@@ -1,5 +1,7 @@
 """Console assets ship with accessible shell and strict browser defaults."""
 
+import xml.etree.ElementTree as ET
+
 import httpx
 import pytest
 
@@ -16,15 +18,27 @@ async def test_ui_serves_login_and_accessible_project_shell(env):
         css = await client.get("/assets/styles.css")
         js = await client.get("/assets/app.js")
         theme_js = await client.get("/assets/theme.js")
+        emblem = await client.get("/assets/red-alert-emblem.svg")
+        fonts = [await client.get("/assets/" + name) for name in (
+            "oxanium-latin.woff2", "rajdhani-regular-latin.woff2",
+            "rajdhani-semibold-latin.woff2", "rajdhani-bold-latin.woff2")]
         claude_logo = await client.get("/assets/claude.svg")
         codex_logo = await client.get("/assets/codex.svg")
     assert shell.status_code == css.status_code == js.status_code == 200
     assert theme_js.status_code == 200
     assert 'text/javascript' in theme_js.headers['content-type']
+    assert all(font.status_code == 200 and font.content[:4] == b'wOF2'
+               and 'font/woff2' in font.headers['content-type'] for font in fonts)
+    assert emblem.status_code == 200 and 'image/svg+xml' in emblem.headers['content-type']
+    svg = ET.fromstring(emblem.content)
+    assert svg.tag == '{http://www.w3.org/2000/svg}svg'
+    assert len(svg.findall('.//{http://www.w3.org/2000/svg}path')) >= 3
+    assert not svg.findall('.//{http://www.w3.org/2000/svg}script')
     assert claude_logo.status_code == codex_logo.status_code == 200
     assert 'image/svg+xml' in claude_logo.headers['content-type']
     assert '<svg' in codex_logo.text
     assert "Content-Security-Policy" in shell.headers
+    assert "font-src 'self'" in shell.headers["Content-Security-Policy"]
     assert 'id="project-switcher"' in shell.text
     assert "Instructions" in shell.text and "DMs are visible" in shell.text
     assert "textContent" in js.text and "innerHTML" not in js.text

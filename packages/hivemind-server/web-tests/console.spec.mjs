@@ -9,6 +9,16 @@ test('console themes persist through login and reload and keep presence distinct
   await page.locator('#login-theme').selectOption('red-alert');
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'red-alert');
   expect(await background()).toBe('rgb(16, 13, 16)');
+  await expect(page.locator('body')).toHaveCSS('font-family', /Rajdhani/);
+  await expect(page.locator('#login-screen h1')).toHaveCSS('font-family', /Oxanium/);
+  await expect(page.locator('#login-screen .brand-mark')).toHaveCSS(
+    'background-image', /red-alert-emblem\.svg/);
+  await expect(page.locator('.orbit-center')).toHaveCSS(
+    'background-image', /red-alert-emblem\.svg/);
+  const loadedFonts = await page.evaluate(async () => (await Promise.all([
+    document.fonts.load('700 32px Oxanium'), document.fonts.load('600 16px Rajdhani')
+  ])).map(faces => faces.length));
+  expect(loadedFonts).toEqual([1, 1]);
   await page.reload();
   await expect(page.locator('#login-theme')).toHaveValue('red-alert');
   expect(await background()).toBe('rgb(16, 13, 16)');
@@ -30,6 +40,8 @@ test('console themes persist through login and reload and keep presence distinct
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.locator('#toolbar-theme').selectOption('current');
   expect(await background()).toBe('rgb(13, 21, 35)');
+  await expect(page.locator('#app-shell .brand-mark')).not.toHaveCSS(
+    'background-image', /red-alert-emblem\.svg/);
   await page.reload();
   await expect(page.locator('#toolbar-theme')).toHaveValue('current');
   expect(await page.evaluate(() => [localStorage.length,
