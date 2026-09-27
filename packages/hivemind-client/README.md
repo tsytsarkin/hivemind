@@ -28,7 +28,8 @@ hivemind tool publish <script.py> --id <rdns> --version <semver>
   you export yourself takes precedence.
 - In Codex, export the URL, token and project yourself for the CLI; its plugin does not transfer
   MCP configuration or project pins into shell processes. See the platform guides:
-  [Codex](../../docs/codex-plugin.md) and [Claude Code](../../docs/user-guide.md).
+  Codex and Claude Code; their guides live in the Hivemind graph, not the repo — see
+  **Documentation** in the root README.md.
 - `hivemind health` reads `/healthz` off the server root, which takes no token: it answers `{"ok":
   true}` even with no project and a rejected token, so it is liveness only, never a check that the
   rest is configured.

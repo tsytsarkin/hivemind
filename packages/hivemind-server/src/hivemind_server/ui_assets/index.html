@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#101928">
   <title>Hivemind · Orchestrator Console</title>
+  <script src="/assets/theme.js"></script>
   <link rel="stylesheet" href="/assets/styles.css">
   <script src="/assets/app.js" type="module"></script>
 </head>
@@ -16,6 +17,9 @@
       <p class="eyebrow">HIVEMIND / CONSOLE</p>
       <h1>Your projects.<br><span>One clear view.</span></h1>
       <p class="muted">Coordinate agents, follow their work, and catch up on every conversation in a project.</p>
+      <label class="theme-control login-theme" for="login-theme">Console theme
+        <select id="login-theme" data-theme-picker><option value="blue">Blue</option><option value="red">Red</option></select>
+      </label>
       <form id="login-form" class="form-stack">
         <label for="login-token">Your Hivemind user token</label>
         <input id="login-token" type="password" name="token" autocomplete="off" required placeholder="hm_…">
@@ -46,7 +50,7 @@
     </aside>
 
     <main class="main-content" id="main">
-      <header class="topbar"><div class="breadcrumbs">WORKSPACE <span>/</span> <span id="breadcrumb-project">PROJECT</span></div><div class="topbar-actions"><span id="refreshed" class="tiny muted"></span><button id="refresh" type="button" class="button ghost">↻ Refresh</button><span class="avatar" aria-hidden="true">HM</span></div></header>
+      <header class="topbar"><div class="breadcrumbs">WORKSPACE <span>/</span> <span id="breadcrumb-project">PROJECT</span></div><div class="topbar-actions"><label class="theme-control toolbar-theme" for="toolbar-theme">Theme <select id="toolbar-theme" data-theme-picker><option value="blue">Blue</option><option value="red">Red</option></select></label><span id="refreshed" class="tiny muted"></span><button id="refresh" type="button" class="button ghost">↻ Refresh</button><span class="avatar" aria-hidden="true">HM</span></div></header>
       <div class="content-wrap">
         <div class="page-heading"><div><div class="eyebrow" id="page-kicker">YOUR WORKSPACE, AT A GLANCE</div><h1 id="page-title">Overview</h1><p id="page-subtitle" class="muted">The conversations and work moving through your project.</p></div><span class="live-indicator"><span></span> PROJECT LIVE</span></div>
         <p id="notice" class="notice" role="status" aria-live="polite" hidden></p>

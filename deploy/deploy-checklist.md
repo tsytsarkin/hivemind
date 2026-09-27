@@ -443,7 +443,8 @@ alone.
 ### 3.6 Refresh the Claude Code plugin and check the session pin
 
 The commands in this section are Claude-specific. For a Codex installation and its different
-session-pin and messaging behavior, follow the [Codex usage guide](../docs/codex-plugin.md).
+session-pin and messaging behavior, see the Codex usage guide in the Hivemind graph
+(**Documentation** in the root README.md).
 
 ```sh
 claude plugin marketplace update hivemind-marketplace     # picks up 1.3.0 after it is published

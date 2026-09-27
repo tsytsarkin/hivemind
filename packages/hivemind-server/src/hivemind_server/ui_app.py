@@ -22,7 +22,7 @@ from .ui_sessions import UISessions
 COOKIE = "hm_ui_session"
 PROJECT_DENIED = {"error": "unknown project or not accessible with this token"}
 ASSETS = Path(__file__).with_name("ui_assets")
-CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
+CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data:; "
        "connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
 
 
@@ -128,10 +128,17 @@ def build_ui_app(cfg, registry, identities: IdentityStore) -> Starlette:
 
     async def asset(req: Request):
         name = req.path_params["name"]
-        if name not in ("styles.css", "app.js", "claude.svg", "codex.svg"):
+        # FONTS-LICENSE is served, not just shipped: the woff2 files below go out over HTTP,
+        # and the OFL asks that its notice travel with them. One filename makes it reachable.
+        if name not in ("styles.css", "app.js", "theme.js", "claude.svg", "codex.svg",
+                        "red-emblem.svg", "oxanium-latin.woff2",
+                        "rajdhani-regular-latin.woff2", "rajdhani-semibold-latin.woff2",
+                        "rajdhani-bold-latin.woff2", "FONTS-LICENSE"):
             return _json({"error": "not found"}, 404)
         media_type = ("text/css" if name.endswith(".css") else "image/svg+xml" if
-                      name.endswith(".svg") else "text/javascript")
+                      name.endswith(".svg") else "font/woff2" if name.endswith(".woff2")
+                      else "text/plain; charset=utf-8" if name == "FONTS-LICENSE"
+                      else "text/javascript")
         return FileResponse(ASSETS / name, media_type=media_type)
 
     async def overview(req: Request):

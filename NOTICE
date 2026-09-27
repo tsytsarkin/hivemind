@@ -13,3 +13,13 @@ License at:
 If you redistribute this software or a derivative work (including a fork), the
 Apache License requires that you carry this NOTICE file with it — please keep
 the attribution above so users can find the original project.
+
+This product bundles two font families in packages/hivemind-server, served by the web console
+and included in its wheel, which are NOT covered by the Apache License above:
+
+    Oxanium   — Copyright 2019 The Oxanium Project Authors
+    Rajdhani  — Copyright (c) 2014, Indian Type Foundry
+
+Both are licensed under the SIL Open Font License, Version 1.1, and are shipped as modified
+(Latin-subset WOFF2) builds. The full license text and the modification notice are in
+packages/hivemind-server/src/hivemind_server/ui_assets/FONTS-LICENSE.

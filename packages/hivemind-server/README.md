@@ -11,7 +11,7 @@ refused rather than defaulted. Tokens name a person, and every write records its
 - Requires Python ≥3.11.
 - Console scripts: `hivemind-server` (the service) and `hivemind-admin` (operator CLI).
 - Installing, deploying, backing up and restoring: `deploy/DEPLOY.md` in the repository.
-- Agent usage guides: [Claude Code](../../docs/user-guide.md) and
-  [Codex](../../docs/codex-plugin.md).
+- Agent usage guides live in the Hivemind graph, not the repo: see **Documentation** in the
+  root README.md.
 - Source and documentation: <https://github.com/tsytsarkin/hivemind>
 - Apache-2.0.

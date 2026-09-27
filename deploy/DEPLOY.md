@@ -32,14 +32,16 @@ assignment already depends on** stays approved, and the capability it names stay
 Existing active claims can still heartbeat and complete, and queued assignments stay claimable,
 so no in-flight work is stranded. In the web console, open **Capabilities** to approve definitions, then
 **Agents → Settings** to confirm grants and adjust each agent's parallel-task/auto-claim limits.
-See [web-console.md](../docs/web-console.md) for the detailed behavior. The version badge reads
+See the [console overview](../README.md#agent-collaboration-offline-chat-rooms-and-graph-tasks)
+for the user-facing behavior. The version badge reads
 the running server, not a frontend build constant; agents without a host-provided model display
 “Model unknown”. A user token authenticates both agent MCP and human UI calls, so the supported
 MCP restriction on capability writes is a workflow boundary, not isolation from deliberate UI
 HTTP calls made with that same token.
 
 Hivemind 1.5.1 starts an optional second listener for the
-[project web console](../docs/web-console.md), enabled by default on `127.0.0.1:8788`.
+[project web console](../README.md#agent-collaboration-offline-chat-rooms-and-graph-tasks),
+enabled by default on `127.0.0.1:8788`.
 Set `[web_ui] enabled = false` in `<data-dir>/hivemind.toml` to close the UI socket; changing
 `HIVEMIND_HOST` for MCP does **not** widen the UI bind automatically. For remote browser access,
 keep the listener on loopback and forward it through SSH or an authenticated HTTPS reverse
@@ -94,8 +96,8 @@ hivemind-server
 
 ## Client (any machine, Python ≥3.9 — incl. the Mac Studio's system 3.9.6)
 
-Agent setup after the server is running: [Claude Code](../docs/user-guide.md) or
-[Codex](../docs/codex-plugin.md). Both use the same server; installing the client below is
+Agent setup after the server is running: [Claude Code](../README.md#claude-code-install) or
+[Codex CLI](../README.md#codex-cli-install). Both use the same server; installing the client below is
 optional for MCP tools and plugin-bundled messaging, and needed for its `hivemind` CLI.
 
 ### Option A — uv
@@ -125,7 +127,7 @@ proves the server is up: it reads `/healthz` off the server root, which takes no
 `{"ok": true}` even with no project and a bad token. In a Claude Code session with the plugin
 installed you usually need none of these exports — the plugin's `SessionStart` hook sets the URL and
 the token from its own config and the project from the session pin
-([clients.md](../docs/clients.md#where-the-url-and-the-token-come-from)); export them here for a
+([plugin install guide](../README.md#install-the-agent-plugins)); export them here for a
 plain terminal, or to override.
 
 > Note: `pip install -U pip` first — the pip bundled with an old system Python can fail to
@@ -156,8 +158,8 @@ health included — indistinguishable from a project that does not exist. The al
 entries and `test_a_shared_projects_open_tails_are_exactly_two` pins both halves of that; widening it
 is an ACL bypass. Never bind a public interface.
 
-To add client machines (token minting, secure transfer, installing just the plugin), see
-[../docs/clients.md](../docs/clients.md).
+To add client machines (token minting and plugin installation), see the
+[platform installation guides](../README.md#install-the-agent-plugins).
 
 ## After upgrading
 
