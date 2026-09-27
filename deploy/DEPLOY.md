@@ -11,9 +11,17 @@ refuses to open with a diagnostic. Resolve the conflict from the backup rather t
 either agent's state. The data migration is transactional and restart-safe, but SQLite additive
 column changes can commit separately, so a full rollback requires that pre-upgrade backup.
 
-Existing grants that were self-declared remain visible as pending and cannot qualify a **new**
-task claim; previously human-managed grants remain approved. Existing active claims can still
-heartbeat and complete. In the web console, open **Capabilities** to approve definitions, then
+**The upgrade returns existing agent grants to pending, and a human must re-approve them.** They
+stay visible and cannot qualify a **new** task claim until approved. This is deliberate: the
+`human_managed` row flag is not evidence that a human chose those tags, because 1.5.1 let an agent
+overwrite such a row whenever it passed the current revision, and the flag survived — so
+backfilling from it would have blessed self-declared grants exactly as this release sets out to
+stop. There is no per-tag record of who set what, so nothing else can be trusted.
+
+The one exception carries its own evidence: a tag that an agent's **live claim or standing
+assignment already depends on** stays approved, and the capability it names stays approved too.
+Existing active claims can still heartbeat and complete, and queued assignments stay claimable,
+so no in-flight work is stranded. In the web console, open **Capabilities** to approve definitions, then
 **Agents → Settings** to confirm grants and adjust each agent's parallel-task/auto-claim limits.
 See [web-console.md](../docs/web-console.md) for the detailed behavior. The version badge reads
 the running server, not a frontend build constant; agents without a host-provided model display

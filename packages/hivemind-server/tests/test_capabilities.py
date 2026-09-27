@@ -192,3 +192,77 @@ async def test_mcp_agent_cannot_override_portal_capability_edit_even_with_curren
     assert current["human_managed"] is True and current["capabilities"] == ["review"]
     assert updated["ok"] is False and "project user" in updated["error"]
     assert capabilities.get(project.db, OWNER)["capabilities"] == ["review"]
+
+
+def _pre_upgrade_row(path, address, tags, human_managed, approved_json="[]"):
+    """Write a 1.5.1-shaped agent_capability row straight into an already-built database."""
+    import json as _json
+    import sqlite3
+    con = sqlite3.connect(path)
+    con.execute("INSERT OR REPLACE INTO agent_capability(user,device,client,tags_json,"
+                "updated_at,human_managed,approved_tags_json) VALUES(?,?,?,?,?,?,?)",
+                (*address, _json.dumps(tags), 1.0, human_managed, approved_json))
+    con.execute("DELETE FROM meta WHERE key='capability_approval_migrated_v1'")
+    con.commit()
+    con.close()
+
+
+def test_upgrade_does_not_approve_tags_an_agent_declared_on_a_human_managed_row(db, tmp_path):
+    """human_managed is a ROW flag, and 1.5.1 let an AGENT overwrite such a row whenever it
+    passed the current expected_updated_at — the guard only fired when that was None, and the
+    flag survived. Backfilling approved_tags_json from tags_json therefore blessed self-declared
+    tags on upgrade, which is exactly the state 1.5.2 exists to remove. Only a tag with its own
+    evidence survives: a curated definition, or a task this agent is actually committed to.
+    """
+    import json as _json
+    import sqlite3
+    from hivemind_server import capabilities
+
+    path = db.path
+    # 'review' is curated by a human (non-empty description); 'admin' is a bare name the agent
+    # slipped onto the same row.
+    con = sqlite3.connect(path)
+    con.execute("INSERT OR REPLACE INTO project_capability(name,description,created_at,"
+                "updated_at,approved) VALUES('review','Reviews patches',0,0,0)")
+    con.execute("INSERT OR REPLACE INTO project_capability(name,description,created_at,"
+                "updated_at,approved) VALUES('admin','',0,0,0)")
+    con.commit()
+    con.close()
+    _pre_upgrade_row(path, OWNER, ["review", "admin"], human_managed=1)
+
+    Database(path)                                   # re-open: runs the approval migration
+    granted = capabilities.get(Database(path), OWNER)
+    assert granted["capabilities"] == [], granted
+    assert sorted(granted["pending_capabilities"]) == ["admin", "review"], granted
+
+
+def test_upgrade_keeps_an_agent_able_to_finish_work_it_already_holds(db, tmp_path):
+    """The conservative rule must not strand in-flight work: DEPLOY.md promises a live claim can
+    still heartbeat and complete, and a queued assignment must not become unclaimable forever."""
+    import sqlite3
+    from hivemind_server import capabilities, graph, graph_tasks
+
+    capabilities.define(db, "deploy", "Ships releases")
+    nid = graph.upsert_node(db, "nik", "finding", {"title": "audit"})["node_id"]
+    graph_tasks.enable(db, "nik", nid, required_capabilities=["deploy"])
+    capabilities.replace(db, OWNER, ["deploy"])
+    con = sqlite3.connect(db.path)
+    con.execute("UPDATE agent_capability SET approved_tags_json=tags_json")
+    con.commit()
+    con.close()
+    graph_tasks.claim(db, "nik", nid, OWNER, now=1000)
+
+    # Rewind to what a 1.5.1 database looks like: no approvals recorded anywhere, and the
+    # definition carrying the empty description the backfill gives it.
+    con = sqlite3.connect(db.path)
+    con.execute("UPDATE project_capability SET approved=0, description=''")
+    con.commit()
+    con.close()
+    _pre_upgrade_row(db.path, OWNER, ["deploy"], human_managed=0)
+    Database(db.path)                                # upgrade again with the stricter rule
+
+    held = capabilities.get(Database(db.path), OWNER)
+    assert held["capabilities"] == ["deploy"], \
+        "a tag the agent's own live claim depends on must stay approved"
+    with Database(db.path).read() as cur:
+        graph_tasks.eligible(cur, nid, OWNER)        # must not raise

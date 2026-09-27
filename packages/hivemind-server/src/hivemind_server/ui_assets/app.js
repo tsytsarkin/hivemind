@@ -5,7 +5,7 @@ const $ = id => document.getElementById(id);
 // a native form submit. test_ui_assets.py only greps this file for substrings and the Playwright
 // spec needs npm and a live server, so nothing in the pytest suite noticed.
 const q = selector => document.querySelector(selector);
-const S = {csrf:null,project:null,epoch:0,conversationEpoch:0,view:"overview",rooms:[],roomOlder:null,agents:[],caps:[],catalog:[],catalogOlder:null,catalogPaged:false,pendingAgents:[],pendingOlder:null,pendingPaged:false,pendingAgentTags:[],roomAgentTags:null,roomAgentKey:null,roomAgentUpdatedAt:null,roomConfigUpdatedAt:null,roomConfigParallel:20,roomConfigAuto:true,roomConfigDraft:null,roomChoiceDraft:null,tasks:[],taskCounts:null,assignmentTasks:[],assignmentOlder:null,expandedTasks:new Set(),expandedMessages:new Set(),candidates:[],candidateTask:null,candidateOlder:null,candidateRequest:0,candidateMemberCount:0,instructions:[],olderCursor:null,taskOlder:null,instructionOlder:null,agentOlder:null,latestDisplayedSeq:null,hasHiddenUnseen:false};
+const S = {csrf:null,project:null,epoch:0,conversationEpoch:0,view:"overview",rooms:[],roomOlder:null,agents:[],caps:[],catalog:[],catalogOlder:null,catalogPaged:false,capabilityEditBase:null,pendingAgents:[],pendingOlder:null,pendingPaged:false,pendingAgentTags:[],roomAgentTags:null,roomAgentKey:null,roomAgentUpdatedAt:null,roomConfigUpdatedAt:null,roomConfigParallel:20,roomConfigAuto:true,roomConfigDraft:null,roomChoiceDraft:null,tasks:[],taskCounts:null,assignmentTasks:[],assignmentOlder:null,expandedTasks:new Set(),expandedMessages:new Set(),candidates:[],candidateTask:null,candidateOlder:null,candidateRequest:0,candidateMemberCount:0,instructions:[],olderCursor:null,taskOlder:null,instructionOlder:null,agentOlder:null,latestDisplayedSeq:null,hasHiddenUnseen:false};
 const headings = {
   overview:["Overview","YOUR WORKSPACE, AT A GLANCE","The conversations and work moving through your project."],
   rooms:["Rooms","CONVERSATIONS BY TOPIC","Create focused spaces and put together the right team."],
@@ -87,7 +87,7 @@ async function api(path,opts={}) {
 const url=tail=>"/api/projects/"+encodeURIComponent(S.project)+"/"+tail;
 function resetProjectState(){
   S.rooms=[];S.roomOlder=null;S.agents=[];S.agentOlder=null;S.caps=[];
-  S.catalog=[];S.catalogOlder=null;S.catalogPaged=false;S.pendingAgents=[];S.pendingOlder=null;
+  S.catalog=[];S.catalogOlder=null;S.catalogPaged=false;S.capabilityEditBase=null;S.pendingAgents=[];S.pendingOlder=null;
   S.pendingPaged=false;S.pendingAgentTags=[];S.roomAgentTags=null;S.roomAgentKey=null;
   S.roomAgentUpdatedAt=null;S.roomConfigUpdatedAt=null;S.roomConfigDraft=null;
   S.roomConfigParallel=20;S.roomConfigAuto=true;S.roomChoiceDraft=null;
@@ -209,9 +209,15 @@ async function loadAgentCapabilities(){
     const [data,grants]=await Promise.all([
       api(url("agents/config?"+params)),api(url("agents/capabilities?"+params))]);
     if(epoch!==S.epoch||key!==$("capability-agent").value)return;
+    // A draft in progress keeps the revision it started from. This runs on the 20s tick while
+    // the agents view is open, and overwriting the revision under an open draft defeated the
+    // server's compare-and-swap: another operator's save would be absorbed silently and then
+    // overwritten on submit, with no conflict raised. Holding the base revision makes the
+    // server reject the stale submit, which is the whole point of sending one.
+    const drafting=S.roomChoiceDraft?.key===key;
     S.roomAgentTags=grants.capabilities;
     S.pendingAgentTags=grants.pending_capabilities||[];
-    S.roomAgentUpdatedAt=grants.updated_at;
+    if(!drafting)S.roomAgentUpdatedAt=grants.updated_at;
     S.roomConfigUpdatedAt=data.updated_at;
     S.roomConfigParallel=data.max_parallel_tasks;
     S.roomConfigAuto=data.auto_claim_enabled;
@@ -560,10 +566,13 @@ async function refresh(){
     // seen-filter dropped all of it. Once the user has paged, the cursor is theirs to advance —
     // including to null, which means they reached the end and must not be sent back to page two.
     if(!S.catalogPaged)S.catalogOlder=catalog.next_cursor;
-    const pendingByAddress=new Map(S.pendingAgents.map(agent=>[JSON.stringify(agent.address),agent]));
-    for(const agent of pending.agents)pendingByAddress.set(JSON.stringify(agent.address),agent);
-    S.pendingAgents=[...pendingByAddress.values()];
-    if(!S.pendingPaged)S.pendingOlder=pending.next_cursor;
+    // Replace and drop loaded pages, exactly as the rooms and tasks lists do. The catalog above
+    // merges because capability DEFINITIONS are append-only, so a kept page cannot go stale;
+    // pending assignments are the opposite — they disappear the moment anyone approves them.
+    // Merging kept advertising an agent as pending, with its old tags, after another console
+    // session (or this one's own config form) had already confirmed it.
+    S.pendingAgents=pending.agents;
+    S.pendingOlder=pending.next_cursor;S.pendingPaged=false;
     const selectedTask=$("task-select").value;
     const pinnedTask=S.assignmentTasks.find(task=>task.node_id===selectedTask);
     S.tasks=t.tasks;
@@ -756,10 +765,23 @@ function init(){
   $("message-room").addEventListener("change",messages);
   $("message-older").addEventListener("click",()=>messages({older:true}));
   form("room-create-form",(f,d)=>mutate("rooms",{name:d.get("name").trim(),description:d.get("description").trim()},"Room created."));
+  // Snapshot the revision when editing STARTS. refresh() rewrites S.catalog every 20s, so
+  // reading it at submit time meant silently adopting whatever another operator had saved in
+  // between and overwriting them — the server's compare-and-swap can only protect a revision
+  // the user actually saw.
+  $("capability-create-form").addEventListener("input",()=>{
+    const name=$("capability-create-form").querySelector('[name="name"]').value.trim();
+    if(!S.capabilityEditBase||S.capabilityEditBase.name!==name)
+      S.capabilityEditBase={name,updated_at:S.catalog.find(cap=>cap.name===name)?.updated_at??null};
+  });
   form("capability-create-form",(f,d)=>{
-    const name=d.get("name").trim(),prior=S.catalog.find(cap=>cap.name===name);
+    const name=d.get("name").trim();
+    const base=S.capabilityEditBase?.name===name
+      ? S.capabilityEditBase.updated_at
+      : S.catalog.find(cap=>cap.name===name)?.updated_at??null;
+    S.capabilityEditBase=null;
     return mutate("capabilities",{name,description:d.get("description").trim(),
-      expected_updated_at:prior?.updated_at??null},"Project capability saved.");
+      expected_updated_at:base},"Project capability saved.");
   });
   form("capability-assign-form",(f,d)=>{
     let payload;
@@ -774,6 +796,7 @@ function init(){
         S.pendingAgentTags=result.pending_capabilities||[];
         S.roomAgentUpdatedAt=result.updated_at;S.roomChoiceDraft=null;
         S.pendingAgents=[];S.pendingOlder=null;S.pendingPaged=false;
+        renderPendingAssignments();
       });
   });
   form("agent-config-form",(f,d)=>{
