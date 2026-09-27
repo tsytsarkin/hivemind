@@ -129,7 +129,7 @@ def build_ui_app(cfg, registry, identities: IdentityStore) -> Starlette:
     async def asset(req: Request):
         name = req.path_params["name"]
         if name not in ("styles.css", "app.js", "theme.js", "claude.svg", "codex.svg",
-                        "red-alert-emblem.svg", "oxanium-latin.woff2",
+                        "red-emblem.svg", "oxanium-latin.woff2",
                         "rajdhani-regular-latin.woff2", "rajdhani-semibold-latin.woff2",
                         "rajdhani-bold-latin.woff2"):
             return _json({"error": "not found"}, 404)

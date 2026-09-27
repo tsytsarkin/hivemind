@@ -2,29 +2,29 @@ import { test, expect } from '@playwright/test';
 
 test('console themes persist through login and reload and keep presence distinct', async ({ page }) => {
   await page.goto(process.env.HIVEMIND_TEST_UI_URL);
-  await expect(page.locator('html')).toHaveAttribute('data-theme', 'current');
-  await expect(page.locator('#login-theme')).toHaveValue('current');
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'blue');
+  await expect(page.locator('#login-theme')).toHaveValue('blue');
   const background = () => page.locator('body').evaluate(el => getComputedStyle(el).backgroundColor);
   expect(await background()).toBe('rgb(13, 21, 35)');
-  await page.locator('#login-theme').selectOption('red-alert');
-  await expect(page.locator('html')).toHaveAttribute('data-theme', 'red-alert');
+  await page.locator('#login-theme').selectOption('red');
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'red');
   expect(await background()).toBe('rgb(16, 13, 16)');
   await expect(page.locator('body')).toHaveCSS('font-family', /Rajdhani/);
   await expect(page.locator('#login-screen h1')).toHaveCSS('font-family', /Oxanium/);
   await expect(page.locator('#login-screen .brand-mark')).toHaveCSS(
-    'background-image', /red-alert-emblem\.svg/);
+    'background-image', /red-emblem\.svg/);
   await expect(page.locator('.orbit-center')).toHaveCSS(
-    'background-image', /red-alert-emblem\.svg/);
+    'background-image', /red-emblem\.svg/);
   const loadedFonts = await page.evaluate(async () => (await Promise.all([
     document.fonts.load('700 32px Oxanium'), document.fonts.load('600 16px Rajdhani')
   ])).map(faces => faces.length));
   expect(loadedFonts).toEqual([1, 1]);
   await page.reload();
-  await expect(page.locator('#login-theme')).toHaveValue('red-alert');
+  await expect(page.locator('#login-theme')).toHaveValue('red');
   expect(await background()).toBe('rgb(16, 13, 16)');
   await page.locator('#login-token').fill(process.env.HIVEMIND_TEST_TOKEN);
   await page.locator('#login-form button').click();
-  await expect(page.locator('#toolbar-theme')).toHaveValue('red-alert');
+  await expect(page.locator('#toolbar-theme')).toHaveValue('red');
   await expect(page.locator('.panel').first()).toHaveCSS('background-color', 'rgb(35, 25, 28)');
   const online = await page.evaluate(() => {
     const badge = document.createElement('span'); badge.className = 'chip online';
@@ -38,14 +38,14 @@ test('console themes persist through login and reload and keep presence distinct
   await page.setViewportSize({width: 390, height: 844});
   await expect(page.locator('#toolbar-theme')).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-  await page.locator('#toolbar-theme').selectOption('current');
+  await page.locator('#toolbar-theme').selectOption('blue');
   expect(await background()).toBe('rgb(13, 21, 35)');
   await expect(page.locator('#app-shell .brand-mark')).not.toHaveCSS(
-    'background-image', /red-alert-emblem\.svg/);
+    'background-image', /red-emblem\.svg/);
   await page.reload();
-  await expect(page.locator('#toolbar-theme')).toHaveValue('current');
+  await expect(page.locator('#toolbar-theme')).toHaveValue('blue');
   expect(await page.evaluate(() => [localStorage.length,
-    localStorage.getItem('hivemind-console-theme')])).toEqual([1, 'current']);
+    localStorage.getItem('hivemind-console-theme')])).toEqual([1, 'blue']);
 });
 
 test('token login, teams, tasks and mobile controls', async ({ page }) => {

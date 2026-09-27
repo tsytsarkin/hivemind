@@ -310,7 +310,7 @@ test('init() binds the console without throwing', () => {
 
 function themeHarness(saved, storageAvailable = true) {
   const events = {}, writes = [];
-  const selectors = Array.from({length: 2}, () => ({value: 'current', events: {},
+  const selectors = Array.from({length: 2}, () => ({value: 'blue', events: {},
     addEventListener(name, fn) { this.events[name] = fn; }}));
   const document = {documentElement: {dataset: {}},
     querySelectorAll: () => selectors,
@@ -326,30 +326,42 @@ function themeHarness(saved, storageAvailable = true) {
 test('theme selectors appear before and after login and load before the stylesheet', () => {
   assert.match(shell, /<select id="login-theme"[^>]*data-theme-picker/);
   assert.match(shell, /<select id="toolbar-theme"[^>]*data-theme-picker/);
+  assert.equal((shell.match(/<option value="blue">Blue<\/option>/g) ?? []).length, 2);
+  assert.equal((shell.match(/<option value="red">Red<\/option>/g) ?? []).length, 2);
   assert.ok(shell.indexOf('/assets/theme.js') < shell.indexOf('/assets/styles.css'));
 });
 
 test('stored theme applies before paint, and changing either selector updates both and saves', () => {
-  const theme = themeHarness('red-alert');
-  assert.equal(theme.document.documentElement.dataset.theme, 'red-alert');
+  const theme = themeHarness('red');
+  assert.equal(theme.document.documentElement.dataset.theme, 'red');
   theme.ready();
-  assert.deepEqual(theme.selectors.map(p => p.value), ['red-alert', 'red-alert']);
+  assert.deepEqual(theme.selectors.map(p => p.value), ['red', 'red']);
   assert.equal(theme.writes.length, 0, 'reading a preference does not rewrite storage');
-  theme.change(1, 'current');
-  assert.equal(theme.document.documentElement.dataset.theme, 'current');
-  assert.deepEqual(theme.selectors.map(p => p.value), ['current', 'current']);
-  assert.deepEqual(theme.writes, [['hivemind-console-theme', 'current']]);
+  theme.change(1, 'blue');
+  assert.equal(theme.document.documentElement.dataset.theme, 'blue');
+  assert.deepEqual(theme.selectors.map(p => p.value), ['blue', 'blue']);
+  assert.deepEqual(theme.writes, [['hivemind-console-theme', 'blue']]);
 });
 
-test('invalid saved theme falls back to current, and blocked storage never blocks switching', () => {
+test('legacy theme preferences migrate to red and blue without losing a selection', () => {
+  for (const [oldValue, newValue] of [['red-alert', 'red'], ['current', 'blue']]) {
+    const theme = themeHarness(oldValue);
+    assert.equal(theme.document.documentElement.dataset.theme, newValue);
+    theme.ready();
+    assert.deepEqual(theme.selectors.map(p => p.value), [newValue, newValue]);
+    assert.deepEqual(theme.writes, [['hivemind-console-theme', newValue]]);
+  }
+});
+
+test('invalid saved theme falls back to blue, and blocked storage never blocks switching', () => {
   const invalid = themeHarness('untrusted-value');
-  assert.equal(invalid.document.documentElement.dataset.theme, 'current');
+  assert.equal(invalid.document.documentElement.dataset.theme, 'blue');
   invalid.ready();
-  assert.deepEqual(invalid.selectors.map(p => p.value), ['current', 'current']);
-  const blocked = themeHarness('red-alert', false);
+  assert.deepEqual(invalid.selectors.map(p => p.value), ['blue', 'blue']);
+  const blocked = themeHarness('red', false);
   blocked.ready();
-  assert.equal(blocked.document.documentElement.dataset.theme, 'current');
-  blocked.change(0, 'red-alert');
-  assert.equal(blocked.document.documentElement.dataset.theme, 'red-alert');
-  assert.deepEqual(blocked.selectors.map(p => p.value), ['red-alert', 'red-alert']);
+  assert.equal(blocked.document.documentElement.dataset.theme, 'blue');
+  blocked.change(0, 'red');
+  assert.equal(blocked.document.documentElement.dataset.theme, 'red');
+  assert.deepEqual(blocked.selectors.map(p => p.value), ['red', 'red']);
 });

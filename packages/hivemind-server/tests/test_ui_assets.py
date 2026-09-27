@@ -18,7 +18,7 @@ async def test_ui_serves_login_and_accessible_project_shell(env):
         css = await client.get("/assets/styles.css")
         js = await client.get("/assets/app.js")
         theme_js = await client.get("/assets/theme.js")
-        emblem = await client.get("/assets/red-alert-emblem.svg")
+        emblem = await client.get("/assets/red-emblem.svg")
         fonts = [await client.get("/assets/" + name) for name in (
             "oxanium-latin.woff2", "rajdhani-regular-latin.woff2",
             "rajdhani-semibold-latin.woff2", "rajdhani-bold-latin.woff2")]
@@ -32,7 +32,10 @@ async def test_ui_serves_login_and_accessible_project_shell(env):
     assert emblem.status_code == 200 and 'image/svg+xml' in emblem.headers['content-type']
     svg = ET.fromstring(emblem.content)
     assert svg.tag == '{http://www.w3.org/2000/svg}svg'
-    assert len(svg.findall('.//{http://www.w3.org/2000/svg}path')) >= 3
+    assert svg.attrib['aria-label'] == 'Red star'
+    assert len(svg) == 1 and svg[0].tag == '{http://www.w3.org/2000/svg}path'
+    red, green, blue = (int(svg[0].attrib['fill'][i:i+2], 16) for i in (1, 3, 5))
+    assert red > green and red > blue
     assert not svg.findall('.//{http://www.w3.org/2000/svg}script')
     assert claude_logo.status_code == codex_logo.status_code == 200
     assert 'image/svg+xml' in claude_logo.headers['content-type']
