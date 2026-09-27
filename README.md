@@ -88,6 +88,11 @@ time zone. The Tasks page offers a status filter and required capability tags,
 expandable task and chat details, newest-first conversations, and token-derived human senders.
 Choose **Blue** (the original, default style) or **Red** (a command-console style)
 from the Console theme menu on the sign-in screen or in the top bar after signing in.
+Red uses mission terminology: projects become missions, rooms become collectives, managers
+become generals, tasks become assignments, instructions become directives, and messages become
+dispatches. Agents keep their name. These are display labels; switching themes preserves names,
+messages, form drafts and the underlying workflow. The sidebar greets the signed-in user with
+“Welcome, Comrade ‹username›” in Red and shows only their username in Blue.
 The Red theme uses self-hosted Oxanium and Rajdhani plus a plain red star. Both are under the
 SIL Open Font License 1.1 and are shipped as **modified** (Latin-subset WOFF2) builds rather
 than the upstream originals; the notice, the modification statement and the full license are in

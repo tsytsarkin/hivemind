@@ -83,6 +83,7 @@ p { line-height:1.55 }
 .nav-link.selected { background:#2d433c; color:var(--accent) }
 .nav-link.selected span { color:var(--accent) }
 .sidebar-bottom { margin-top:auto; display:grid; gap:8px; padding:20px 13px; border-top:1px solid var(--line); color:var(--muted); font-size:.83rem }
+#sidebar-user { overflow-wrap:anywhere }
 .main-content { min-width:0 }
 .topbar { height:76px; display:flex; align-items:center; justify-content:space-between; border-bottom:1px solid var(--line); padding:0 clamp(22px,4vw,66px) }
 .breadcrumbs { font-size:.7rem; color:#8da1ab; letter-spacing:.15em; font-weight:700 }

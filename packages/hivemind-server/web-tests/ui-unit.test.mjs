@@ -6,21 +6,25 @@ import vm from 'node:vm';
 
 const source = readFileSync(fileURLToPath(new URL('../src/hivemind_server/ui_assets/app.js', import.meta.url)), 'utf8');
 const shell = readFileSync(fileURLToPath(new URL('../src/hivemind_server/ui_assets/index.html', import.meta.url)), 'utf8');
+const themeSource = readFileSync(fileURLToPath(new URL('../src/hivemind_server/ui_assets/theme.js', import.meta.url)), 'utf8');
 const KNOWN_IDS = new Set([...shell.matchAll(/\bid="([^"]+)"/g)].map(m => m[1]));
 
 function app(fetch) {
-  const ids = new Map();
+  const ids = new Map(), elements = [];
   class Element {
-    constructor(tag = 'div') { this.tagName = tag; this.children = []; this._text = ''; this.value = ''; this.hidden = false; this.events = {}; }
+    constructor(tag = 'div') { this.tagName = tag; this.children = []; this._text = ''; this.value = ''; this.hidden = false; this.events = {}; this.attributes = new Map(); elements.push(this); }
     get options() { return this.children; }
+    get childNodes() { return this.children; }
     set textContent(value) { this._text = String(value); this.children = []; }
     get textContent() { return this._text + this.children.map(c => c.textContent ?? String(c)).join(''); }
     append(...children) { this.children.push(...children); }
     prepend(...children) { this.children.unshift(...children); }
     replaceChildren(...children) { this.children = children; this._text = ''; }
-    setAttribute(name, value) { this[name] = value; }
+    setAttribute(name, value) { this.attributes.set(name, String(value)); this[name] = value; }
+    getAttribute(name) { return this.attributes.get(name) ?? null; }
+    removeAttribute(name) { this.attributes.delete(name); }
     addEventListener(name, fn) { this.events[name] = fn; }
-    hasAttribute() { return false; }
+    hasAttribute(name) { return this.attributes.has(name); }
     querySelector() { return new Element('button'); }
   }
   // Only ids the real shell defines resolve; everything else is null, exactly as a browser
@@ -28,17 +32,20 @@ function app(fetch) {
   // harness could not see the bug it exists to prevent — a CSS selector passed to
   // getElementById, which threw out of init() and left the whole console inert. Verified by
   // reintroducing that bug: with auto-creation all ten tests still passed.
-  const document = {createElement: tag => new Element(tag),
+  const document = {documentElement: {dataset: {}}, createElement: tag => new Element(tag),
     getElementById: id => {
       if (!KNOWN_IDS.has(id)) return null;
       if (!ids.has(id)) ids.set(id, new Element());
       return ids.get(id);
     },
-    querySelector: () => new Element(), querySelectorAll: () => [],
+    querySelector: () => new Element(), querySelectorAll: selector =>
+      selector.includes('data-theme-') ? elements.filter(element =>
+        [...selector.matchAll(/\[([^\]]+)\]/g)].some(match => element.hasAttribute(match[1]))) : [],
     addEventListener: () => {}};
   const context = vm.createContext({document, fetch, console, Date, URLSearchParams,
     setInterval: () => 0, clearInterval: () => {},
-    window: {}, crypto: {randomUUID: () => 'once'}});
+    window: {localStorage: {getItem: () => null, setItem: () => {}}}, crypto: {randomUUID: () => 'once'}});
+  vm.runInContext(themeSource, context);
   vm.runInContext(source.replace(/\binit\(\);\s*$/, ''), context);
   return {ids, context, run: code => vm.runInContext(code, context)};
 }
@@ -315,12 +322,84 @@ test('init() binds the console without throwing', () => {
   assert.doesNotThrow(() => run('init()'));
 });
 
+test('Red wording updates existing cards without rewriting user content or task states', () => {
+  const {ids, run} = app();
+  run(`S.rooms=[{room_id:'r1',name:'projects',description:'Tasks for the manager',
+    manager:['manager','tasks','codex'],members:[],member_count:0}];
+    S.tasks=[{node_id:'task1',title:'Tasks and projects',summary:'Ask the manager about messages',
+      state:'assigned_waiting',room_id:'r1',required_capabilities:['tasks'],assignee:null},
+      {node_id:'task2',summary:null,state:'available',room_id:'r1',assignee:null}];
+    S.taskCounts={available:1,assigned_waiting:1,in_progress:1,complete:1};
+    renderRooms();renderTasks();`);
+  const card = ids.get('task-list').children[0];
+  const detail = card.children.find(n => n.tagName === 'details');
+  detail.open = true;
+  run(`$('task-status-filter').value='assigned_waiting';applyTheme('red');`);
+  assert.match(ids.get('room-list').textContent, /General: manager · tasks · codex/);
+  assert.match(ids.get('room-list').textContent, /Tasks for the manager/);
+  assert.match(card.textContent, /Tasks and projects.*Collective: projects/);
+  assert.match(card.textContent, /Ask the manager about messages/);
+  assert.match(card.textContent, /Required specialties: tasks/);
+  assert.match(ids.get('task-counts').textContent, /1 Available.*1 Issued.*1 In progress.*1 Accomplished/);
+  assert.equal(card.children[0].children[1].className, 'chip assigned_waiting');
+  assert.equal(ids.get('task-list').children[0], card);
+  assert.equal(detail.open, true);
+  assert.equal(ids.get('task-status-filter').value, 'assigned_waiting');
+  const fallback = ids.get('task-list').children[1].children.find(n => n.tagName === 'details');
+  assert.equal(fallback.children[0].textContent, 'Assignment');
+  assert.equal(fallback.children[1].textContent, 'Assignment');
+  run(`applyTheme('blue')`);
+  assert.match(ids.get('room-list').textContent, /Manager: manager · tasks · codex/);
+  assert.match(card.textContent, /Required capabilities: tasks/);
+  assert.match(ids.get('task-counts').textContent, /1 Unclaimed.*1 Assigned.*1 Claimed.*1 Completed/);
+  assert.equal(fallback.children[0].textContent, 'Graph task');
+  assert.equal(fallback.children[1].textContent, 'Graph task');
+});
+
+test('theme copy updates labels and accessibility text while preserving drafts and values', () => {
+  const {run} = app();
+  run(`globalThis.caption=document.createElement('span');caption.textContent='Agents and tasks';
+    caption.setAttribute('data-theme-text','');
+    globalThis.field=document.createElement('input');field.value='manager projects tasks';
+    field.setAttribute('placeholder','Queue up reviews for this room…');
+    field.setAttribute('data-theme-placeholder','');
+    field.setAttribute('aria-label','Task details');field.setAttribute('data-theme-aria-label','');
+    globalThis.option=document.createElement('option');option.value='assigned_waiting';
+    option.textContent='Assigned';option.setAttribute('data-theme-text','');
+    globalThis.labelWithInput=document.createElement('label');
+    labelWithInput.setAttribute('data-theme-text','');
+    labelWithInput.append({nodeType:3,nodeValue:'Task details'},field);
+    applyTheme('red');`);
+  assert.equal(run('caption.textContent'), 'Agents and assignments');
+  assert.equal(run('field.getAttribute("placeholder")'), 'Queue up reviews for this collective…');
+  assert.equal(run('field.getAttribute("aria-label")'), 'Assignment details');
+  assert.equal(run('field.value'), 'manager projects tasks');
+  assert.equal(run('option.value'), 'assigned_waiting');
+  assert.equal(run('option.textContent'), 'Issued');
+  assert.equal(run('labelWithInput.childNodes[0].nodeValue'), 'Assignment details');
+  assert.equal(run('labelWithInput.childNodes[1]===field'), true);
+  run(`applyTheme('blue')`);
+  assert.equal(run('caption.textContent'), 'Agents and tasks');
+  assert.equal(run('field.getAttribute("aria-label")'), 'Task details');
+  assert.equal(run('labelWithInput.childNodes[0].nodeValue'), 'Task details');
+});
+
+test('Comrade greeting uses the authenticated username verbatim and clears on logout', () => {
+  const {ids, run} = app();
+  run(`showUser({user:'manager-projects',device:'tasks'});applyTheme('red');`);
+  assert.equal(ids.get('sidebar-user').textContent, 'Welcome, Comrade manager-projects');
+  run(`applyTheme('blue')`);
+  assert.equal(ids.get('sidebar-user').textContent, 'manager-projects');
+  run(`applyTheme('red');showLogin();`);
+  assert.equal(ids.get('sidebar-user').textContent, 'Signed in');
+});
+
 function themeHarness(saved, storageAvailable = true) {
   const events = {}, writes = [];
   const selectors = Array.from({length: 2}, () => ({value: 'blue', events: {},
     addEventListener(name, fn) { this.events[name] = fn; }}));
   const document = {documentElement: {dataset: {}},
-    querySelectorAll: () => selectors,
+    querySelectorAll: selector => selector === '[data-theme-picker]' ? selectors : [],
     addEventListener(name, fn) { events[name] = fn; }};
   const localStorage = {getItem() { if (!storageAvailable) throw Error('denied'); return saved; },
     setItem(key, value) { if (!storageAvailable) throw Error('denied'); writes.push([key, value]); }};
