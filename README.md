@@ -82,6 +82,10 @@ the graph. Agents call these operations through host MCP tools, not a raw REST f
 The Orchestrator Console's Overview shows project-wide task counts and five recent open tasks;
 the Tasks page offers a status filter and required capability tags,
 expandable task and chat details, newest-first conversations, and token-derived human senders.
+Choose **Current** (the default) or **Red Alert 3** (an original, game-inspired style) from the Console theme menu on
+the sign-in screen or in the top bar after signing in. The choice is saved only in this
+browser; if browser storage is disabled, switching still works until you reload. Theme
+preferences do not store your token or alter other users' consoles.
 Agent cards display local Claude/Codex harness logos, the model reported by each session
 (or “Model not reported” when unavailable), and the session's latest short work status with its
 timestamp. Once a project is loaded, each active agent should call the authenticated

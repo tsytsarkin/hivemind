@@ -128,7 +128,7 @@ def build_ui_app(cfg, registry, identities: IdentityStore) -> Starlette:
 
     async def asset(req: Request):
         name = req.path_params["name"]
-        if name not in ("styles.css", "app.js", "claude.svg", "codex.svg"):
+        if name not in ("styles.css", "app.js", "theme.js", "claude.svg", "codex.svg"):
             return _json({"error": "not found"}, 404)
         media_type = ("text/css" if name.endswith(".css") else "image/svg+xml" if
                       name.endswith(".svg") else "text/javascript")

@@ -15,9 +15,12 @@ async def test_ui_serves_login_and_accessible_project_shell(env):
         shell = await client.get("/")
         css = await client.get("/assets/styles.css")
         js = await client.get("/assets/app.js")
+        theme_js = await client.get("/assets/theme.js")
         claude_logo = await client.get("/assets/claude.svg")
         codex_logo = await client.get("/assets/codex.svg")
     assert shell.status_code == css.status_code == js.status_code == 200
+    assert theme_js.status_code == 200
+    assert 'text/javascript' in theme_js.headers['content-type']
     assert claude_logo.status_code == codex_logo.status_code == 200
     assert 'image/svg+xml' in claude_logo.headers['content-type']
     assert '<svg' in codex_logo.text

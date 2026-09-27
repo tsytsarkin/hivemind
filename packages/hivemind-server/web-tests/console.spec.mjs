@@ -1,5 +1,41 @@
 import { test, expect } from '@playwright/test';
 
+test('console themes persist through login and reload and keep presence distinct', async ({ page }) => {
+  await page.goto(process.env.HIVEMIND_TEST_UI_URL);
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'current');
+  await expect(page.locator('#login-theme')).toHaveValue('current');
+  const background = () => page.locator('body').evaluate(el => getComputedStyle(el).backgroundColor);
+  expect(await background()).toBe('rgb(13, 21, 35)');
+  await page.locator('#login-theme').selectOption('red-alert');
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'red-alert');
+  expect(await background()).toBe('rgb(16, 13, 16)');
+  await page.reload();
+  await expect(page.locator('#login-theme')).toHaveValue('red-alert');
+  expect(await background()).toBe('rgb(16, 13, 16)');
+  await page.locator('#login-token').fill(process.env.HIVEMIND_TEST_TOKEN);
+  await page.locator('#login-form button').click();
+  await expect(page.locator('#toolbar-theme')).toHaveValue('red-alert');
+  await expect(page.locator('.panel').first()).toHaveCSS('background-color', 'rgb(35, 25, 28)');
+  const online = await page.evaluate(() => {
+    const badge = document.createElement('span'); badge.className = 'chip online';
+    document.body.append(badge);
+    const color = getComputedStyle(badge).color;
+    badge.remove();
+    return color;
+  });
+  const [red, green] = online.match(/\d+/g).map(Number);
+  expect(green).toBeGreaterThan(red);
+  await page.setViewportSize({width: 390, height: 844});
+  await expect(page.locator('#toolbar-theme')).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.locator('#toolbar-theme').selectOption('current');
+  expect(await background()).toBe('rgb(13, 21, 35)');
+  await page.reload();
+  await expect(page.locator('#toolbar-theme')).toHaveValue('current');
+  expect(await page.evaluate(() => [localStorage.length,
+    localStorage.getItem('hivemind-console-theme')])).toEqual([1, 'current']);
+});
+
 test('token login, teams, tasks and mobile controls', async ({ page }) => {
   const base = process.env.HIVEMIND_TEST_UI_URL;
   await page.goto(base);
