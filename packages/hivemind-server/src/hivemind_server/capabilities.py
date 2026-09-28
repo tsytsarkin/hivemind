@@ -211,7 +211,7 @@ def list_addresses(db: Database, addresses: set[StableAddress]) -> list[dict]:
             batch = stable[offset:offset + 100]
             keys = ",".join("(?,?,?)" for _ in batch)
             rows = cur.execute("SELECT * FROM agent_capability WHERE (user,device,client) "
-                               f"IN ({keys})", tuple(part for who in batch for part in who)).fetchall()
+                               f"IN (VALUES {keys})", tuple(part for who in batch for part in who)).fetchall()
             for row in rows:
                 approved, pending = _split_tags(cur, row)
                 result.append({"address": (row["user"], row["device"], row["client"]),
