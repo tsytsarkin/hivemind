@@ -25,10 +25,11 @@ live guide). Meaning is data — shipped as a swappable **domain pack** (`packs/
 | `packages/hivemind-client/` | The client library + `hivemind` CLI. Python ≥3.9; deps are `httpx` and `websockets` (the bus listener). |
 | `plugin/` | The Claude Code plugin: MCP config, the self-updating bootstrap skill, a schema-authoring skill, the `/hivemind:project` command and a `SessionStart` hook (re-injects the project pin, and publishes three values to the session's shell for the live guide and the CLI: `HIVEMIND_SERVER_URL` and `HIVEMIND_TOKEN` from the plugin config, and `HIVEMIND_PROJECT` from the pin — the third is what lets them build `/p/<project>/…` off a root URL, which is the default since 1.2.0). |
 | `plugins/hivemind/` | The separate Codex plugin: MCP, project-picker and schema skills, session pin hook, and dependency-free bus listener. |
+| `plugins/muse/` | The Muse Spark plugin: native `.muse-plugin` manifest + claude-compat shim, MCP, project-picker and schema skills, session pin hook, Monitor-aware bus listener, and `hivemind-muse` launcher. Feature parity with Claude and Codex. |
 | `packs/` | Optional, swappable, **layerable** domain packs (schema + guide). Ships `security-research`, `ios-macos-attack-surface` and `research-workflow`. |
 | `deploy/` | Deploy docs, systemd unit, daily backup + restore, bootstrap + relock scripts. |
 | _(docs)_ | Not in the repository — see **Documentation** below. |
-| `scripts/` | `hivemind-claude` — run Claude Code with the plugin for one session, without installing it. |
+| `scripts/` | `hivemind-claude`, `hivemind-codex`, `hivemind-muse` — run the respective agent with the plugin for one session, without installing it. |
 
 ## Two versioning axes (core concept)
 
@@ -73,7 +74,15 @@ Monitor can surface live notifications. Neither a clipped preview nor a local JS
 All offloaded work must use **graph-backed tasks**, created or enabled before handing it to
 another agent or subagent. Direct messages may point to a task; only very small asks or steering
 on existing work may be sent directly. If an ask grows into substantive work, create a task.
-Agents offer tasks in explicitly created rooms, claim them with a
+These communication exceptions do not exempt recorded tasks from subagent execution.
+**Every Hivemind task runs in a dedicated subagent**, even when it is the only task. The coordinator
+launches the worker with the host's delegation tool and passes the project,
+task node ID, scope, context and acceptance criteria. Creating a task does not launch a worker;
+the delegated worker executes that task rather than recursively delegating the same record.
+The coordinator keeps lifecycle, progress and any claim heartbeats, retains the token privately,
+and reviews and integrates the result before completing. Delegation preserves authorization
+boundaries. Queue tasks when host slots are full; report a blocker if delegation is unavailable
+instead of executing inline. Agents offer tasks in explicitly created rooms, claim them with a
 private fenced lease (default five-minute heartbeat, one-hour expiry; configurable up to 24 hours
 per beat), post meaningful progress about every 15 minutes while actually working, and complete
 or release them. Graph task nodes have no 24-hour lifetime, and heartbeats do not churn graph
@@ -189,6 +198,46 @@ on the same machine. On another machine, use the server's reachable HTTPS/LAN ad
 the server binds only to loopback unless you set `HIVEMIND_HOST=0.0.0.0`. These commands assume
 you have this repo checked out on the **agent machine** and are in its root directory.
 
+### Muse Spark install
+
+```sh
+./scripts/hivemind-muse configure     # prompts for server ROOT URL and token (hidden input)
+# Install the plugin via Muse's claude-compat import:
+# - Muse currently imports .claude-plugin plugins, so plugins/muse installs as hivemind-muse
+# - Native .muse-plugin manifest is included for future native loader
+muse skills install ./plugins/muse/skills/hivemind --scope user
+muse skills install ./plugins/muse/skills/hivemind-project --scope user
+muse skills install ./plugins/muse/skills/hivemind-schema --scope user
+./scripts/hivemind-muse               # starts a NEW Muse session with MCP credentials
+```
+
+Use `http://127.0.0.1:8787` as the URL for a local server, **not** `/p/<project>` or `/mcp`.
+`configure` stores the token at `~/.hivemind/muse-token` (mode `0600`), saves the address in
+`~/.hivemind/muse-server.json`, and sets the plugin's MCP URL in
+`plugins/muse/.mcp.json` **before** installation; it does not store the token in the repo.
+Add the MCP server to Muse settings (`~/.config/muse/settings.json`):
+
+```json
+{
+  "mcpServers": {
+    "hivemind": {
+      "type": "http",
+      "url": "http://127.0.0.1:8787/mcp",
+      "headers": {"Authorization": "Bearer <token>"}
+    }
+  }
+}
+```
+
+Or let `./scripts/hivemind-muse` export `HIVEMIND_TOKEN` / `HIVEMIND_SERVER_URL`.
+
+Ask Muse to use `hivemind-project` skill to list projects and pin one (or run `/hivemind:project`).
+Until a project is pinned, MCP calls to the server root are refused; thereafter every call must pass `project=<name>`, with `client="muse"`.
+The session hooks re-inject the pin and launch the bundled listener via Monitor (`Monitor(..., persistent=true)`) or prompt-hook fallback.
+To update, run `configure` again, refresh skills, and start a new session.
+
+Marketplace files: `.muse-plugin/marketplace.json` and `.muse/plugins/marketplace.json` in this repo.
+
 ### Codex CLI install
 
 ```sh
@@ -261,7 +310,7 @@ launcher, update the checkout and start a new session instead.
 If MCP tools do not appear after installation, check that the server URL is its root, the token is
 a server-level **user** token, the plugin is enabled, and you started a new session after setting
 credentials. On Codex, use `codex plugin list` and launch via `./scripts/hivemind-codex`; on
-Claude Code, inspect `/plugin` and its Hivemind configuration. A pinned project is also required
+Claude Code, inspect `/plugin` and its Hivemind configuration; on Muse, check `muse skills list` and launch via `./scripts/hivemind-muse`. A pinned project is also required
 before graph reads or writes. Agents on different machines share the same server, not copies of it.
 
 ## Reproducible dependencies

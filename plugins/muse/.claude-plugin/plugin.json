@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "hivemind",
+  "displayName": "Hivemind",
+  "version": "1.5.4",
+  "description": "Shared, versioned knowledge graph + artifact store + tool registry that REPLACES local agent memory: read it before any work, persist all work into it. Muse Spark edition.",
+  "author": {
+    "name": "Nik Tsytsarkin"
+  },
+  "license": "Apache-2.0",
+  "keywords": [
+    "knowledge-graph",
+    "memory",
+    "artifacts",
+    "tool-registry",
+    "mcp",
+    "muse",
+    "muse-spark"
+  ],
+  "mcpServers": "./.mcp.json",
+  "userConfig": {
+    "server_url": {
+      "type": "string",
+      "title": "Hivemind server URL",
+      "description": "Your Hivemind server, used as ${server_url}/mcp. Give the SERVER ROOT (http://<host>:8787). Every call must pass project=.",
+      "default": "http://127.0.0.1:8787"
+    },
+    "api_token": {
+      "type": "string",
+      "title": "API token",
+      "description": "Bearer token from `hivemind-admin mint-token --user <you> --device <machine>`.",
+      "sensitive": true
+    }
+  }
+}

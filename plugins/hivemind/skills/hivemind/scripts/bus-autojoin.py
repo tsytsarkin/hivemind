@@ -36,8 +36,9 @@ CURSOR_KEYS = ("seen_message", "seen_inbox", "seen_offset")
 # are standalone stdlib files installed side by side in $HOME/.hivemind, and importing one from the
 # other through a hyphenated filename would make a join depend on the pin helper being present.
 # test_the_pin_key_is_resolved_the_same_way_as_the_helper keeps the two lists in step.
-SESSION_VARS = ("HIVEMIND_SESSION_ID", "CODEX_THREAD_ID", "CODEX_SESSION_ID",
-                "CLAUDE_CODE_SESSION_ID")
+SESSION_VARS = ("HIVEMIND_SESSION_ID", "MUSE_SESSION_ID", "MUSE_CODE_SESSION_ID",
+                "CODEX_THREAD_ID", "CODEX_SESSION_ID", "CLAUDE_CODE_SESSION_ID",
+                "CLAUDE_SESSION_ID")
 
 
 def _session(event):
@@ -90,8 +91,34 @@ def _project(pin_path):
 def _endpoint(platform):
     if platform == "claude":
         base = (os.environ.get("HIVEMIND_SERVER_URL")
-                or os.environ.get("CLAUDE_PLUGIN_OPTION_SERVER_URL", "")).rstrip("/")
+                or os.environ.get("CLAUDE_PLUGIN_OPTION_SERVER_URL", "")
+                or os.environ.get("MUSE_PLUGIN_OPTION_SERVER_URL", "")).rstrip("/")
         url = base + "/mcp"
+    elif platform == "muse":
+        try:
+            configured = os.environ.get("HIVEMIND_SERVER_URL", "").rstrip("/")
+            parents = Path(__file__).resolve().parents
+            manifest = next(iter(parents[3:4]), None)
+            manifest = manifest / ".mcp.json" if manifest is not None else None
+            if manifest is not None and manifest.is_file():
+                config = json.loads(manifest.read_text())
+                url = config["mcpServers"]["hivemind"]["url"]
+            else:
+                saved = Path.home() / ".hivemind/muse-server.json"
+                # also try codex/claude saved configs for cross-host manual installs
+                alt_saved = Path.home() / ".hivemind/codex-server.json"
+                if not saved.is_file() and alt_saved.is_file():
+                    saved = alt_saved
+                base = json.loads(saved.read_text())["server_url"] if saved.is_file() else configured
+                url = base.rstrip("/") + "/mcp" if isinstance(base, str) and base else ""
+            if configured and url != configured + "/mcp":
+                return ""
+            parts = urlsplit(url)
+            if parts.scheme not in ("http","https") or not parts.hostname or not parts.path.endswith("/mcp"):
+                return ""
+            return url
+        except (OSError, ValueError, KeyError, TypeError, IndexError):
+            return ""
     else:
         try:
             configured = os.environ.get("HIVEMIND_SERVER_URL", "").rstrip("/")
@@ -124,15 +151,18 @@ def _endpoint(platform):
 
 
 def _token(platform, endpoint):
-    """Use the host credential, or Codex's private setup token for hook-only bus access."""
+    """Use the host credential, or the private setup token for hook-only bus access."""
     token = os.environ.get("HIVEMIND_TOKEN") or (os.environ.get("CLAUDE_PLUGIN_OPTION_API_TOKEN", "")
-                                              if platform == "claude" else "")
-    if token or platform != "codex" or not endpoint:
+                                              if platform == "claude" else "") or (os.environ.get("MUSE_PLUGIN_OPTION_API_TOKEN", "")
+                                              if platform == "muse" else "")
+    if token or platform not in ("codex", "muse") or not endpoint:
         return token
     state = Path.home() / ".hivemind"
+    # try platform-specific file first, then codex fallback
+    prefix = platform
     try:
-        server = json.loads((state / "codex-server.json").read_text())["server_url"]
-        path = state / "codex-token"
+        server = json.loads((state / f"{prefix}-server.json").read_text())["server_url"]
+        path = state / f"{prefix}-token"
         info = path.lstat()
         if (not isinstance(server, str) or server.rstrip("/") + "/mcp" != endpoint
                 or not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
@@ -458,7 +488,7 @@ def run(event, platform="codex", mode="ensure"):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--platform", choices=("codex", "claude"), default="codex")
+    parser.add_argument("--platform", choices=("codex", "claude", "muse"), default="codex")
     parser.add_argument("--mode", choices=("ensure", "check", "after-pin", "stop"), default="ensure")
     args = parser.parse_args()
     try:

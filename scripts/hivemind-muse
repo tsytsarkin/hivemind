@@ -1,0 +1,125 @@
+#!/usr/bin/env python3
+"""Configure a local Hivemind endpoint and launch Muse with its token.
+
+Run `hivemind-muse configure` before installing/reinstalling the plugin, then
+`hivemind-muse [muse args...]` for later CLI sessions. Secrets never enter argv or the repo.
+"""
+import getpass
+import json
+import os
+from pathlib import Path
+import sys
+import tempfile
+from urllib.parse import urlsplit
+
+ROOT = Path(__file__).resolve().parents[1]
+# Muse plugin MCP manifest locations, in priority order
+MCP = ROOT / "plugins/muse/.mcp.json"
+MCP_CANDIDATES = [
+    ROOT / "plugins/muse/.mcp.json",
+    ROOT / "plugin/.mcp.json",  # claude compat fallback
+]
+STATE = Path.home() / ".hivemind"
+ADDRESS = STATE / "muse-server.json"
+TOKEN = STATE / "muse-token"
+
+def _mcp_path():
+    if MCP.is_file():
+        return MCP
+    for p in MCP_CANDIDATES:
+        if p.is_file():
+            return p
+    return MCP_CANDIDATES[0]
+
+def _private_write(path, value):
+    STATE.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd, candidate = tempfile.mkstemp(prefix=".hivemind-", dir=str(STATE))
+    try:
+        with os.fdopen(fd, "w") as stream:
+            stream.write(value)
+        os.replace(candidate, str(path))
+        os.chmod(path, 0o600)
+    finally:
+        if os.path.exists(candidate):
+            os.unlink(candidate)
+
+def _server_url(value):
+    url = value.strip().rstrip("/")
+    parsed = urlsplit(url)
+    if (parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username
+            or parsed.password or parsed.path or parsed.query or parsed.fragment):
+        raise ValueError("provide a server root such as http://127.0.0.1:8787 (no path or credentials)")
+    return url
+
+def configure():
+    default = "http://127.0.0.1:8787"
+    if ADDRESS.is_file():
+        try:
+            default = json.loads(ADDRESS.read_text())["server_url"]
+        except (ValueError, KeyError, OSError):
+            pass
+    try:
+        server = _server_url(input("Hivemind server URL [%s]: " % default) or default)
+        secret = getpass.getpass("Hivemind user token (not echoed): ").strip()
+    except ValueError as error:
+        print("Invalid address: %s" % error, file=sys.stderr)
+        return 1
+    except (EOFError, KeyboardInterrupt):
+        print("\nConfiguration cancelled.", file=sys.stderr)
+        return 1
+    if not secret:
+        print("Token cannot be empty; nothing was changed.", file=sys.stderr)
+        return 1
+    mcp_path = _mcp_path()
+    mcp_path.parent.mkdir(parents=True, exist_ok=True)
+    if mcp_path.is_file():
+        try:
+            manifest = json.loads(mcp_path.read_text())
+        except ValueError:
+            manifest = {"mcpServers": {"hivemind": {}}}
+    else:
+        manifest = {"mcpServers": {"hivemind": {"type": "http", "bearerTokenEnvVar": "HIVEMIND_TOKEN"}}}
+    manifest.setdefault("mcpServers", {}).setdefault("hivemind", {})
+    manifest["mcpServers"]["hivemind"]["url"] = server + "/mcp"
+    manifest["mcpServers"]["hivemind"]["bearerTokenEnvVar"] = "HIVEMIND_TOKEN"
+    manifest["mcpServers"]["hivemind"]["type"] = "http"
+    _private_write(ADDRESS, json.dumps({"server_url": server}) + "\n")
+    _private_write(TOKEN, secret + "\n")
+    # Update muse plugin MCP; also update shared fallback if exists to keep in sync?
+    mcp_path.write_text(json.dumps(manifest, indent=2) + "\n")
+    print("Saved the token in a private 0600 file and updated the plugin's MCP URL.")
+    print("Install the Muse Hivemind plugin, then start a NEW Muse session.")
+    print("Run scripts/hivemind-muse to launch future CLI sessions with the configured token.")
+    return 0
+
+def launch(args):
+    try:
+        server = _server_url(json.loads(ADDRESS.read_text())["server_url"])
+        if TOKEN.stat().st_mode & 0o077:
+            raise ValueError("token file permissions are not private (want 0600)")
+        secret = TOKEN.read_text().strip()
+        if not secret:
+            raise ValueError("token file is empty")
+        mcp_path = _mcp_path()
+        endpoint = json.loads(mcp_path.read_text())["mcpServers"]["hivemind"]["url"]
+        if endpoint != server + "/mcp":
+            raise ValueError("MCP URL differs from configured server; run configure and reinstall")
+    except (OSError, ValueError, KeyError) as error:
+        print("Hivemind is not configured: %s. Run scripts/hivemind-muse configure." % error,
+              file=sys.stderr)
+        return 1
+    env = dict(os.environ, HIVEMIND_SERVER_URL=server, HIVEMIND_TOKEN=secret,
+               MUSE_SESSION_ID=os.environ.get("MUSE_SESSION_ID", ""))
+    # Clean MUSE_SESSION_ID if empty so hook chain doesn't pick empty
+    if not env["MUSE_SESSION_ID"]:
+        env.pop("MUSE_SESSION_ID", None)
+    try:
+        os.execvpe("muse", ["muse", *args], env)
+    except OSError as error:
+        print("Cannot start muse: %s. Install Muse Code and make sure it is on PATH."
+              % error, file=sys.stderr)
+        return 1
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(configure() if sys.argv[1:] == ["configure"] else launch(sys.argv[1:]))

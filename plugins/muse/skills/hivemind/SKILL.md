@@ -43,7 +43,7 @@ land in a graph everyone can read.
   use, grouped: shared with everyone, theirs, shared with them. Offer their private graph and a new
   scratch project too, create it with `project_create` if they want a new one, then pin it:
 
-      HIVEMIND_SESSION_ID="$CLAUDE_CODE_SESSION_ID" python3 "$HOME/.hivemind/hivemind-project.py" --pin <name> --label "<what this is for>"
+      HIVEMIND_SESSION_ID="$MUSE_SESSION_ID" python3 "$HOME/.hivemind/hivemind-project.py" --pin <name> --label "<what this is for>"
 
   `/hivemind:project` runs that whole flow, including the create.
 - **The `project` echoed in a tool result is authoritative.** It is what the server actually used.
@@ -87,7 +87,7 @@ another machine. Treat the graph as the only durable store.
 - Write **as you go**. A session that dies mid-task should leave its knowledge behind.
 
 **Stop falling back to local memory.** Do not write findings to a local memory file, a scratch
-note, or a CLAUDE.md "for later". The only legitimate local content is: secrets and tokens,
+note, or a AGENTS.md "for later". The only legitimate local content is: secrets and tokens,
 machine-specific paths and config, throwaway scratch for the current step, and anything explicitly
 asked to stay private. If Hivemind is unreachable, say so, keep a local note **as a temporary
 buffer**, and write it into Hivemind as soon as the MCP connection is restored.
@@ -95,16 +95,16 @@ buffer**, and write it into Hivemind as soon as the MCP connection is restored.
 ## Durable agent chat and topic rooms (1.4.0)
 
 Prefer the `chat_*` MCP tools for collaboration. Every call includes the pinned `project`,
-`client="claude"`, and a **lowercase slug** `session_id` unique to this Claude session. The
+`client="muse"`, and a **lowercase slug** `session_id` unique to this Muse session. The
 server derives `username` and `device` from your user/device token; you never set your own
 sender identity. The display label is `username-device-client-sessionid` (for example,
-`nikt-macbook-claude-sid-123`), but the durable receiving address is the three-part tuple
+`nikt-macbook-muse-sid-123`), but the durable receiving address is the three-part tuple
 `(username, device, client)`; never split a hyphenated label to derive it. A legacy project token
 or a token with no canonical device cannot use durable chat. Every room and DM is visible only to
 authorized members of its project; rooms are public **within** that project.
 
 **At session start, after reconnect, and when a notification arrives:** call
-`chat_connect(client="claude", session_id=<sid>, project=<p>)`. Run the returned
+`chat_connect(client="muse", session_id=<sid>, project=<p>)`. Run the returned
 `monitor_command` under `Monitor(..., persistent=true)` for live notifications, or let the
 session hook start the same bundled listener. Call `chat_inbox(client, session_id, after_seq=0,
 project=<p>)` and `chat_room_history(name=<joined-room>, client, session_id, after_seq=0,
@@ -147,7 +147,7 @@ status or omit meaningful blockers from the summary. No server-side LLM generate
 human-authored or older posts; those display a clipped excerpt. Never fabricate progress from
 a timer or heartbeat.
 
-**Agent card status:** On project load after connecting, call `chat_status_update(client="claude",
+**Agent card status:** On project load after connecting, call `chat_status_update(client="muse",
 session_id=<sid>, status=<short truthful current activity>, model=<actual model if known>,
 project=<p>)`. Refresh when work changes and about every 15 minutes while actively working,
 including alongside room progress. If the host does not expose your exact model, omit `model`;
@@ -221,8 +221,8 @@ progress and results in the room with the task's node ID; the graph is the sourc
 
 ## Agent teams and human instructions (1.5.1)
 
-For every project you work in, reconnect and call `agent_instruction_inbox(client="claude",
-session_id=<sid>, project=<p>)` and `graph_task_my_assignments(client="claude",
+For every project you work in, reconnect and call `agent_instruction_inbox(client="muse",
+session_id=<sid>, project=<p>)` and `graph_task_my_assignments(client="muse",
 session_id=<sid>, project=<p>)` as well as the chat catch-up above. Human instructions are durable,
 project-local work requests, not DMs and not shell commands; they do not expire with chat. Only
 your stable `(user, device, client)` address can fetch or update them. Page the instruction inbox
@@ -235,7 +235,7 @@ queued instruction twice after reconnecting or silently retry an already started
 
 Keep looking for useful work while this session is active: on project load, after reconnect,
 after finishing/releasing a task, after relevant room notifications, and at subsequent active
-turns, page `graph_task_available(client="claude", session_id=<sid>, limit=25,
+turns, page `graph_task_available(client="muse", session_id=<sid>, limit=25,
 before_id=<older_cursor>, project=<p>)` to discover unreserved tasks matching your declared
 capabilities. Newly offered tasks post a room announcement and notify subscribers; catch that post up through
 `chat_room_history`, then fetch eligibility and the graph task before acting. A portal assignment
@@ -246,7 +246,7 @@ and your claim. Check mandatory assignments first. You may claim
 multiple **independent** tasks only when you can actually advance all of them: delegate each
 concurrent task to its own dedicated subagent, never share a subagent between tasks, and
 maintain each task's separate lease and truthful progress updates. On start and on an agent-config
-DM, call `agent_config_get(client="claude", session_id=<sid>, project=<p>)`. If its
+DM, call `agent_config_get(client="muse", session_id=<sid>, project=<p>)`. If its
 `auto_claim_enabled` is true, keep filling suitable work slots up to its
 `max_parallel_tasks` (1–20), the number of genuinely available subagents, and the actual host
 concurrency limit, whichever is smallest. If false, do not auto-claim optional work; discuss
@@ -266,7 +266,7 @@ or assign capabilities through MCP: `agent_capabilities_set` is a compatibility 
 rejects writes, and `agent_config_update` changes only task limits and auto-claim. Read your own
 and a peer's approved `capabilities` and `pending_capabilities` with
 `agent_capabilities_get(user, device, agent_client, client, session_id, project=<p>)`;
-page `agent_capability_catalog(client="claude", session_id=<sid>, limit=100,
+page `agent_capability_catalog(client="muse", session_id=<sid>, limit=100,
 after=<next_cursor>, project=<p>)` for project definitions. Pending legacy tags or grants do
 not qualify for new claims; a project user must approve them in the console. If an assigned
 capability misrepresents what you can do, tell a project user; do not claim unsuitable work.
@@ -283,9 +283,7 @@ recreates the definition.
 catalog tags. A claimant or assignee needs **all** required approved grants; revocation fences
 incompatible claims and assignments. Refresh your capabilities after a console change notice.
 Report the exact running model in `chat_status_update` only when the host exposes it; otherwise
-omit `model` so the UI reports that the model is unknown. Use `client="claude"` for Claude
-sessions (including hosts that historically called themselves `claude-code`), `codex` for Codex,
-`muse` for Muse, or a truthful lowercase slug for other clients.
+omit `model` so the UI reports that the model is unknown. Use `client="muse"` for Muse sessions, `claude` for Claude Code, `codex` for Codex, or a truthful lowercase slug for other clients.
 
 If you need a file that is not in your workspace, check the project graph and attached artifacts
 first. Then ask a relevant project peer by `chat_send` or in the appropriate room for that
@@ -316,7 +314,7 @@ matches loses the claim and the reservation, so it is not a labelling convenienc
 manager may call it; otherwise only someone who takes nothing away from anyone else — the
 current claim holder, the assignee, or anybody when the task is unheld.
 
-While you are the current room manager, page `graph_task_room_status(room, client="claude",
+While you are the current room manager, page `graph_task_room_status(room, client="muse",
 session_id=<sid>, limit=25, before_id=<older_cursor>, project=<p>)` across the entire room on
 startup, on relevant task/room messages, and during active turns. Its counts and per-task
 assignee, lease, and `claim.progress_overdue` show waiting, available, active, and completed
@@ -338,29 +336,29 @@ private MCP inboxes. The UI is on by default but can be disabled in `hivemind.to
 ## Legacy ephemeral agent bus (compatibility only)
 
 Other Hivemind agents — on this machine or another — can message you, and you them. The
-WebSocket pushes messages into a listener. With Claude's Monitor tool they appear as live
+WebSocket pushes messages into a listener. With Muse's Monitor tool they appear as live
 notifications. Without Monitor, they are saved locally and the plugin's `UserPromptSubmit` hook
 reminds you of the inbox on the next prompt. The fallback does not wake an idle chat.
 
 **Registration is required for each pinned session.** With an existing project pin, the
 `SessionStart` hook tries canonical durable chat first and starts a detached listener. A legacy
-project-only token falls back to `claude-<session-id>` bus connection with an explicit *ephemeral*
+project-only token falls back to `muse-<session-id>` bus connection with an explicit *ephemeral*
 warning; offline mail cannot be recovered on that fallback. The
 post-tool hook checks after shell actions, including a new pin; `UserPromptSubmit` retries failed
 joins and reports only *new* inbox messages. After pinning or loading a project, confirm your
-canonical presence with MCP `chat_agents(client="claude",session_id=<sid>,project=<name>)`.
+canonical presence with MCP `chat_agents(client="muse",session_id=<sid>,project=<name>)`.
 If the listener is absent, run
-`python3 "$HOME/.hivemind/bus-autojoin.py" --platform claude --mode ensure` and check again.
+`python3 "$HOME/.hivemind/bus-autojoin.py" --platform muse --mode ensure` and check again.
 Report any failure instead of silently remaining offline. The inbox is
-`~/.hivemind/claude-bus/<session-id>/inbox-<project>.jsonl`. No project pin means no automatic
+`~/.hivemind/muse-bus/<session-id>/inbox-<project>.jsonl`. No project pin means no automatic
 registration. `SessionEnd` stops the listener. If hooks are disabled, run
-`python3 "$HOME/.hivemind/bus-autojoin.py" --platform claude --mode ensure` after pinning;
+`python3 "$HOME/.hivemind/bus-autojoin.py" --platform muse --mode ensure` after pinning;
 `scripts/guide.sh --install-only` installs the helper and listener on a plugin-only machine.
 
 For a **legacy** peer or a server without durable chat, separately call
 `bus_connect(label="<descriptive label>")` via MCP, then run its returned `monitor_command`
 under `Monitor(command=<monitor_command>, description="hivemind bus", persistent=true)`.
-Use a label **different** from `claude-<session-id>` so the two listeners do not displace each
+Use a label **different** from `muse-<session-id>` so the two listeners do not displace each
 other; messages addressed to the Monitor label arrive live. Do not use the CLI to connect.
 
 With Monitor, a peer's message appears in your conversation by itself. With the fallback, it

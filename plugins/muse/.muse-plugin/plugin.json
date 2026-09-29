@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "name": "hivemind",
+  "displayName": "Hivemind",
+  "version": "1.5.4",
+  "description": "Shared, versioned knowledge graph + artifact store + tool registry that REPLACES local agent memory: read it before any work, persist all work into it.",
+  "compat": {
+    "source": "native",
+    "manifestDir": ".muse-plugin"
+  },
+  "capabilities": {
+    "skills": [
+      {"id": "hivemind", "path": "skills/hivemind/SKILL.md", "enabledDefault": true},
+      {"id": "hivemind-project", "path": "skills/hivemind-project/SKILL.md", "enabledDefault": true},
+      {"id": "hivemind-schema", "path": "skills/hivemind-schema/SKILL.md", "enabledDefault": true}
+    ],
+    "commands": [
+      {"id": "project", "path": "commands/project.md", "enabledDefault": true}
+    ],
+    "hooks": [
+      {"id": "session-start", "event": "SessionStart", "command": ["bash", "-c", "for d in \"$MUSE_PLUGIN_ROOT\" \"$CLAUDE_PLUGIN_ROOT\" \"$PLUGIN_ROOT\"; do [ -n \"$d\" ] && [ -f \"$d/hooks/session_start.py\" ] && exec python3 \"$d/hooks/session_start.py\"; done; exit 0"], "timeoutMs": 10000, "statusMessage": "Restoring Hivemind project pin"},
+      {"id": "bus-autojoin-ensure-start", "event": "SessionStart", "command": ["bash", "-c", "for d in \"$MUSE_PLUGIN_ROOT\" \"$CLAUDE_PLUGIN_ROOT\" \"$PLUGIN_ROOT\"; do [ -n \"$d\" ] && [ -f \"$d/skills/hivemind/scripts/bus-autojoin.py\" ] && exec python3 \"$d/skills/hivemind/scripts/bus-autojoin.py\" --platform muse --mode ensure; done; exit 0"], "timeoutMs": 8000},
+      {"id": "bus-autojoin-post-tool", "event": "PostToolUse", "command": ["bash", "-c", "for d in \"$MUSE_PLUGIN_ROOT\" \"$CLAUDE_PLUGIN_ROOT\" \"$PLUGIN_ROOT\"; do [ -n \"$d\" ] && [ -f \"$d/skills/hivemind/scripts/bus-autojoin.py\" ] && exec python3 \"$d/skills/hivemind/scripts/bus-autojoin.py\" --platform muse --mode ensure; done; exit 0"], "timeoutMs": 8000},
+      {"id": "bus-autojoin-prompt", "event": "UserPromptSubmit", "command": ["bash", "-c", "for d in \"$MUSE_PLUGIN_ROOT\" \"$CLAUDE_PLUGIN_ROOT\" \"$PLUGIN_ROOT\"; do [ -n \"$d\" ] && [ -f \"$d/skills/hivemind/scripts/bus-autojoin.py\" ] && exec python3 \"$d/skills/hivemind/scripts/bus-autojoin.py\" --platform muse --mode ensure; done; exit 0"], "timeoutMs": 8000},
+      {"id": "bus-autojoin-stop", "event": "SessionEnd", "command": ["bash", "-c", "for d in \"$MUSE_PLUGIN_ROOT\" \"$CLAUDE_PLUGIN_ROOT\" \"$PLUGIN_ROOT\"; do [ -n \"$d\" ] && [ -f \"$d/skills/hivemind/scripts/bus-autojoin.py\" ] && exec python3 \"$d/skills/hivemind/scripts/bus-autojoin.py\" --platform muse --mode stop; done; exit 0"], "timeoutMs": 3000}
+    ],
+    "mcpServers": [
+      {"id": "hivemind", "transport": "http", "url": "http://127.0.0.1:8787/mcp"}
+    ],
+    "reminders": []
+  }
+}

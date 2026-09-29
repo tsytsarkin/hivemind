@@ -6,9 +6,9 @@ compaction drops it — and a dropped choice plus a defaulted write is how priva
 in the shared graph. Keyed by the host's session id (see session_id) so a resume lands back on the
 same project.
 
-ONE file serves both hosts. Both plugins install this script to the same $HOME/.hivemind path, so
+ONE file serves all hosts. All plugins install this script to the same $HOME/.hivemind path, so
 whichever skill loaded last is the copy every session runs: a build that knew only its own host's
-session-id variable left the other host unable to pin at all. Keep the two copies byte-identical —
+session-id variable left the other host unable to pin at all. Keep the copies byte-identical —
 test_the_two_plugin_copies_are_byte_identical holds that.
 
 Purely local state: nothing here talks to the server. Listing projects needs the API token, and
@@ -64,15 +64,18 @@ def session_id():
     fallback for a plain shell — the agent and the slash command both run this script themselves,
     and neither hook variable reaches that shell.
 
-    Codex's variable is preferred over Claude's when BOTH are set, which means one host is running
-    inside the other's shell and the inherited one is stale. Codex-inside-Claude is the direction
-    that actually happens — Claude Code exports its session id into every tool shell, so a `codex`
-    started from one inherits it — and preferring Claude there collapses every Codex thread onto the
-    one outer id, which is the same shared-pin bug as no id at all. Both SessionStart hooks pass
-    HIVEMIND_SESSION_ID explicitly, so neither loses this tie; the order only decides a plain shell.
+    Muse and Codex variables are preferred over Claude's when multiple are set, which means one host
+    is running inside another's shell and the inherited one is stale. Codex-inside-Claude and
+    Muse-inside-Claude are directions that actually happen — Claude Code and Muse export their session
+    id into every tool shell, so a nested host started from one inherits it — and preferring the outer
+    host collapses every inner thread onto the one outer id, which is the same shared-pin bug as no id
+    at all. SessionStart hooks pass HIVEMIND_SESSION_ID explicitly, so none loses this tie; the order
+    only decides a plain shell.
     """
-    return (os.environ.get("HIVEMIND_SESSION_ID") or os.environ.get("CODEX_THREAD_ID")
-            or os.environ.get("CODEX_SESSION_ID") or os.environ.get("CLAUDE_CODE_SESSION_ID") or "")
+    return (os.environ.get("HIVEMIND_SESSION_ID") or os.environ.get("MUSE_SESSION_ID")
+            or os.environ.get("MUSE_CODE_SESSION_ID") or os.environ.get("CODEX_THREAD_ID")
+            or os.environ.get("CODEX_SESSION_ID") or os.environ.get("CLAUDE_CODE_SESSION_ID")
+            or os.environ.get("CLAUDE_SESSION_ID") or "")
 
 
 def pin_slug(value):
@@ -110,7 +113,7 @@ def main(argv=None):
     # to supply the id instead. --session-id is answered above, so "" is still reportable.
     if not session_id():
         print(json.dumps({"error": "no session id; set HIVEMIND_SESSION_ID to this conversation's "
-                                   "id (CLAUDE_CODE_SESSION_ID / CODEX_THREAD_ID are read too)"}))
+                                   "id (MUSE_SESSION_ID / CLAUDE_CODE_SESSION_ID / CODEX_THREAD_ID are read too)"}))
         return 1
     path = pin_path()
     # `is not None`, not truthiness: --pin "" is a mis-parsed answer, and falling through to the

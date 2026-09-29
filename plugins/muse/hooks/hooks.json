@@ -1,0 +1,32 @@
+{
+  "description": "Restore the Hivemind project pin, auto-start its session bus listener, and report new messages on subsequent prompts.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact|fork",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'for d in \"$MUSE_PLUGIN_ROOT\" \"$CLAUDE_PLUGIN_ROOT\" \"$PLUGIN_ROOT\"; do [ -n \"$d\" ] && [ -f \"$d/hooks/session_start.py\" ] && exec python3 \"$d/hooks/session_start.py\"; done; exit 0'",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "bash -c 'for d in \"$MUSE_PLUGIN_ROOT\" \"$CLAUDE_PLUGIN_ROOT\" \"$PLUGIN_ROOT\"; do [ -n \"$d\" ] && [ -f \"$d/skills/hivemind/scripts/bus-autojoin.py\" ] && exec python3 \"$d/skills/hivemind/scripts/bus-autojoin.py\" --platform muse --mode ensure; done; exit 0'",
+            "timeout": 8
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [{
+      "matcher": "Bash|bash",
+      "hooks": [{"type": "command", "command": "bash -c 'for d in \"$MUSE_PLUGIN_ROOT\" \"$CLAUDE_PLUGIN_ROOT\" \"$PLUGIN_ROOT\"; do [ -n \"$d\" ] && [ -f \"$d/skills/hivemind/scripts/bus-autojoin.py\" ] && exec python3 \"$d/skills/hivemind/scripts/bus-autojoin.py\" --platform muse --mode ensure; done; exit 0'", "timeout": 8}]
+    }],
+    "UserPromptSubmit": [{
+      "hooks": [{"type": "command", "command": "bash -c 'for d in \"$MUSE_PLUGIN_ROOT\" \"$CLAUDE_PLUGIN_ROOT\" \"$PLUGIN_ROOT\"; do [ -n \"$d\" ] && [ -f \"$d/skills/hivemind/scripts/bus-autojoin.py\" ] && exec python3 \"$d/skills/hivemind/scripts/bus-autojoin.py\" --platform muse --mode ensure; done; exit 0'", "timeout": 8}]
+    }],
+    "SessionEnd": [{
+      "hooks": [{"type": "command", "command": "bash -c 'for d in \"$MUSE_PLUGIN_ROOT\" \"$CLAUDE_PLUGIN_ROOT\" \"$PLUGIN_ROOT\"; do [ -n \"$d\" ] && [ -f \"$d/skills/hivemind/scripts/bus-autojoin.py\" ] && exec python3 \"$d/skills/hivemind/scripts/bus-autojoin.py\" --platform muse --mode stop; done; exit 0'", "timeout": 3}]
+    }]
+  }
+}

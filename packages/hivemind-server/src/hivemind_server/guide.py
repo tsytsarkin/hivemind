@@ -151,8 +151,21 @@ a worker and authorized as room manager, otherwise offer it for an eligible work
 Messages and worker prompts may point to the task, but must not substitute for its work record.
 Only very small asks (a quick fact or status check) or steering on existing work (a clarification,
 priority change or correction) may be sent directly. If either grows into substantive work,
-create a task before continuing the offload. Track progress and completion on the task and
-inspect the result before accepting it.
+create a task before continuing the offload. These communication exceptions
+do not exempt recorded tasks from subagent execution.
+
+**Every Hivemind task runs in a dedicated subagent**, including a lone task or a small task already
+recorded in the task system. The coordinating agent uses the host's delegation tool to launch the
+worker; creating or assigning a Hivemind task does not launch a subagent. Include the project,
+task node ID, scope, context and acceptance criteria in the handoff. The worker reads that task
+and executes it rather than recursively delegating the same record.
+
+The coordinator owns task lifecycle and truthful progress, retains any private claim token and
+renews its heartbeat, then reviews and integrates the worker's output before marking complete.
+Do not pass claim tokens to workers or put them in shared records. Delegation preserves the task's
+scope and authorization boundaries. If no host slot is free, leave the task queued; do not hoard
+unstarted optional claims. If the host cannot delegate, report the blocker instead of executing
+the task inline.
 
 ## Procedures and dead-ends
 

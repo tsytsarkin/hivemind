@@ -52,7 +52,7 @@ def attach(mcp, identities) -> None:
         ChatStore(p.db).touch((user, device, actual_client), session)
         return p, (user, device, actual_client)
 
-    @mcp.tool(annotations=WRITE, description="Offer a graph task for eligible workers in an EXISTING project room. Use the task system for offloaded work; only very small asks or steering on existing work may be sent directly. Does not create a room or expire with its messages.")
+    @mcp.tool(annotations=WRITE, description="Offer a graph task for eligible workers in an EXISTING project room. Use tasks for offloaded work; only very small asks or steering on existing work may be sent directly. These communication exceptions do not exempt recorded tasks from subagent execution. Every task needs a dedicated subagent launched by its coordinator through the host's delegation tool; this call does not launch one. Pass project, task node ID, scope, context and acceptance criteria; the worker executes that record without recursively re-delegating it. Does not create a room or expire with its messages.")
     @_envelope
     def graph_task_offer(room: str, title: str, summary: str, client: str, session_id: str,
                          required_capabilities: Optional[list[str]] = None) -> dict:
@@ -61,7 +61,7 @@ def attach(mcp, identities) -> None:
                                     required_capabilities=required_capabilities)
         return _announce(p, room, offered, who)
 
-    @mcp.tool(annotations=WRITE, description="Mark an existing graph node as an optional task; optionally link an explicitly created room.")
+    @mcp.tool(annotations=WRITE, description="Mark an existing graph node as an optional task; optionally link an explicitly created room. Execution requires a dedicated subagent launched through the host's delegation tool, including for a lone or small task; this call does not launch it.")
     @_envelope
     def graph_task_enable(node_id: str, client: str, session_id: str,
                           room: Optional[str] = None,
@@ -89,7 +89,7 @@ def attach(mcp, identities) -> None:
                                     interval_seconds=interval_seconds,
                                     expires_after_seconds=expires_after_seconds)
 
-    @mcp.tool(annotations=WRITE, description="Exclusively claim a graph task; defaults: beat every 5 minutes, expires 1 hour after the last accepted heartbeat; expiry maximum 24 hours. Retain returned token privately.")
+    @mcp.tool(annotations=WRITE, description="Exclusively claim a graph task; defaults: beat every 5 minutes, expires 1 hour after the last accepted heartbeat; expiry maximum 24 hours. The coordinator retains the returned token privately, owns heartbeats and progress, and launches a dedicated subagent for execution without expanding authorization. Queue when no host slot is free and release unstarted optional claims; report unavailable delegation instead of executing inline. Never pass the claim token to the worker.")
     @_envelope
     def graph_task_claim(node_id: str, client: str, session_id: str,
                          interval_seconds: int = 300,
@@ -117,14 +117,14 @@ def attach(mcp, identities) -> None:
                                   expected_revision=expected_revision, manager_actor=who,
                                   confirm_displace=confirm_displace is True)
 
-    @mcp.tool(annotations=WRITE, description="Find your waiting mandatory graph task assignments after reconnecting; does not claim them or start their heartbeat.")
+    @mcp.tool(annotations=WRITE, description="Find your waiting mandatory graph task assignments after reconnecting; does not claim them or start their heartbeat. Launch each task in its own subagent when a host slot is free; leave it queued otherwise.")
     @_envelope
     def graph_task_my_assignments(client: str, session_id: str) -> dict:
         p, who = _context(client, session_id)
         pending = assignments.mine(p.db, who)
         return {"assignments": pending, "count": len(pending)}
 
-    @mcp.tool(annotations=WRITE, description="Page available, unreserved graph tasks whose required capability tags you advertise; an atomic claim is still required before starting work.")
+    @mcp.tool(annotations=WRITE, description="Page available, unreserved graph tasks whose required capability tags you advertise; an atomic claim is still required before starting work. Claim only with capacity to launch a dedicated subagent; discovering or claiming a task does not launch it.")
     @_envelope
     def graph_task_available(client: str, session_id: str, limit: int = 25,
                              before_id: Optional[str] = None) -> dict:
@@ -180,7 +180,7 @@ def attach(mcp, identities) -> None:
         p, who = _context(client, session_id)
         return graph_tasks.release(p.db, "graph-task-release", node_id, claim_token, who)
 
-    @mcp.tool(annotations=WRITE, description="Complete the graph task using your live claim token; the completed graph node persists permanently.")
+    @mcp.tool(annotations=WRITE, description="As coordinator, complete the graph task using your live claim token only after reviewing and integrating its subagent's output against the acceptance criteria. The completed graph node persists permanently.")
     @_envelope
     def graph_task_complete(node_id: str, claim_token: str, client: str,
                             session_id: str) -> dict:

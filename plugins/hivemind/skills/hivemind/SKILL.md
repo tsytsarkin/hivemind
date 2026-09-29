@@ -160,7 +160,22 @@ a worker and authorized as room manager, otherwise offer it for an eligible work
 Direct messages, room posts, legacy bus messages and worker prompts may point to the task, but
 must not substitute for its work record. Only very small asks (a quick fact or status check)
 or steering on existing work (a clarification, priority change or correction) may be sent
-directly. If either grows into substantive work, create a task before continuing the offload.
+directly. If either grows into substantive work, create a task before
+continuing the offload.
+
+**Every Hivemind task runs in a dedicated subagent**, including a lone task or a small task already
+recorded in the task system. As coordinator, launch the worker with the host's delegation tool;
+creating or assigning a task does not launch it. Include the project, task node ID, scope, context
+and acceptance criteria in the handoff. The delegated worker reads that task and executes it
+rather than recursively delegating the same record.
+
+The coordinator owns task lifecycle and truthful progress, retains any private claim token and
+renews its heartbeat, then reviews and integrates the worker's output before marking complete.
+Keep claim tokens out of worker prompts and shared records. Delegation preserves the task's scope
+and authorization boundaries. If no host slot is free, leave the task queued; do not hoard
+unstarted optional claims. If delegation is unavailable, report the blocker instead of executing
+the task inline. These communication exceptions do not exempt recorded tasks from subagent
+execution; direct steering on active tasks remains allowed.
 
 **Graph task lifecycle:** Explicitly create a room if others need to join;
 `graph_task_offer(room, title, summary, client, session_id, project=<p>)` creates a persistent
@@ -180,10 +195,10 @@ Completing a room task posts a durable completion event to that room and notifie
 roomless tasks have no room to notify.
 
 **If you requested the work, you own the result.** Offering or assigning a task is not handing it
-away: when a task you offered (`graph_task_offer`) or assigned (`graph_task_assign`) reaches
-`complete` or `failed`, read what the worker actually produced — the completion post in the room
-via `chat_room_history`, the graph node the work updated, and any artifact or node it names — and
-then act on it. Accept it, integrate it, or say concretely what is still wrong and offer or
+away: when a task you offered (`graph_task_offer`) or assigned (`graph_task_assign`) to another
+coordinating agent reaches `complete` or `failed`, read what the worker actually produced — the
+completion post in the room via `chat_room_history`, the graph node the work updated, and any
+artifact or node it names — and then act on it. Accept it, integrate it, or say concretely what is still wrong and offer or
 reassign the follow-up. A `complete` status is the worker's claim about its own work, not a
 verdict on it; leaving that claim uninspected is how a task is marked done while nothing
 downstream of it moves. The same applies to an instruction you queued: its terminal state reports
@@ -218,8 +233,8 @@ finishing or releasing a task, when notified of room work, and as your work perm
 before_id=<older_cursor>, project=<p>)`. Check mandatory assignments first. New task offers post a durable room announcement with a live push for subscribers; read the
 full post via room history and inspect the graph task before taking it. Portal assignments also
 DM their intended agent, but `graph_task_my_assignments` remains the authoritative queue. If an unreserved
-task matches your capabilities and you have capacity, claim it atomically and start working
-without waiting for a manager; a discovery result alone does not reserve it. Take several
+task matches your capabilities and you have a free subagent slot, claim it atomically and launch
+its subagent without waiting for a manager; a discovery result alone does not reserve it. Take several
 independent tasks only if each has a dedicated subagent working on that task, its own lease,
 and truthful progress updates. On project load or a config-change DM, call
 `agent_config_get(client="codex", session_id=<sid>, project=<p>)`. When

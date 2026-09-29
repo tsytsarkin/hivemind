@@ -5,7 +5,12 @@
 The Commander Console (formerly Orchestrator Console) shows task creation dates and times on
 Tasks and Overview cards. Creation time comes from existing transaction history; this release
 adds no database migration. Updated agent instructions require the task system for offloaded
-work, except very small asks or steering on existing work. Update the server and both agent
+work, except very small asks or steering on existing work. These communication exceptions do
+not exempt recorded tasks from subagent execution. Every Hivemind task must run in a dedicated
+subagent launched through the host's delegation tool. The coordinator owns lifecycle,
+progress and any private claim heartbeat, and reviews and integrates results before completion.
+Tasks queue when host slots are full; unavailable delegation is a blocker, not an inline fallback.
+This is agent guidance, not a server-side worker launcher. Update the server and both agent
 plugins together to pick up the release guidance.
 
 ## Upgrading to 1.5.3
